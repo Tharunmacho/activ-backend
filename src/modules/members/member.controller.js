@@ -1,0 +1,522 @@
+const memberService = require('./member.service');
+const MemberDetails = require('./memberdetails.model');
+const PersonalInfo1 = require('./personalinfo1.model');
+const BusinessInfo = require('./businessinfo.model');
+const MemberFinancialInfo = require('./memberfinancialinfo.model');
+const MemberDeclaration = require('./memberdeclaration.model');
+const MemberAuth = require('../auth/auth.model');
+const ApiResponse = require('../../core/utils/ApiResponse');
+const asyncHandler = require('../../core/utils/asyncHandler');
+const bcrypt = require('bcrypt');
+
+const updateMember = asyncHandler(async(req, res) => {
+    const { password, confirmPassword, currentPassword, email, ...profileData } = req.body;
+    
+    // Get member from "web users" collection
+    const member = await MemberDetails.findById(req.user.userId);
+    
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Member not found', 404));
+    }
+    
+    // Store original email before any updates (needed for finding auth record)
+    const originalEmail = member.email;
+    
+    // Handle password update if new password is provided
+    if (password && password.trim() && confirmPassword && confirmPassword.trim()) {
+        // Get member auth record from "web auth" collection using ORIGINAL email
+        const memberAuth = await MemberAuth.findOne({ email: originalEmail }).select('+password');
+        
+        if (!memberAuth) {
+            return res.status(404).json(ApiResponse.error('Authentication record not found', 404));
+        }
+        
+        // Verify current password ONLY if user already has a password set
+        if (memberAuth.password) {
+            // User already has a password, so current password is required
+            if (!currentPassword || !currentPassword.trim()) {
+                return res.status(400).json(ApiResponse.error('Current password is required to change password', 400));
+            }
+            
+            const isPasswordValid = await memberAuth.comparePassword(currentPassword);
+            if (!isPasswordValid) {
+                return res.status(400).json(ApiResponse.error('Current password is incorrect', 400));
+            }
+        }
+        
+        if (password !== confirmPassword) {
+            return res.status(400).json(ApiResponse.error('Passwords do not match', 400));
+        }
+        
+        if (password.length < 6) {
+            return res.status(400).json(ApiResponse.error('Password must be at least 6 characters', 400));
+        }
+        
+        // Update password in "web auth" collection (used for login)
+        memberAuth.password = password; // The model will hash it automatically
+        await memberAuth.save();
+    }
+    
+    // Handle email update if provided and different
+    if (email && email.trim() && email.toLowerCase() !== originalEmail.toLowerCase()) {
+        const normalizedEmail = email.toLowerCase();
+        
+        // Check if new email is already taken by another user
+        const existingMember = await MemberDetails.findOne({ 
+            email: normalizedEmail,
+            _id: { $ne: req.user.userId }
+        });
+        
+        if (existingMember) {
+            return res.status(400).json(ApiResponse.error('Email already in use', 400));
+        }
+        
+        // Update email in "web users" collection
+        member.email = normalizedEmail;
+        await member.save();
+        
+        // Update email in "web auth" collection using ORIGINAL email to find it
+        const memberAuth = await MemberAuth.findOne({ email: originalEmail });
+        if (memberAuth) {
+            memberAuth.email = normalizedEmail;
+            await memberAuth.save();
+        }
+    }
+    
+    // Save personal details to PersonalInfo1 collection (excluding email and password)
+    let personalInfo = await PersonalInfo1.findOne({ userId: req.user.userId });
+    
+    if (personalInfo) {
+        // Update existing record
+        Object.assign(personalInfo, {
+            name: profileData.fullName || personalInfo.name,
+            phoneNumber: profileData.phoneNumber || personalInfo.phoneNumber,
+            state: profileData.state || personalInfo.state,
+            district: profileData.district || personalInfo.district,
+            block: profileData.block || personalInfo.block,
+            city: profileData.city || personalInfo.city,
+            religion: profileData.religion || personalInfo.religion,
+            socialCategory: profileData.socialCategory || personalInfo.socialCategory,
+            isLocked: true, // Lock the form after save
+            updatedAt: new Date()
+        });
+    } else {
+        // Create new record
+        personalInfo = new PersonalInfo1({
+            userId: req.user.userId,
+            name: profileData.fullName,
+            phoneNumber: profileData.phoneNumber,
+            state: profileData.state,
+            district: profileData.district,
+            block: profileData.block,
+            city: profileData.city,
+            religion: profileData.religion,
+            socialCategory: profileData.socialCategory,
+            isLocked: true // Lock the form after first save
+        });
+    }
+    
+    await personalInfo.save();
+
+    // Mirror the personal details onto the member's own record in "web users".
+    // Previously only PersonalInfo1 was written, so a member could complete the
+    // whole profile form and their canonical record would still hold the values
+    // captured at registration — which is what the admin dashboards, the
+    // geofenced block/district/state queries and getMyProfile all read.
+    // `socialCategory` is enum-constrained on this model; an unrecognised value
+    // would throw on save and turn a profile update into a 500.
+    const SOCIAL_CATEGORIES = ['Christian ST', 'Christian SC', 'ST', 'SC', 'Others', ''];
+    const safeSocialCategory = SOCIAL_CATEGORIES.includes(profileData.socialCategory)
+        ? profileData.socialCategory
+        : undefined;
+
+    const coreUpdates = {
+        fullName: profileData.fullName,
+        phoneNumber: profileData.phoneNumber,
+        state: profileData.state,
+        district: profileData.district,
+        block: profileData.block,
+        city: profileData.city,
+        religion: profileData.religion,
+        socialCategory: safeSocialCategory,
+        profilePhoto: profileData.profilePhoto
+    };
+
+    let coreChanged = false;
+    Object.entries(coreUpdates).forEach(([key, value]) => {
+        // Only overwrite with a real value — never blank out existing data.
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+            member[key] = value;
+            coreChanged = true;
+        }
+    });
+
+    if (coreChanged) {
+        member.profileCompleted = true;
+        await member.save();
+    }
+
+    // Dynamically sync updated profile details & email to Application collection in MongoDB
+    try {
+        const Application = require('../applications/application.model');
+        const searchEmail = (member.email || originalEmail || '').toLowerCase();
+        await Application.updateMany(
+            { $or: [{ userId: req.user.userId }, { email: searchEmail }, { email: (originalEmail || '').toLowerCase() }] },
+            {
+                $set: {
+                    ...(profileData.fullName ? { fullName: profileData.fullName } : {}),
+                    ...(member.email ? { email: member.email } : {}),
+                    ...(profileData.phoneNumber ? { phone: profileData.phoneNumber } : {}),
+                    ...(profileData.block ? { block: profileData.block } : {}),
+                    ...(profileData.district ? { district: profileData.district } : {}),
+                    ...(profileData.state ? { state: profileData.state } : {}),
+                    'data.personalDetails.fullName': profileData.fullName || member.fullName,
+                    'data.personalDetails.email': member.email || searchEmail,
+                    'data.personalDetails.phone': profileData.phoneNumber || member.phoneNumber,
+                    'data.personalDetails.phoneNumber': profileData.phoneNumber || member.phoneNumber,
+                    'data.personalDetails.block': profileData.block || member.block,
+                    'data.personalDetails.district': profileData.district || member.district,
+                    'data.personalDetails.state': profileData.state || member.state,
+                    'data.personalDetails.city': profileData.city || member.city,
+                    'data.personalDetails.religion': profileData.religion || member.religion,
+                    'data.personalDetails.socialCategory': profileData.socialCategory || member.socialCategory
+                }
+            }
+        );
+    } catch (syncErr) {
+        console.error('Error syncing member updates to Application collection:', syncErr);
+    }
+
+    // Save business information to BusinessInfo collection if provided
+    if (profileData.doingBusiness !== undefined) {
+        let businessInfo = await BusinessInfo.findOne({ userId: req.user.userId });
+        
+        if (businessInfo) {
+            // Update existing business record
+            Object.assign(businessInfo, {
+                doingBusiness: profileData.doingBusiness,
+                registrationType: profileData.doingBusiness ? 'business' : 'aspirant',
+                organizationName: profileData.organizationName || businessInfo.organizationName,
+                constitutionType: profileData.constitutionType || businessInfo.constitutionType,
+                businessTypes: profileData.businessTypes || businessInfo.businessTypes,
+                businessActivities: profileData.businessActivities || businessInfo.businessActivities,
+                businessCommencementYear: profileData.businessCommencementYear || businessInfo.businessCommencementYear,
+                numberOfEmployees: profileData.numberOfEmployees || businessInfo.numberOfEmployees,
+                memberOfOtherChamber: profileData.memberOfOtherChamber !== undefined ? profileData.memberOfOtherChamber : businessInfo.memberOfOtherChamber,
+                otherChamber: profileData.otherChamber || businessInfo.otherChamber,
+                govtOrganizations: profileData.govtOrganizations || businessInfo.govtOrganizations,
+                isLocked: true,
+                submittedAt: profileData.submittedAt || businessInfo.submittedAt,
+                updatedAt: new Date()
+            });
+        } else {
+            // Create new business record
+            businessInfo = new BusinessInfo({
+                userId: req.user.userId,
+                doingBusiness: profileData.doingBusiness,
+                registrationType: profileData.doingBusiness ? 'business' : 'aspirant',
+                organizationName: profileData.organizationName,
+                constitutionType: profileData.constitutionType,
+                businessTypes: profileData.businessTypes,
+                businessActivities: profileData.businessActivities,
+                businessCommencementYear: profileData.businessCommencementYear,
+                numberOfEmployees: profileData.numberOfEmployees,
+                memberOfOtherChamber: profileData.memberOfOtherChamber,
+                otherChamber: profileData.otherChamber,
+                govtOrganizations: profileData.govtOrganizations,
+                isLocked: true,
+                submittedAt: profileData.submittedAt
+            });
+        }
+        
+        await businessInfo.save();
+    }
+    
+    // Save financial information to MemberFinancialInfo collection if provided
+    if (profileData.panNumber !== undefined || profileData.gstNumber !== undefined || 
+        profileData.udyamNumber !== undefined || profileData.filedITR !== undefined || 
+        profileData.turnoverRange !== undefined || profileData.govtSchemeBenefit !== undefined) {
+        
+        let financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId });
+        
+        if (financialInfo) {
+            // Update existing financial record
+            Object.assign(financialInfo, {
+                panNumber: profileData.panNumber || financialInfo.panNumber,
+                gstNumber: profileData.gstNumber || financialInfo.gstNumber,
+                udyamNumber: profileData.udyamNumber || financialInfo.udyamNumber,
+                filedITR: profileData.filedITR !== undefined ? profileData.filedITR : financialInfo.filedITR,
+                turnoverRange: profileData.turnoverRange || financialInfo.turnoverRange,
+                govtSchemeBenefit: profileData.govtSchemeBenefit !== undefined ? profileData.govtSchemeBenefit : financialInfo.govtSchemeBenefit,
+                status: 'submitted',
+                updatedAt: new Date()
+            });
+        } else {
+            // Create new financial record
+            financialInfo = new MemberFinancialInfo({
+                memberId: req.user.userId,
+                panNumber: profileData.panNumber,
+                gstNumber: profileData.gstNumber,
+                udyamNumber: profileData.udyamNumber,
+                filedITR: profileData.filedITR,
+                turnoverRange: profileData.turnoverRange,
+                govtSchemeBenefit: profileData.govtSchemeBenefit,
+                status: 'submitted'
+            });
+        }
+        
+        await financialInfo.save();
+    }
+    
+    // Save declaration information to MemberDeclaration collection if provided
+    if (profileData.sisterConcerns !== undefined || profileData.companyNames !== undefined || 
+        profileData.agreeToDeclaration !== undefined || profileData.agreeToTerms !== undefined) {
+        
+        // Match on either key: rows written before the schema was aligned carry
+        // only `memberId`, while the collection's unique index is on `userId`.
+        let declarationInfo = await MemberDeclaration.findOne({
+            $or: [{ userId: req.user.userId }, { memberId: req.user.userId }]
+        });
+
+        // Convert sisterConcerns to number
+        const sisterConcernsNumber = profileData.sisterConcerns ? 
+            (typeof profileData.sisterConcerns === 'string' ? parseInt(profileData.sisterConcerns) || 0 : profileData.sisterConcerns) : 
+            0;
+        
+        // Convert companyNames string to array if needed
+        const companyNamesArray = profileData.companyNames ? 
+            (typeof profileData.companyNames === 'string' ? 
+                profileData.companyNames.split(',').map(c => c.trim()).filter(c => c) : 
+                profileData.companyNames) : 
+            [];
+        
+        // Handle both agreeToDeclaration and agreeToTerms (frontend uses agreeToTerms)
+        const agreed = profileData.agreeToDeclaration || profileData.agreeToTerms || false;
+        
+        if (declarationInfo) {
+            // Update existing declaration record
+            Object.assign(declarationInfo, {
+                userId: declarationInfo.userId || req.user.userId,
+                memberId: declarationInfo.memberId || req.user.userId,
+                sisterConcerns: sisterConcernsNumber,
+                companyNames: companyNamesArray,
+                agreeToDeclaration: agreed,
+                status: 'pending',
+                updatedAt: new Date()
+            });
+        } else {
+            // Create new declaration record
+            declarationInfo = new MemberDeclaration({
+                userId: req.user.userId,
+                memberId: req.user.userId,
+                sisterConcerns: sisterConcernsNumber,
+                companyNames: companyNamesArray,
+                agreeToDeclaration: agreed,
+                status: 'pending'
+            });
+        }
+        
+        await declarationInfo.save();
+    }
+    
+    // Return combined data from both collections
+    const responseData = {
+        fullName: personalInfo.name,
+        phoneNumber: personalInfo.phoneNumber,
+        state: personalInfo.state,
+        district: personalInfo.district,
+        block: personalInfo.block,
+        city: personalInfo.city,
+        religion: personalInfo.religion,
+        socialCategory: personalInfo.socialCategory,
+        email: member.email,
+        isLocked: personalInfo.isLocked
+    };
+    
+    res.json(ApiResponse.success(responseData, 'Profile updated successfully'));
+});
+
+const getMyProfile = asyncHandler(async(req, res) => {
+    // Get personal details from PersonalInfo1 collection
+    const personalInfo = await PersonalInfo1.findOne({ userId: req.user.userId });
+    
+    // Get member from web users collection
+    const member = await MemberDetails.findById(req.user.userId).select('-password');
+    
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Profile not found', 404));
+    }
+    
+    // If PersonalInfo1 has data, use it; otherwise fallback to web users data
+    const profileData = personalInfo ? {
+        fullName: personalInfo.name,
+        phoneNumber: personalInfo.phoneNumber,
+        state: personalInfo.state,
+        district: personalInfo.district,
+        block: personalInfo.block,
+        city: personalInfo.city,
+        religion: personalInfo.religion,
+        socialCategory: personalInfo.socialCategory,
+        email: member.email,
+        profilePhoto: member.profilePhoto || null,
+        membershipStatus: member.membershipStatus || 'pending',
+        membershipType: member.membershipType || 'none',
+        approvedAt: member.approvedAt || member.membershipActivatedAt || null,
+        isLocked: personalInfo.isLocked || false
+    } : {
+        fullName: member.fullName,
+        phoneNumber: member.phoneNumber,
+        state: member.state,
+        district: member.district,
+        block: member.block,
+        city: member.city,
+        religion: member.religion,
+        socialCategory: member.socialCategory,
+        email: member.email,
+        profilePhoto: member.profilePhoto || null,
+        membershipStatus: member.membershipStatus || 'pending',
+        membershipType: member.membershipType || 'none',
+        approvedAt: member.approvedAt || member.membershipActivatedAt || null,
+        isLocked: false
+    };
+    
+    // Disable caching to ensure fresh data
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
+    res.json(ApiResponse.success(profileData));
+});
+
+const getBusinessInfo = asyncHandler(async(req, res) => {
+    // Get business info from BusinessInfo collection
+    const businessInfo = await BusinessInfo.findOne({ userId: req.user.userId });
+    
+    // Get member from web users collection
+    const member = await MemberDetails.findById(req.user.userId);
+    
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Profile not found', 404));
+    }
+    
+    // Return business info or empty object if not found
+    const businessData = businessInfo ? {
+        doingBusiness: businessInfo.doingBusiness,
+        registrationType: businessInfo.registrationType,
+        organizationName: businessInfo.organizationName,
+        constitutionType: businessInfo.constitutionType,
+        businessTypes: businessInfo.businessTypes,
+        businessActivities: businessInfo.businessActivities,
+        businessCommencementYear: businessInfo.businessCommencementYear,
+        numberOfEmployees: businessInfo.numberOfEmployees,
+        memberOfOtherChamber: businessInfo.memberOfOtherChamber,
+        otherChamber: businessInfo.otherChamber,
+        govtOrganizations: businessInfo.govtOrganizations,
+        isLocked: businessInfo.isLocked || false,
+        submittedAt: businessInfo.submittedAt
+    } : {
+        doingBusiness: null,
+        registrationType: 'aspirant',
+        organizationName: '',
+        constitutionType: '',
+        businessTypes: [],
+        businessActivities: '',
+        businessCommencementYear: '',
+        numberOfEmployees: '',
+        memberOfOtherChamber: null,
+        otherChamber: '',
+        govtOrganizations: [],
+        isLocked: false
+    };
+    
+    // Disable caching
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
+    res.json(ApiResponse.success(businessData));
+});
+
+const getFinancialInfo = asyncHandler(async(req, res) => {
+    // Get financial info from MemberFinancialInfo collection
+    const financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId });
+    
+    // Get member from web users collection
+    const member = await MemberDetails.findById(req.user.userId);
+    
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Profile not found', 404));
+    }
+    
+    // Return financial info or empty object if not found
+    const financialData = financialInfo ? {
+        panNumber: financialInfo.panNumber,
+        gstNumber: financialInfo.gstNumber,
+        udyamNumber: financialInfo.udyamNumber,
+        filedITR: financialInfo.filedITR,
+        turnoverRange: financialInfo.turnoverRange,
+        govtSchemeBenefit: financialInfo.govtSchemeBenefit,
+        status: financialInfo.status
+    } : {
+        panNumber: '',
+        gstNumber: '',
+        udyamNumber: '',
+        filedITR: false,
+        turnoverRange: '',
+        govtSchemeBenefit: false,
+        status: 'draft'
+    };
+    
+    // Disable caching
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
+    res.json(ApiResponse.success(financialData));
+});
+
+const getDeclarationInfo = asyncHandler(async(req, res) => {
+    // Get declaration info from MemberDeclaration collection
+    const declarationInfo = await MemberDeclaration.findOne({
+        $or: [{ userId: req.user.userId }, { memberId: req.user.userId }]
+    });
+    
+    // Get member from web users collection
+    const member = await MemberDetails.findById(req.user.userId);
+    
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Profile not found', 404));
+    }
+    
+    // Return declaration info or empty object if not found
+    const declarationData = declarationInfo ? {
+        sisterConcerns: declarationInfo.sisterConcerns,
+        companyNames: declarationInfo.companyNames,
+        agreeToDeclaration: declarationInfo.agreeToDeclaration,
+        status: declarationInfo.status,
+        reviewNotes: declarationInfo.reviewNotes,
+        reviewedAt: declarationInfo.reviewedAt
+    } : {
+        sisterConcerns: 0,
+        companyNames: [],
+        agreeToDeclaration: false,
+        status: 'pending',
+        reviewNotes: '',
+        reviewedAt: null
+    };
+    
+    // Disable caching
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
+    res.json(ApiResponse.success(declarationData));
+});
+
+const getMembers = asyncHandler(async(req, res) => {
+    const { page = 1, limit = 20, ...filter } = req.query;
+    const result = await memberService.getMembers(filter, parseInt(page), parseInt(limit));
+    res.json(ApiResponse.success(result));
+});
+
+module.exports = { updateMember, getMyProfile, getBusinessInfo, getFinancialInfo, getDeclarationInfo, getMembers };
