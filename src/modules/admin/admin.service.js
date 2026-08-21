@@ -116,14 +116,14 @@ const buildAttribution = (application, stage, level, scope = {}) => {
  */
 const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOCK, scope = {}) => {
     const data = application.data || {};
-    const personal = data.personalDetails || data.personal || {};
-    const business = data.businessInfo || data.business || {};
-    const financial = data.financialInfo || data.financial || {};
-    const declaration = data.declaration || {};
+    const personal = data.personalDetails || data.personal || data;
+    const business = data.businessInfo || data.business || data;
+    const financial = data.financialInfo || data.financial || data;
+    const declaration = data.declaration || data;
 
     const stage = classifyForLevel(application, level);
     const id = application._id.toString();
-    const doingBusiness = business.doingBusiness === true || !!business.organizationName;
+    const doingBusiness = business.doingBusiness === true || data.doingBusiness === true || !!business.organizationName || !!data.organizationName;
 
     // Real values only. Every field below resolves from the application, the
     // submitted form data, or the member profile — and stays empty when none of
@@ -141,12 +141,19 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
     const memberCode = firstOf(application.memberCode, member.memberCode);
 
     // Derived from what the applicant actually declared, not guessed.
-    let derivedRole = '';
-    if (business.doingBusiness === true || business.organizationName) {
+    const isAspirantUser =
+        (business.doingBusiness === false || data.doingBusiness === false) &&
+        !doingBusiness &&
+        (data.registrationType === 'aspirant' || data.memberType === 'aspirant' || application.registrationType === 'aspirant' || application.memberType === 'aspirant');
+
+    let derivedRole = 'Member';
+    if (isAspirantUser) {
+        derivedRole = 'Aspirant';
+    } else if (doingBusiness) {
         derivedRole = 'Business Member';
-    } else if (business.doingBusiness === false) {
-        derivedRole = 'Aspirant Member';
     }
+
+    const finalRole = isAspirantUser ? 'Aspirant' : (derivedRole !== 'Member' ? derivedRole : firstOf(application.role, member.role, 'Business Member'));
 
     return {
         id,
@@ -156,7 +163,8 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         fullName: firstOf(application.fullName, personal.fullName, member.fullName),
         email: firstOf(application.email, personal.email, member.email),
         phone: firstOf(application.phone, personal.phoneNumber, personal.phone, member.phoneNumber),
-        role: firstOf(application.role, personal.role, member.role, derivedRole),
+        role: finalRole,
+        doingBusiness,
         gender: firstOf(personal.gender, member.gender),
         block: blockName,
         district: firstOf(application.district, personal.district, member.district),
@@ -199,7 +207,7 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         },
         businessInfo: {
             doingBusiness,
-            organizationName: firstOf(business.organizationName),
+            organizationName: firstOf(business.organizationName, business.businessName),
             constitutionType: firstOf(business.constitutionType),
             businessTypes: business.businessTypes || [],
             businessActivities: firstOf(business.businessActivities),
@@ -214,13 +222,13 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
             gstNumber: firstOf(financial.gstNumber),
             udyamNumber: firstOf(financial.udyamNumber),
             itrFiled: firstOf(financial.itrFiled, financial.filedITR),
-            turnoverRange: firstOf(financial.turnoverRange),
-            govtSchemeBenefit: financial.govtSchemeBenefit
+            turnoverRange: firstOf(financial.turnoverRange, financial.lastYearTurnover),
+            govtSchemeBenefit: financial.govtSchemeBenefit || financial.govtSchemes
         },
         declaration: {
             sisterConcerns: firstOf(declaration.sisterConcerns),
             companyNames: declaration.companyNames || [],
-            agreeToDeclaration: declaration.agreeToDeclaration
+            agreeToDeclaration: declaration.agreeToDeclaration || declaration.agreeToTerms
         }
     };
 };

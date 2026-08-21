@@ -59,6 +59,17 @@ class ApplicationService {
             userDetails = await MemberAuth.findById(userId);
         }
 
+        const appData = applicationData.data || applicationData;
+        const bizInfo = appData.businessInfo || {};
+        const isAspirant =
+            bizInfo.doingBusiness === false ||
+            appData.registrationType === 'aspirant' ||
+            appData.memberType === 'aspirant' ||
+            applicationData.registrationType === 'aspirant' ||
+            applicationData.memberType === 'aspirant';
+
+        const derivedRole = isAspirant ? 'aspirant' : (bizInfo.doingBusiness ? 'business' : 'member');
+
         const payload = {
             fullName: applicationData.fullName || (userDetails && (userDetails.fullName || userDetails.name)) || 'Applicant',
             email: applicationData.email || (userDetails && userDetails.email) || 'applicant@activ.org',
@@ -66,7 +77,10 @@ class ApplicationService {
             state: applicationData.state || (userDetails && userDetails.state) || 'Tamil Nadu',
             district: applicationData.district || (userDetails && userDetails.district) || 'Chennai',
             block: applicationData.block || (userDetails && userDetails.block) || 'Chennai North',
-            data: applicationData.data || applicationData,
+            data: appData,
+            role: derivedRole,
+            memberType: isAspirant ? 'aspirant' : 'business',
+            registrationType: isAspirant ? 'aspirant' : 'business',
             ...applicationData
         };
 
@@ -77,6 +91,24 @@ class ApplicationService {
         });
 
         await application.save();
+
+        // Update role in MemberAuth (users) & MemberDetails (members) in DB
+        try {
+            await MemberAuth.findByIdAndUpdate(userId, {
+                role: derivedRole,
+                memberType: isAspirant ? 'aspirant' : 'business',
+                registrationType: isAspirant ? 'aspirant' : 'business'
+            });
+            if (userDetails && userDetails.save) {
+                userDetails.role = derivedRole;
+                userDetails.memberType = isAspirant ? 'aspirant' : 'business';
+                userDetails.registrationType = isAspirant ? 'aspirant' : 'business';
+                await userDetails.save();
+            }
+        } catch (updateErr) {
+            logger.warn('Non-fatal error updating user role in DB:', updateErr);
+        }
+
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(userId));
 
         logger.info('Application submitted', {
@@ -443,10 +475,10 @@ class ApplicationService {
      */
     async createMemberProfile(application, approvedByAdminId, session = null, track = null) {
         const formData = application.data || {};
-        const personalDetails = formData.personalDetails || {};
-        const businessInfo = formData.businessInfo || {};
-        const financialInfo = formData.financialInfo || {};
-        const declarationData = formData.declaration || {};
+        const personalDetails = formData.personalDetails || formData.personal || formData;
+        const businessInfo = formData.businessInfo || formData.business || formData;
+        const financialInfo = formData.financialInfo || formData.financial || formData;
+        const declarationData = formData.declaration || formData;
 
         // `socialCategory` is enum-constrained on MemberDetails but arrives as
         // free text from legacy records and imports. An unrecognised value must
@@ -571,9 +603,9 @@ class ApplicationService {
                     panNumber: financialInfo.panNumber,
                     gstNumber: financialInfo.gstNumber,
                     udyamNumber: financialInfo.udyamNumber,
-                    filedITR: financialInfo.itrFiled === true,
-                    turnoverRange: financialInfo.turnoverRange,
-                    govtSchemeBenefit: financialInfo.govtSchemeBenefit === true,
+                    filedITR: financialInfo.itrFiled === true || financialInfo.filedITR === true,
+                    turnoverRange: financialInfo.turnoverRange || financialInfo.lastYearTurnover,
+                    govtSchemeBenefit: financialInfo.govtSchemeBenefit === true || (Array.isArray(financialInfo.govtSchemes) && financialInfo.govtSchemes.length > 0),
                     status: 'verified'
                 }
             );
@@ -587,8 +619,8 @@ class ApplicationService {
                     userId: application.userId,
                     memberId: application.userId,
                     sisterConcerns: Number(declarationData.sisterConcerns || 0),
-                    companyNames: declarationData.companyNames || [],
-                    agreeToDeclaration: declarationData.agreeToDeclaration === true,
+                    companyNames: Array.isArray(declarationData.companyNames) ? declarationData.companyNames : (declarationData.companyNames ? [declarationData.companyNames] : []),
+                    agreeToDeclaration: declarationData.agreeToDeclaration === true || declarationData.agreeToTerms === true,
                     status: 'approved',
                     reviewedBy: approvedByAdminId,
                     reviewerModel: 'StateAdmin',

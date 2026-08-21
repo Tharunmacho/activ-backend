@@ -519,4 +519,36 @@ const getMembers = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(result));
 });
 
-module.exports = { updateMember, getMyProfile, getBusinessInfo, getFinancialInfo, getDeclarationInfo, getMembers };
+const uploadProfilePhoto = asyncHandler(async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json(ApiResponse.error('No image file uploaded', 400));
+    }
+
+    // req.file.filename will have the generated unique name
+    // The relative URL we will store in the DB (can be adjusted based on domain)
+    const profilePhotoUrl = `/uploads/${req.file.filename}`;
+
+    const member = await MemberDetails.findById(req.user.userId);
+    if (!member) {
+        return res.status(404).json(ApiResponse.error('Member not found', 404));
+    }
+
+    // Update the profile photo
+    member.profilePhoto = profilePhotoUrl;
+    await member.save();
+
+    // Also try to update the application collection just in case
+    try {
+        const Application = require('../applications/application.model');
+        await Application.updateMany(
+            { userId: req.user.userId },
+            { $set: { 'data.personalDetails.profilePhoto': profilePhotoUrl, profilePhoto: profilePhotoUrl } }
+        );
+    } catch (err) {
+        console.error('Error syncing photo to application:', err);
+    }
+
+    res.json(ApiResponse.success({ profilePhoto: profilePhotoUrl }, 'Profile photo uploaded successfully'));
+});
+
+module.exports = { updateMember, getMyProfile, getBusinessInfo, getFinancialInfo, getDeclarationInfo, getMembers, uploadProfilePhoto };

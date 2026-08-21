@@ -2,6 +2,7 @@ const express = require('express');
 const controller = require('./member.controller');
 const validators = require('./member.validators');
 const { verifyToken } = require('../../core/middleware/auth');
+const upload = require('../../core/middleware/upload');
 
 const router = express.Router();
 
@@ -10,6 +11,7 @@ router.get('/business-info', verifyToken, controller.getBusinessInfo);
 router.get('/financial-info', verifyToken, controller.getFinancialInfo);
 router.get('/declaration-info', verifyToken, controller.getDeclarationInfo);
 router.put('/profile', verifyToken, validators.updateMemberValidator, controller.updateMember);
+router.post('/profile-photo', verifyToken, upload.single('profilePhoto'), controller.uploadProfilePhoto);
 router.get('/', verifyToken, controller.getMembers);
 
 module.exports = router;

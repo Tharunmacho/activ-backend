@@ -23,7 +23,7 @@ router.get('/analytics', requireRole('block_admin', 'district_admin', 'state_adm
 router.post('/reports/generate', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.generateReport);
 
 // UserManagementScreen action buttons (activate | suspend | delete)
-router.post('/users/:id/:action', requireRole('super_admin'), controller.userAction);
+router.post('/users/:id/:action', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.userAction);
 
 // Profile update
 router.put('/profile', controller.updateAdminProfile);

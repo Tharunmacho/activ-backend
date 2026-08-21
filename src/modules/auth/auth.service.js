@@ -58,13 +58,13 @@ class AuthService {
         const tokens = this.generateTokens({ _id: memberDetails._id, email: memberDetails.email, role: 'member' });
 
         // Cache user data
-        await cacheClient.set(
+        console.log('Setting cache...'); await cacheClient.set(
             CACHE_KEYS.USER(memberDetails._id),
             memberDetails.toJSON(),
             CACHE_TTL.HOUR
         );
 
-        return {
+        console.log('Returning result...'); return {
             user: {
                 id: memberDetails._id,
                 memberId: memberDetails._id,
@@ -76,7 +76,7 @@ class AuthService {
         };
     }
 
-    async login(email, password) {
+    async login(email, password) { console.log('Starting login for:', email);
         // Normalize email
         const normalizedEmail = email.toLowerCase().trim();
 
@@ -90,7 +90,7 @@ class AuthService {
             }
 
             // Verify password
-            const isPasswordValid = await memberAuth.comparePassword(password);
+            console.log('Comparing password...'); const isPasswordValid = await memberAuth.comparePassword(password); console.log('Password comparison done.');
             if (!isPasswordValid) {
                 throw ApiError.unauthorized('Invalid credentials');
             }
@@ -111,13 +111,13 @@ class AuthService {
                     state: memberDetails.state
                 });
 
-                await cacheClient.set(
+                console.log('Setting cache...'); await cacheClient.set(
                     CACHE_KEYS.USER(memberDetails._id),
                     memberDetails.toJSON(),
                     CACHE_TTL.HOUR
                 );
 
-                return {
+                console.log('Returning result...'); return {
                     user: {
                         id: memberDetails._id,
                         memberId: memberDetails._id,
@@ -209,13 +209,13 @@ class AuthService {
                 block: adminUser.block || 'Ariyalur'
             };
 
-            await cacheClient.set(
+            console.log('Setting cache...'); await cacheClient.set(
                 CACHE_KEYS.USER(adminUser._id.toString()),
                 adminObj,
                 CACHE_TTL.HOUR
             );
 
-            return {
+            console.log('Returning result...'); return {
                 user: adminObj,
                 memberDetails: adminObj,
                 token: tokens.accessToken,
@@ -273,7 +273,7 @@ class AuthService {
         };
 
         // Cache the result
-        await cacheClient.set(
+        console.log('Setting cache...'); await cacheClient.set(
             CACHE_KEYS.USER(userId),
             result,
             CACHE_TTL.HOUR
@@ -323,7 +323,7 @@ class AuthService {
             config.jwt.refreshSecret, { expiresIn: config.jwt.refreshExpiresIn }
         );
 
-        return {
+        console.log('Returning result...'); return {
             accessToken,
             refreshToken
         };
