@@ -35,8 +35,8 @@ const { sanitizeHtml } = require('./richText');
 const EMPTY_MEDIA = { url: '', type: 'image', alt: '', fit: 'cover', position: 'center' };
 
 const EMPTY_SITE = {
-    brand: { logo: { ...EMPTY_MEDIA }, name: '', fullName: '', tagline: '' },
-    header: { navLinks: [], ctaLabel: '', ctaHref: '' },
+    brand: { logo: { ...EMPTY_MEDIA }, fullName: '', tagline: '' },
+    header: { navLinks: [], ctaLabel: '', ctaHref: '', background: '#ffffff', textColor: '#1c2e68' },
     footer: {
         addressLines: [], linkColumns: [], contactHeading: '', phones: [], email: '',
         socials: [], copyright: '', legalLinks: [], note: '',
@@ -95,6 +95,12 @@ const EMPTY_CONTACT = {
 const actorOf = (user = {}) => ({ email: user.email || '', at: new Date() });
 
 const str = (value) => String(value ?? '').trim();
+
+/** `#rgb` or `#rrggbb`, case-insensitive. Anything else yields the fallback. */
+const hexColor = (value, fallback) => {
+    const raw = String(value || '').trim();
+    return /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw) ? raw.toLowerCase() : fallback;
+};
 
 /** An icon the renderer knows, or the given fallback. */
 const icon = (value, fallback = 'star') => (ICON_NAMES.includes(str(value)) ? str(value) : fallback);
@@ -219,14 +225,24 @@ class CmsService {
      * Merged per block for the same reason the home page is: the CMS screen has
      * three save buttons and saving the footer must not blank the nav.
      */
+    /**
+     * A hex colour, or the fallback.
+     *
+     * These values are interpolated into an inline `style`, so an unchecked
+     * string is a place for arbitrary CSS to be injected by anyone who can edit
+     * site settings. Accepting only `#rgb` / `#rrggbb` makes that impossible
+     * rather than merely unlikely.
+     */
     async updateSiteSettings(payload = {}, user = {}) {
         const set = { editedBy: actorOf(user) };
 
         if (payload.brand) {
             const b = payload.brand;
+            // `name` was accepted here and rendered nowhere. Dropped rather than
+            // kept, so nothing asks an editor to fill in a field that has no
+            // effect on the site.
             set.brand = {
                 logo: cleanMedia(b.logo),
-                name: str(b.name),
                 fullName: str(b.fullName),
                 tagline: str(b.tagline),
             };
@@ -238,6 +254,11 @@ class CmsService {
                 navLinks: cleanLinks(h.navLinks),
                 ctaLabel: str(h.ctaLabel),
                 ctaHref: str(h.ctaHref),
+                // Validated, because these are written straight into a style
+                // attribute. Anything that is not a plain hex colour falls back
+                // to the default rather than reaching the page.
+                background: hexColor(h.background, '#ffffff'),
+                textColor: hexColor(h.textColor, '#1c2e68'),
             };
         }
 

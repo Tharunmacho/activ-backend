@@ -311,6 +311,18 @@ const diff = (a, b) => {
     if (memberIds.length) await MemberDetails.deleteMany({ _id: { $in: memberIds } });
     await Application.deleteMany({ applicationId: new RegExp(`^PARITY-${RUN}-`) });
 
+    // Sweep by the run marker as well as by recorded id.
+    //
+    // Only the MemberDetails rows produced by a *final approval* were recorded
+    // above; the applicant accounts registered on the way in were not, so
+    // nothing removed them. Thirty-one accumulated before this was noticed,
+    // because the assertion below counts applications and those were always
+    // cleaned. `@parity.local` is reserved (RFC 6762) and cannot be a real
+    // member, so matching on it is safe.
+    const MARKER = new RegExp(`(^|-)${RUN}(-|@)`);
+    await MemberDetails.deleteMany({ email: MARKER });
+    await Application.deleteMany({ email: MARKER });
+
     const realCountAfter = await Application.countDocuments({});
     const clean = realCountBefore === realCountAfter;
     if (!clean) failures++;

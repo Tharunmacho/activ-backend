@@ -42,6 +42,34 @@ const applicationSchema = new mongoose.Schema({
         trim: true,
         index: true
     },
+    /*
+     * What kind of membership this is.
+     *
+     * `applicationService.createApplication` has always set all three of these
+     * on the document it saves, and none of them was declared — so Mongoose
+     * strict mode dropped every one, silently, on every application ever
+     * created. `buildApplicant` reads `application.registrationType` and
+     * `application.memberType` when deciding whether an applicant is an
+     * aspirant; both were permanently `undefined`, and the decision fell
+     * through to the copies inside `data`, which survive only because `data`
+     * is a Mixed path that strict mode does not police.
+     */
+    memberType: {
+        type: String,
+        enum: ['aspirant', 'business'],
+        trim: true
+    },
+    registrationType: {
+        type: String,
+        enum: ['aspirant', 'business'],
+        trim: true
+    },
+    /** The role the applicant is granted on approval. */
+    role: {
+        type: String,
+        trim: true
+    },
+
     status: {
         type: String,
         enum: ['PENDING', 'Pending-Block', 'Pending-District', 'Pending-State', 'Approved', 'Rejected'],

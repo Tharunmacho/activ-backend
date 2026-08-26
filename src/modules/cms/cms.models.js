@@ -93,11 +93,19 @@ const statItem = () => ({
 const siteSettingsSchema = new mongoose.Schema({
     key: singletonKey,
 
+    /*
+     * The mark and wording. Shared, because the header and the footer show the
+     * same organisation — one logo, edited once.
+     *
+     * `name` (a short form) used to sit here and was rendered by nothing: not
+     * the header, not the footer, not a single page. It was a field the CMS
+     * asked an editor to fill in and then discarded, so it is gone.
+     */
     brand: {
         logo: media(),
-        name: text(),
         /** The long-form lockup beside the mark, e.g. the full expansion. */
         fullName: text(),
+        /** Footer only, under the logo. */
         tagline: text(),
     },
 
@@ -105,6 +113,15 @@ const siteSettingsSchema = new mongoose.Schema({
         navLinks: [link()],
         ctaLabel: text(),
         ctaHref: text(),
+        /*
+         * The bar's own colours.
+         *
+         * Hardcoded in `HeaderSection` as `bg-white` with `#1c2e68` text, so
+         * changing them meant a code change and a deploy — which is the one
+         * thing a CMS exists to avoid. Stored as hex and applied inline.
+         */
+        background: text('#ffffff'),
+        textColor: text('#1c2e68'),
     },
 
     footer: {

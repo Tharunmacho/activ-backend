@@ -94,6 +94,39 @@ const memberDetailsSchema = new mongoose.Schema({
     membershipActivatedAt: {
         type: Date
     },
+    /*
+     * What paid for the membership.
+     *
+     * `POST /payment/complete` has always written both of these, and neither
+     * was declared — so Mongoose strict mode dropped them on every payment and
+     * no record survived of which transaction bought which membership. The
+     * write reported success either way, which is why it went unnoticed: the
+     * response even echoes the updated document, and the two fields are simply
+     * absent from it.
+     */
+    paymentId: {
+        type: String,
+        trim: true
+    },
+    lastPaymentDate: {
+        type: Date
+    },
+    /*
+     * Dropped in the same way, by the same mechanism.
+     *
+     * `processPaymentWebhook` and `renewMembership` both write these two, and
+     * neither was declared. `membershipExpiresAt` is the one that matters:
+     * `renewMembership` even READS it back to extend from the current expiry,
+     * so every renewal extended from today instead — a member renewing early
+     * silently lost the time they had left.
+     */
+    membershipExpiresAt: {
+        type: Date
+    },
+    paymentAmount: {
+        type: Number,
+        min: 0
+    },
     role: {
         type: String,
         enum: ['member', 'admin'],

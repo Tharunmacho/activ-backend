@@ -183,6 +183,114 @@ class ApplicationService {
         return application;
     }
 
+    /**
+     * Fill an empty `data` section from the member's own records.
+     *
+     * The application carries a snapshot of the four forms, taken at submit
+     * time. Applications created before the submit path was corrected were
+     * written with an EMPTY envelope — `data.personalDetails`,
+     * `data.businessInfo`, `data.financialInfo` and `data.declaration` all `{}`
+     * — because the client posted no `data` at all. The member's real answers
+     * were never lost; they live in the four member collections, which is where
+     * `updateMember` writes them.
+     *
+     * So an admin opening such an application saw only the handful of columns
+     * stored flat on the application row (name, email, phone, region) and
+     * nothing else — a "Business Member" with no Business or Financial section
+     * at all, which reads as though they had filled nothing in.
+     *
+     * A section is only filled in when it is genuinely empty, so a real
+     * snapshot always wins: the application must keep showing what was true
+     * when it was submitted, not what the member edited afterwards.
+     */
+    async hydrateApplicationSections(application) {
+        if (!application) return application;
+
+        const plain = typeof application.toObject === 'function' ? application.toObject() : { ...application };
+        const data = plain.data || {};
+
+        const isEmpty = (section) =>
+            !section || Object.keys(section).filter((k) => {
+                const v = section[k];
+                if (v === null || v === undefined) return false;
+                if (Array.isArray(v)) return v.length > 0;
+                return String(v).trim() !== '';
+            }).length === 0;
+
+        const personalEmpty = isEmpty(data.personalDetails || data.personal);
+        const businessEmpty = isEmpty(data.businessInfo || data.business);
+        const financialEmpty = isEmpty(data.financialInfo || data.financial);
+        const declarationEmpty = isEmpty(data.declaration);
+
+        if (!personalEmpty && !businessEmpty && !financialEmpty && !declarationEmpty) return plain;
+
+        /**
+         * Resolve the member first, and do not trust `application.userId`.
+         *
+         * That path is declared `ref: 'MemberAuth'` — the "web auth" collection
+         * — while the four form collections are keyed on the MemberDetails
+         * ("web users") id. When the caller has already `.populate()`d it, a ref
+         * that resolves to nothing leaves the path as `null`, taking the raw id
+         * with it, so reading `plain.userId` after a populate can yield neither
+         * a document nor an id.
+         *
+         * The email is the reliable second route: it is stored flat on the
+         * application and is unique on MemberDetails.
+         */
+        const rawUserId = plain.userId && plain.userId._id ? plain.userId._id : plain.userId;
+
+        let member = null;
+        if (rawUserId) member = await MemberDetails.findById(rawUserId).lean().catch(() => null);
+        if (!member && plain.email) {
+            member = await MemberDetails.findOne({ email: String(plain.email).toLowerCase() })
+                .lean().catch(() => null);
+        }
+        if (!member) return plain;
+
+        const memberId = member._id;
+
+        const [business, financial, declaration] = await Promise.all([
+            businessEmpty ? BusinessInfo.findOne({ userId: memberId }).lean().catch(() => null) : null,
+            // `+panNumber` because the field is `select: false` on the schema.
+            financialEmpty ? MemberFinancialInfo.findOne({ memberId })
+                .select('+panNumber').lean().catch(() => null) : null,
+            declarationEmpty ? MemberDeclaration.findOne({
+                $or: [{ userId: memberId }, { memberId }]
+            }).lean().catch(() => null) : null,
+        ]);
+
+        const strip = (doc) => {
+            if (!doc) return null;
+            const { _id, __v, userId, memberId, createdAt, updatedAt, ...rest } = doc;
+            return rest;
+        };
+
+        plain.data = { ...data };
+        if (personalEmpty && member) {
+            plain.data.personalDetails = {
+                ...(data.personalDetails || {}),
+                fullName: member.fullName,
+                email: member.email,
+                phone: member.phoneNumber,
+                phoneNumber: member.phoneNumber,
+                state: member.state,
+                district: member.district,
+                block: member.block,
+                city: member.city,
+                religion: member.religion,
+                socialCategory: member.socialCategory,
+                gender: member.gender,
+                dateOfBirth: member.dateOfBirth,
+                aadhaarNumber: member.aadhaarNumber,
+            };
+        }
+        if (businessEmpty && business) plain.data.businessInfo = { ...(data.businessInfo || {}), ...strip(business) };
+        if (financialEmpty && financial) plain.data.financialInfo = { ...(data.financialInfo || {}), ...strip(financial) };
+        if (declarationEmpty && declaration) plain.data.declaration = { ...(data.declaration || {}), ...strip(declaration) };
+
+        return plain;
+    }
+
     async getApplicationById(id) {
         const cached = await cacheClient.get(CACHE_KEYS.APPLICATION(id));
         if (cached) return cached;
@@ -195,8 +303,10 @@ class ApplicationService {
             throw ApiError.notFound('Application not found');
         }
 
-        await cacheClient.set(CACHE_KEYS.APPLICATION(id), application, CACHE_TTL.MEDIUM);
-        return application;
+        const hydrated = await this.hydrateApplicationSections(application);
+
+        await cacheClient.set(CACHE_KEYS.APPLICATION(id), hydrated, CACHE_TTL.MEDIUM);
+        return hydrated;
     }
 
     async getUserApplications(userId) {

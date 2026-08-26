@@ -479,6 +479,23 @@ const getMyProfile = asyncHandler(async(req, res) => {
         membershipStatus: member.membershipStatus || 'pending',
         membershipType: member.membershipType || 'none',
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
+        /*
+         * Membership identity, for the paid dashboard.
+         *
+         * `membershipActivatedAt` is when `/payment/complete` activated the
+         * account, and is what "Member since" means. The mobile paid dashboard
+         * prints a hardcoded "January 15, 2020" for everyone because this was
+         * not returned anywhere.
+         *
+         * `membershipNumber` is derived by the SAME expression
+         * `memberExtras.getCertificate` uses, so the number on the dashboard
+         * and the number on the certificate cannot differ. It is stable for a
+         * given member — mobile generates its Member ID with `Math.random()`
+         * and mints a different one on every screen load.
+         */
+        memberId: String(member._id),
+        membershipNumber: member.membershipNumber || String(member._id).slice(-8).toUpperCase(),
+        membershipActivatedAt: member.membershipActivatedAt || null,
         isLocked: personalInfo.isLocked || false
     } : {
         fullName: member.fullName,
@@ -494,6 +511,23 @@ const getMyProfile = asyncHandler(async(req, res) => {
         membershipStatus: member.membershipStatus || 'pending',
         membershipType: member.membershipType || 'none',
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
+        /*
+         * Membership identity, for the paid dashboard.
+         *
+         * `membershipActivatedAt` is when `/payment/complete` activated the
+         * account, and is what "Member since" means. The mobile paid dashboard
+         * prints a hardcoded "January 15, 2020" for everyone because this was
+         * not returned anywhere.
+         *
+         * `membershipNumber` is derived by the SAME expression
+         * `memberExtras.getCertificate` uses, so the number on the dashboard
+         * and the number on the certificate cannot differ. It is stable for a
+         * given member — mobile generates its Member ID with `Math.random()`
+         * and mints a different one on every screen load.
+         */
+        memberId: String(member._id),
+        membershipNumber: member.membershipNumber || String(member._id).slice(-8).toUpperCase(),
+        membershipActivatedAt: member.membershipActivatedAt || null,
         isLocked: false
     };
     

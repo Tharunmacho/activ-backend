@@ -5,7 +5,7 @@
  * without a database. Run with:  node tests/approval-workflow.test.js
  */
 const assert = require('assert');
-const { classifyForLevel, buildGeoFilter, LEVELS } = require('../src/modules/admin/admin.service');
+const { classifyForLevel, reachedThisTier, buildGeoFilter, LEVELS } = require('../src/modules/admin/admin.service');
 const { normalizeStatus, STATUS } = require('../src/modules/common/applicationStatus');
 
 let passed = 0;
@@ -209,6 +209,55 @@ test('geo filter escapes regex metacharacters in location names', () => {
     const regex = buildGeoFilter('block', 'N.A. Block').$or[0].block;
     assert.ok(regex.test('N.A. Block'));
     assert.ok(!regex.test('NXAX Block'), 'unescaped dots would match any character');
+});
+
+console.log('\nA tier only lists what has reached it');
+
+test('an upstream file is kept out of the district list', () => {
+    // Pending-Block, seen by a district admin: classifyForLevel calls it
+    // `upstream`, and it must not appear in the district's own list. The block
+    // has not approved it, so it is still the block's file.
+    const rows = [
+        { id: 'a', stage: 'upstream' },
+        { id: 'b', stage: 'pending' },
+        { id: 'c', stage: 'approved' }
+    ];
+    assert.deepStrictEqual(reachedThisTier(rows).map(r => r.id), ['b', 'c']);
+});
+
+test('a file rejected by another tier is kept out too', () => {
+    const rows = [{ id: 'a', stage: 'closed' }, { id: 'b', stage: 'rejected' }];
+    assert.deepStrictEqual(reachedThisTier(rows).map(r => r.id), ['b']);
+});
+
+test('an escalated file survives the filter', () => {
+    // With no block admin staffed, classifyForLevel promotes a Pending-Block
+    // file to `pending` for the district. The district must still see it, or
+    // the orphan fallback silently loses the application it exists to rescue.
+    const app = { status: 'Pending-Block' };
+    const stage = classifyForLevel(app, LEVELS.DISTRICT, { block: 0, district: 1, state: 1 });
+    assert.strictEqual(stage, 'pending');
+    assert.strictEqual(reachedThisTier([{ stage }]).length, 1);
+});
+
+test('the same file is hidden again once a block admin exists', () => {
+    const app = { status: 'Pending-Block' };
+    const stage = classifyForLevel(app, LEVELS.DISTRICT, { block: 2, district: 1, state: 1 });
+    assert.strictEqual(stage, 'upstream');
+    assert.strictEqual(reachedThisTier([{ stage }]).length, 0);
+});
+
+test('hiding a file from the view never changes its stored status', () => {
+    // Display-only: the application goes in and comes back untouched, so the
+    // block still owns it and it reappears at the district on approval.
+    const app = { status: 'Pending-Block', stage: 'upstream' };
+    reachedThisTier([app]);
+    assert.strictEqual(app.status, 'Pending-Block');
+});
+
+test('a malformed row does not throw', () => {
+    assert.doesNotThrow(() => reachedThisTier([null, undefined, {}]));
+    assert.strictEqual(reachedThisTier([null, undefined, {}]).length, 3);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

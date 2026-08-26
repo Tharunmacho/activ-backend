@@ -96,6 +96,79 @@ const classifyForLevel = (application, level, coverage = null) => {
     return 'pending';
 };
 
+/**
+ * The applications that have actually reached a tier.
+ *
+ * `classifyForLevel` marks two stages a tier can see but never act on:
+ * `upstream` — still awaiting a decision from a tier below — and `closed`,
+ * rejected by a different tier. Both used to be listed under "All".
+ *
+ * That is what put a `Pending-Block` applicant on the district admin's screen.
+ * The card carried an "Awaiting Block Admin review" caption and offered no
+ * buttons, but a file nobody at the block has approved yet appearing in the
+ * district's own list reads as the sequential workflow having been skipped, and
+ * it inflated every count above the list with work this tier does not own.
+ *
+ * A tier now sees exactly what the state machine has handed it: its own
+ * pending / approved / rejected files and nothing else. This is a display rule
+ * only — the stored status is untouched, so the file stays exactly where it is
+ * and reappears at the district the moment the block approves it.
+ *
+ * Escalated files survive this filter by construction: when the tier below has
+ * no active admin, `classifyForLevel` has already promoted them to `pending`,
+ * which is not one of the stages removed here. The block tier is unaffected —
+ * being first, it produces neither stage.
+ */
+const TIER_ONLY_VISIBLE_STAGES = ['upstream', 'closed'];
+const reachedThisTier = (applicants = []) =>
+    applicants.filter(a => !TIER_ONLY_VISIBLE_STAGES.includes(a && a.stage));
+
+/**
+ * The Members directory a tier admin sees, with a real Active / Inactive split.
+ *
+ * The Inactive tab was permanently empty, on both clients, and the reason was
+ * structural rather than a bug in the filter: the list was built from
+ * `applicants.approved` alone, and every approved applicant defaults to
+ * `isActive: true`. Nothing could ever land in the other tab, so the filter
+ * looked broken because it had nothing to select.
+ *
+ * A member is Inactive when either of two things is true:
+ *
+ *   - **their application was rejected.** A rejected applicant is not an active
+ *     member of the region, and they had been vanishing from the directory
+ *     entirely — the only place they appeared was the Approvals queue's
+ *     "Rejected" tab.
+ *   - **their account was suspended** — `isActive === false` on the member
+ *     record, which `memberAction` writes.
+ *
+ * Built here rather than in each client so the two cannot disagree about who
+ * counts as a member; both now render this array as it arrives.
+ */
+const buildMemberDirectory = (approved = [], rejected = []) => {
+    const rows = [];
+
+    for (const member of approved) {
+        const suspended = member.isActive === false;
+        rows.push(Object.assign({}, member, {
+            memberStatus: suspended ? 'Inactive' : 'Active',
+            // Why they are inactive, so the row can say so instead of leaving an
+            // admin to guess between "suspended" and "rejected".
+            inactiveReason: suspended ? 'Account suspended by an admin' : ''
+        }));
+    }
+
+    for (const member of rejected) {
+        rows.push(Object.assign({}, member, {
+            memberStatus: 'Inactive',
+            inactiveReason: member.rejectionReason
+                ? `Application rejected: ${member.rejectionReason}`
+                : 'Application rejected'
+        }));
+    }
+
+    return rows;
+};
+
 const STAGE_LABELS = {
     pending: 'Pending',
     approved: 'Approved',
@@ -191,6 +264,34 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         email: firstOf(application.email, personal.email, member.email),
         phone: firstOf(application.phone, personal.phoneNumber, personal.phone, member.phoneNumber),
         role: finalRole,
+        /**
+         * `'business' | 'aspirant'`, from what the applicant declared.
+         *
+         * Both clients read `memberType` — the mobile applicant card renders it
+         * as "Membership Type" and the website Members screens map it with
+         * `app.memberType || 'aspirant'` — but it was never included in this
+         * payload. The fallback therefore fired for every row, so every member
+         * was labelled an aspirant however plainly they had declared a business.
+         *
+         * Derived from the same `isAspirantUser` the role above uses, so the two
+         * fields cannot disagree about the same applicant.
+         */
+        memberType: isAspirantUser ? 'aspirant' : 'business',
+        /**
+         * Whether the member's account is active — the real Boolean on their
+         * "web users" record, which `userAction` toggles when an admin suspends
+         * or reactivates someone.
+         *
+         * Both clients' Members screens used to decide this with
+         * `const isInactiveMember = (index) => index % 4 === 3` — every fourth
+         * row in the list was labelled "Inactive", purely because of where it
+         * happened to sit. It had nothing to do with the member. Sorting the
+         * list, or one new approval arriving, relabelled different people.
+         *
+         * Defaults to true when there is no member record to read, matching the
+         * schema default; an application with no member yet is not "suspended".
+         */
+        isActive: member.isActive !== false,
         doingBusiness,
         gender: firstOf(personal.gender, member.gender),
         block: blockName,
@@ -478,6 +579,7 @@ class AdminService {
                 districtName,
                 stateName
             },
+            members: buildMemberDirectory(approved, rejected),
             applicants: {
                 pending,
                 approved,
@@ -515,10 +617,14 @@ class AdminService {
         const approved = applicants.filter(a => a.stage === 'approved');
         const rejected = applicants.filter(a => a.stage === 'rejected');
 
+        // Everything else on this screen counts what the district can see, so it
+        // agrees with the list rather than reporting a larger total beside it.
+        const visible = reachedThisTier(applicants);
+
         // One row per block feeding this district, derived from the real data
         // instead of the previous hardcoded single-block placeholder.
         const blockRollup = new Map();
-        applicants.forEach(a => {
+        visible.forEach(a => {
             const name = a.block || 'Unassigned';
             const row = blockRollup.get(name) || { id: name, name, members: 0, pendingApplications: 0 };
             row.members += 1;
@@ -528,22 +634,23 @@ class AdminService {
 
         return {
             stats: {
-                totalMembers: approved.length > 0 ? approved.length : applicants.length,
+                totalMembers: approved.length > 0 ? approved.length : visible.length,
                 totalBlocks: blockRollup.size,
                 pendingApplications: pending.length,
                 approvedApplications: approved.length,
                 rejectedApplications: rejected.length,
-                totalApplications: applicants.length,
-                activeBusinesses: applicants.filter(a => a.businessInfo.doingBusiness).length,
+                totalApplications: visible.length,
+                activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
                 districtName,
                 stateName
             },
+            members: buildMemberDirectory(approved, rejected),
             applicants: {
                 pending,
                 approved,
                 rejected,
-                all: applicants
+                all: visible
             },
             blocks: blockRollup.size > 0
                 ? [...blockRollup.values()]
@@ -575,8 +682,12 @@ class AdminService {
         const approved = applicants.filter(a => a.stage === 'approved');
         const rejected = applicants.filter(a => a.stage === 'rejected');
 
+        // See the district dashboard: the rollups and totals below count what
+        // has reached the state, so they agree with the list they sit above.
+        const visible = reachedThisTier(applicants);
+
         const districtRollup = new Map();
-        applicants.forEach(a => {
+        visible.forEach(a => {
             const name = a.district || 'Unassigned';
             const row = districtRollup.get(name) || {
                 id: name,
@@ -604,22 +715,23 @@ class AdminService {
 
         return {
             stats: {
-                totalMembers: approved.length > 0 ? approved.length : applicants.length,
+                totalMembers: approved.length > 0 ? approved.length : visible.length,
                 totalDistricts: districts.length,
-                totalBlocks: new Set(applicants.map(a => a.block).filter(Boolean)).size,
+                totalBlocks: new Set(visible.map(a => a.block).filter(Boolean)).size,
                 pendingApplications: pending.length,
                 approvedApplications: approved.length,
                 rejectedApplications: rejected.length,
-                totalApplications: applicants.length,
-                activeBusinesses: applicants.filter(a => a.businessInfo.doingBusiness).length,
+                totalApplications: visible.length,
+                activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
                 stateName
             },
+            members: buildMemberDirectory(approved, rejected),
             applicants: {
                 pending,
                 approved,
                 rejected,
-                all: applicants
+                all: visible
             },
             districts: districts.length > 0
                 ? districts
@@ -792,31 +904,213 @@ class AdminService {
     }
 
     /**
-     * Activate / suspend / delete a user, used by UserManagementScreen.
+     * Resolve whatever id a Members row carries into the documents behind it.
+     *
+     * The rows an admin sees are applications, so their `id` is an application
+     * id — but the same payload also exposes `memberId`, and that field is
+     * `application.userId` when it is set and the MemberDetails `_id` otherwise.
+     * `application.userId` references **MemberAuth**, not MemberDetails, so the
+     * two ids point into different collections depending on the row. The old
+     * lookup was a bare `Member.findById(id)`, which therefore returned null for
+     * every row that had an auth record, and the action reported "User not
+     * found" against a member plainly listed on screen.
+     *
+     * All three ids are accepted here and the member is reached by whichever
+     * link exists, falling back to the email the application carries — the same
+     * fallback `hydrateApplicationSections` needs, and for the same reason.
      */
-    async userAction(userId, action) {
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            throw ApiError.badRequest('Invalid user id');
+    async resolveMemberTarget(id) {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            throw ApiError.badRequest('Invalid id');
         }
 
+        const application = await Application.findById(id).catch(() => null);
+        let member = null;
+        let auth = null;
+
+        if (application) {
+            const rawUserId = application.userId ? application.userId.toString() : '';
+            if (rawUserId) {
+                auth = await User.findById(rawUserId).catch(() => null);
+                member = await Member.findById(rawUserId).catch(() => null);
+            }
+            if (!member && application.email) {
+                member = await Member.findOne({ email: String(application.email).toLowerCase() }).catch(() => null);
+            }
+            if (!auth && application.email) {
+                auth = await User.findOne({ email: String(application.email).toLowerCase() }).catch(() => null);
+            }
+        } else {
+            member = await Member.findById(id).catch(() => null);
+            auth = await User.findById(id).catch(() => null);
+            if (!member && auth && auth.email) {
+                member = await Member.findOne({ email: String(auth.email).toLowerCase() }).catch(() => null);
+            }
+        }
+
+        if (!application && !member && !auth) {
+            throw ApiError.notFound('Member not found');
+        }
+
+        return { application, member, auth };
+    }
+
+    /**
+     * The geofence, applied to a Members-screen action.
+     *
+     * `POST /admin/users/:id/:action` was role-gated but never scope-checked: any
+     * block admin who knew an id could suspend or delete any member in the
+     * country. Reads have been geofenced all along and approve/reject re-check
+     * via `assertWithinScope`; this write had been left out of that rule, and it
+     * is the most destructive of the three.
+     *
+     * The region is taken from the application when there is one and from the
+     * member record otherwise, so a member with no application is still fenced.
+     */
+    async assertMemberWithinScope(target, user = {}) {
+        if (user.role === 'super_admin') return;
+
+        const scope = await resolveAdminScope(user);
+        const app = target.application;
+        const personal = (app && app.data && (app.data.personalDetails || app.data.personal)) || {};
+        const member = target.member || {};
+
+        const matches = (a, b) =>
+            String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+        const region = {
+            block: firstOf(app && app.block, personal.block, member.block),
+            district: firstOf(app && app.district, personal.district, member.district),
+            state: firstOf(app && app.state, personal.state, member.state)
+        };
+
+        const gate = {
+            block_admin: ['block', scope.blockName],
+            district_admin: ['district', scope.districtName],
+            state_admin: ['state', scope.stateName]
+        }[user.role];
+
+        if (!gate) throw ApiError.forbidden('Your role cannot act on members');
+
+        const [field, mine] = gate;
+        if (!mine) throw ApiError.forbidden('Your admin region could not be resolved');
+        if (!matches(region[field], mine)) {
+            throw ApiError.forbidden('This member belongs to a different ' + field);
+        }
+    }
+
+    /**
+     * Activate, suspend or delete a member.
+     *
+     * Delete is a real cascade. It used to be `Member.findByIdAndDelete(id)`,
+     * which removed the MemberDetails row and nothing else — the application,
+     * the login credential and the four additional-form documents all survived,
+     * so the member vanished from the directory while still being able to sign
+     * in, and the orphaned rows kept their unique indexes claimed. Registering
+     * again with the same email then failed with a duplicate-key error against
+     * an account the admin had been told was deleted.
+     *
+     * Every collection keyed to the member is cleared, using the key each one
+     * actually stores: `userId` for business, declaration and personal-info,
+     * `memberId` for financial. They differ, and a wrong guess deletes nothing
+     * while still reporting success.
+     */
+    async memberAction(id, action, user = {}) {
         const allowed = ['activate', 'suspend', 'delete'];
         if (!allowed.includes(action)) {
-            throw ApiError.badRequest(`Unknown action '${action}'. Use ${allowed.join(', ')}`);
+            throw ApiError.badRequest("Unknown action '" + action + "'. Use " + allowed.join(', '));
         }
 
-        if (action === 'delete') {
-            const removed = await Member.findByIdAndDelete(userId).catch(() => null);
-            if (!removed) throw ApiError.notFound('User not found');
-            return { id: userId, action, status: 'deleted' };
+        const target = await this.resolveMemberTarget(id);
+        await this.assertMemberWithinScope(target, user);
+
+        const { application, member, auth } = target;
+
+        if (action !== 'delete') {
+            if (!member) throw ApiError.notFound('This applicant has no member record to update');
+            member.isActive = action === 'activate';
+            await member.save();
+
+            logger.info('Member status changed by admin', {
+                memberId: member._id.toString(),
+                action,
+                adminId: user.userId || user.id || '',
+                role: user.role || ''
+            });
+
+            return {
+                id,
+                action,
+                isActive: member.isActive,
+                memberStatus: member.isActive ? 'Active' : 'Inactive',
+                status: member.isActive ? 'active' : 'suspended'
+            };
         }
 
-        const member = await Member.findById(userId);
-        if (!member) throw ApiError.notFound('User not found');
+        const BusinessInfo = require('../members/businessinfo.model');
+        const FinancialInfo = require('../members/memberfinancialinfo.model');
+        const Declaration = require('../members/memberdeclaration.model');
+        const PersonalInfo1 = require('../members/personalinfo1.model');
+        const Company = require('../members/company.model');
+        const Product = require('../../models/Product');
 
-        member.isActive = action === 'activate';
-        await member.save();
+        // Every id the member is known by. The additional forms key off the auth
+        // id on records written during registration and the member id on records
+        // written from the profile screens, so both have to be swept.
+        const ownerIds = [member && member._id, auth && auth._id, application && application.userId]
+            .filter(Boolean)
+            .map(v => v.toString());
+        const byOwner = ownerIds.length ? { $in: [...new Set(ownerIds)] } : null;
 
-        return { id: userId, action, status: member.isActive ? 'active' : 'suspended' };
+        const removed = {};
+        const drop = async (label, model, filter) => {
+            if (!filter) { removed[label] = 0; return; }
+            const result = await model.deleteMany(filter).catch(() => null);
+            removed[label] = (result && result.deletedCount) || 0;
+        };
+
+        // Products first: they hang off a company that is about to go, and a
+        // product whose company no longer exists is unreachable rather than
+        // deleted.
+        const companies = byOwner
+            ? await Company.find({ userId: byOwner }).select('_id').lean().catch(() => [])
+            : [];
+        const companyIds = companies.map(c => c._id);
+        await drop('products', Product,
+            companyIds.length
+                ? { $or: [{ companyId: { $in: companyIds } }, byOwner ? { userId: byOwner } : { _id: null }] }
+                : (byOwner ? { userId: byOwner } : null));
+
+        await drop('companies', Company, byOwner ? { userId: byOwner } : null);
+        await drop('businessInfo', BusinessInfo, byOwner ? { userId: byOwner } : null);
+        await drop('financialInfo', FinancialInfo, byOwner ? { memberId: byOwner } : null);
+        await drop('declarations', Declaration, byOwner ? { $or: [{ userId: byOwner }, { memberId: byOwner }] } : null);
+        await drop('personalInfo', PersonalInfo1, byOwner ? { userId: byOwner } : null);
+
+        // The credential goes before the application. If the process dies
+        // between the two, what is left is an application with no login — a row
+        // the admin can see and retry — rather than a login with no application,
+        // which is a live account invisible to every dashboard.
+        if (member) await Member.deleteOne({ _id: member._id }).catch(() => null);
+        removed.member = member ? 1 : 0;
+        if (auth) await User.deleteOne({ _id: auth._id }).catch(() => null);
+        removed.auth = auth ? 1 : 0;
+        if (application) await Application.deleteOne({ _id: application._id }).catch(() => null);
+        removed.application = application ? 1 : 0;
+
+        logger.warn('Member deleted by admin', {
+            id,
+            removed,
+            adminId: user.userId || user.id || '',
+            role: user.role || ''
+        });
+
+        return { id, action, status: 'deleted', removed };
+    }
+
+    /** Backwards-compatible alias; `memberAction` is the implementation. */
+    async userAction(id, action, user = {}) {
+        return this.memberAction(id, action, user);
     }
 
     /**
@@ -957,6 +1251,8 @@ module.exports.resolveAdminScope = resolveAdminScope;
 module.exports.LEVELS = LEVELS;
 // Exported for tests: the bucket rules are the heart of the workflow.
 module.exports.classifyForLevel = classifyForLevel;
+module.exports.reachedThisTier = reachedThisTier;
+module.exports.buildMemberDirectory = buildMemberDirectory;
 module.exports.buildGeoFilter = buildGeoFilter;
 // Exported so the super-admin service can render the same applicant shape
 // without a second, divergent flattener.

@@ -38,7 +38,6 @@ const img = (url, alt = '', fit = 'cover') => ({ url, type: 'image', alt, fit, p
 const SITE = {
     brand: {
         logo: img(LOGO, 'ACTIV', 'contain'),
-        name: 'ACTIV',
         fullName: 'Adidravidar Confederation of Trade and Industrial Vision',
         tagline: 'Building Future',
     },
@@ -52,6 +51,8 @@ const SITE = {
         ],
         ctaLabel: 'Login',
         ctaHref: '/login',
+        background: '#ffffff',
+        textColor: '#1c2e68',
     },
     footer: {
         addressLines: [

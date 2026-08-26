@@ -1,10 +1,13 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const paymentService = require('./payment.service');
+const orderService = require('./paymentOrder.service');
+const { listPlans } = require('./membershipPlans');
 const notificationService = require('../notifications/notification.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
-const { verifyToken } = require('../../core/middleware/auth');
+const { verifyToken, requireRole } = require('../../core/middleware/auth');
+const logger = require('../../config/logger');
 
 const router = express.Router();
 
@@ -97,63 +100,128 @@ router.get('/status/:paymentRequestId', verifyToken, asyncHandler(async(req, res
  * Renew membership manually (admin use)
  * Requires authentication
  */
-router.post('/renew', verifyToken, asyncHandler(async(req, res) => {
-    const { memberId, amount } = req.body;
+router.post('/renew', verifyToken, requireRole('super_admin'), asyncHandler(async(req, res) => {
+    /*
+     * Admin-only, and it was not.
+     *
+     * The comment above has always said "admin use", but the route was gated on
+     * `verifyToken` alone: any signed-in member could rename someone else in the
+     * `memberId` field and grant them a membership at an `amount` they chose —
+     * including themselves. It is the same hole as the old `/complete`, reached
+     * a different way.
+     *
+     * A member paying for their own renewal goes through `/payment/order` like
+     * any other purchase. This route is only for an administrator recording a
+     * payment taken outside the system.
+     */
+    const { memberId, amount } = req.body || {};
 
     const result = await paymentService.renewMembership(memberId, amount);
+
+    logger.warn('Membership renewed manually by an admin', {
+        memberId,
+        amount,
+        adminId: req.user && (req.user.userId || req.user.id)
+    });
 
     res.json(ApiResponse.success(result, 'Membership renewed successfully'));
 }));
 
 /**
+ * GET /api/v1/payment/plans
+ * The plans and their prices, as the server holds them.
+ * Public: a client needs them to render the picker, and they are not secret —
+ * what matters is that the client cannot *change* them.
+ */
+router.get('/plans', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success({
+        plans: listPlans(),
+        mockMode: orderService.isMockMode()
+    }));
+}));
+
+/**
+ * POST /api/v1/payment/order
+ * Begin a payment. Body: { planId, applicationId? }
+ *
+ * The amount is NOT accepted from the caller — it is looked up from the plan.
+ */
+router.post('/order', verifyToken, asyncHandler(async(req, res) => {
+    const order = await orderService.createOrder(req.user, {
+        planId: req.body && req.body.planId,
+        applicationId: req.body && req.body.applicationId
+    });
+    res.status(201).json(ApiResponse.created(order, 'Payment order created'));
+}));
+
+/**
+ * GET /api/v1/payment/order/:orderId
+ * The caller's own order. Another member's returns 403.
+ */
+router.get('/order/:orderId', verifyToken, asyncHandler(async(req, res) => {
+    const order = await orderService.getOrder(req.user, req.params.orderId);
+    res.json(ApiResponse.success(order));
+}));
+
+/**
+ * POST /api/v1/payment/mock-authorize
+ * Body: { orderId }
+ *
+ * Stands in for the gateway until a real one is connected: the server signs its
+ * own order and hands back the three values a gateway would return. Refused
+ * unless `PAYMENT_MODE=mock`, and never available in production.
+ *
+ * This is the single route that a real integration deletes.
+ */
+router.post('/mock-authorize', verifyToken, asyncHandler(async(req, res) => {
+    const result = await orderService.authorizeMock(req.user, {
+        orderId: req.body && req.body.orderId
+    });
+    res.json(ApiResponse.success(result, 'Mock payment authorised — no money was taken'));
+}));
+
+/**
  * POST /api/v1/payment/complete
- * Record payment completion and update membershipStatus to approved
+ * Body: { orderId, gatewayPaymentId, signature, paymentMethod? }
+ *
+ * Verify a payment and activate the membership.
+ *
+ * This route used to accept `{ paymentId, paymentMethod, transactionId, status }`
+ * and trust all of it. None of those fields was checked against anything —
+ * there was nothing to check them against — so an authenticated request with an
+ * **empty body** set `membershipStatus` to `approved`. Any member who could sign
+ * in could grant themselves a paid membership without a card.
+ *
+ * It now requires a server-created order, refuses one that is not the caller's,
+ * refuses one that has already been paid, and verifies an HMAC signature over
+ * `orderId|gatewayPaymentId` before writing anything. The amount recorded comes
+ * from the order rather than from the request.
  */
 router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
-    // The token claim is `userId`. `id` / `_id` are not in the payload, so this
-    // was always undefined and the lookup only ever succeeded through the email
-    // branch of the $or below — and `{ _id: undefined }` matches the first
-    // document in the collection on some driver paths, which is worse than
-    // failing. An invalid id is now left out of the query entirely.
-    const userId = req.user.userId;
-    const { paymentId, paymentMethod, transactionId, status, membershipType } = req.body;
+    const body = req.body || {};
 
-    const MemberDetails = require('../members/memberdetails.model');
-
-    const conditions = [];
-    if (mongoose.Types.ObjectId.isValid(userId)) conditions.push({ _id: userId });
-    if (req.user.email) conditions.push({ email: String(req.user.email).toLowerCase() });
-
-    if (conditions.length === 0) {
-        return res.status(400).json(ApiResponse.error('Could not identify the account to activate', 400));
-    }
-
-    const updatedMember = await MemberDetails.findOneAndUpdate(
-        { $or: conditions },
-        {
-            membershipStatus: 'approved',
-            membershipType: membershipType || 'annual',
-            membershipActivatedAt: new Date(),
-            paymentId: paymentId || transactionId || `TXN_${Date.now()}`,
-            lastPaymentDate: new Date()
-        },
-        { new: true }
-    );
-
-    if (!updatedMember) {
-        return res.status(404).json(ApiResponse.error('Member profile not found', 404));
-    }
+    const { order, member } = await orderService.completePayment(req.user, {
+        orderId: body.orderId,
+        gatewayPaymentId: body.gatewayPaymentId,
+        signature: body.signature,
+        paymentMethod: body.paymentMethod
+    });
 
     // Non-fatal: a notification failure must never make a completed payment
     // look like it failed.
-    await notificationService.safeCreate(updatedMember._id, {
+    await notificationService.safeCreate(member._id, {
         title: 'Membership activated',
         message: 'Your payment was received and your ACTIV membership is now active.',
         type: 'success',
-        data: { event: 'membership.activated', membershipType: updatedMember.membershipType }
+        data: {
+            event: 'membership.activated',
+            membershipType: member.membershipType,
+            orderId: order.orderId
+        }
     });
 
-    res.json(ApiResponse.success(updatedMember, 'Payment completed and membership activated'));
+    res.json(ApiResponse.success(member, 'Payment verified and membership activated'));
 }));
+
 
 module.exports = router;

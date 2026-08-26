@@ -84,6 +84,29 @@ module.exports = {
         baseUrl: process.env.INSTAMOJO_BASE_URL || 'https://api.instamojo.com/v2'
     },
 
+    payment: {
+        /*
+         * 'mock' lets the server sign its own payment orders, which is how the
+         * flow works with no gateway account connected. It is refused when
+         * NODE_ENV is 'production' regardless of what this says, so a forgotten
+         * setting cannot ship a free-membership button.
+         *
+         * Set to 'gateway' once a real provider is wired in.
+         */
+        mode: process.env.PAYMENT_MODE || 'mock',
+        /*
+         * The key payment signatures are verified against. Falls back to the
+         * JWT secret so a deployment that has not set it still signs with
+         * something unguessable; a signature anyone can compute is not a check.
+         * Becomes the gateway's key secret on integration.
+         */
+        signingSecret:
+            process.env.PAYMENT_SIGNING_SECRET ||
+            process.env.RAZORPAY_KEY_SECRET ||
+            process.env.JWT_SECRET ||
+            ''
+    },
+
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     backendUrl: process.env.BACKEND_URL || 'http://localhost:5000',
 

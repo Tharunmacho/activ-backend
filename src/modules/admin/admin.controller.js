@@ -154,9 +154,18 @@ const generateReport = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data, 'Report generated'));
 });
 
+/**
+ * Activate / suspend / delete a member from a tier admin's Members screen.
+ *
+ * `req.user` is passed through because the service geofences on it. It used to
+ * be omitted, and the service had no scope check at all, so the route was
+ * role-gated only: any block admin with an id could delete any member in the
+ * country.
+ */
 const userAction = asyncHandler(async(req, res) => {
-    const data = await adminService.userAction(req.params.id, req.params.action);
-    res.json(ApiResponse.success(data, `User ${req.params.action}d successfully`));
+    const data = await adminService.memberAction(req.params.id, req.params.action, req.user);
+    const verb = { activate: 'activated', suspend: 'suspended', delete: 'deleted' }[req.params.action] || 'updated';
+    res.json(ApiResponse.success(data, `Member ${verb} successfully`));
 });
 
 const uploadAdminPhoto = asyncHandler(async (req, res) => {
