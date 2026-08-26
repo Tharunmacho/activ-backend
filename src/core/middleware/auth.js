@@ -12,6 +12,7 @@ const verifyToken = asyncHandler(async(req, res, next) => {
 
     try {
         const decoded = jwt.verify(token, config.jwt.secret);
+
         req.user = decoded;
         next();
     } catch (error) {

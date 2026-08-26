@@ -40,6 +40,15 @@ const startServer = async() => {
         // Connect to MongoDB
         await connectDB();
 
+        // Warm the legacy `adminsdb` connection, which holds the per-tier admin
+        // collections. Doing it here rather than on first use keeps the initial
+        // admin request off the connection latency, and surfaces an unreachable
+        // adminsdb at boot instead of as a failed admin creation later.
+        const adminsDb = require('./modules/admin/adminsDb');
+        const adminsDbReady = await adminsDb.ensureReady();
+        if (adminsDbReady) logger.info('adminsdb connected (per-tier admin collections)');
+        else logger.warn('adminsdb is unreachable — admin creation will fail until it recovers');
+
         // Connect to Redis (optional)
         await connectRedis();
 

@@ -3,7 +3,11 @@ const User = require('../auth/auth.model');
 const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
 const ApiError = require('../../core/utils/ApiError');
+const logger = require('../../config/logger');
 const { normalizeStatus } = require('../common/applicationStatus');
+const tierRouting = require('../common/tierRouting');
+const regionService = require('../regions/region.service');
+const adminRepository = require('./admin.repository');
 
 // Applications still awaiting the Block Admin's decision.
 const BLOCK_PENDING_STATUSES = ['PENDING', 'Pending-Block'];
@@ -44,9 +48,25 @@ const rejectedByType = (application) => String(application.rejectedBy?.adminType
  * The status is normalized first: live rows carry legacy spellings such as
  * 'pending_district_approval' and bare lowercase 'approved'.
  */
-const classifyForLevel = (application, level) => {
+const classifyForLevel = (application, level, coverage = null) => {
     const status = normalizeStatus(application.status);
     const isRejected = status === 'Rejected';
+
+    // Orphan fallback. When the tier that formally owes a decision has no active
+    // admin left, the file bubbles to the first tier above that does — so a
+    // resigned block admin's fifty pending applications appear in the district
+    // admin's action queue instead of sitting in a queue nobody can open.
+    //
+    // Only ever *promotes* a file into an action bucket; it never removes one
+    // from the tier that legitimately owns it, and `coverage === null` (unknown
+    // staffing) leaves classification exactly as it was.
+    if (!isRejected && coverage) {
+        const owner = tierRouting.owningTier(application);
+        const effective = tierRouting.effectiveTier(application, coverage);
+        if (owner && effective && effective !== owner && effective === level) {
+            return 'pending';
+        }
+    }
 
     if (level === LEVELS.DISTRICT) {
         // A rejection only belongs to the district's "rejected" bucket if the
@@ -114,15 +134,22 @@ const buildAttribution = (application, stage, level, scope = {}) => {
  * Flattens an application (plus the member profile it belongs to, when one exists)
  * into the detailed applicant object the admin screens render.
  */
-const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOCK, scope = {}) => {
+const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOCK, scope = {}, coverage = null) => {
     const data = application.data || {};
     const personal = data.personalDetails || data.personal || data;
     const business = data.businessInfo || data.business || data;
     const financial = data.financialInfo || data.financial || data;
     const declaration = data.declaration || data;
 
-    const stage = classifyForLevel(application, level);
+    const stage = classifyForLevel(application, level, coverage);
     const id = application._id.toString();
+
+    // Provenance for a file that reached this tier by escalation rather than by
+    // the normal sequence. The card renders it so an admin is never asked to
+    // decide on another tier's application without being told why it is theirs.
+    const owningTier = tierRouting.owningTier(application);
+    const effectiveTier = tierRouting.effectiveTier(application, coverage);
+    const orphaned = !!coverage && tierRouting.isOrphaned(application, coverage);
     const doingBusiness = business.doingBusiness === true || data.doingBusiness === true || !!business.organizationName || !!data.organizationName;
 
     // Real values only. Every field below resolves from the application, the
@@ -178,6 +205,12 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         level,
         statusLabel: STAGE_LABELS[stage] || 'Pending',
         approvedByText,
+        // Escalation flags. `orphaned` is false whenever coverage is unknown, so
+        // a caller that does not resolve staffing sees the plain workflow.
+        orphaned,
+        owningTier: owningTier || '',
+        effectiveTier: effectiveTier || '',
+        fallbackReason: orphaned ? tierRouting.fallbackReason(application, coverage) : '',
         submittedAt: application.createdAt || null,
         // Every tier timestamp is exposed so the client can render the full
         // approval trail without a second round-trip.
@@ -249,33 +282,58 @@ const resolveAdminScope = async(user = {}) => {
     const needsLookup = !blockName || !districtName || !stateName;
     if (needsLookup && (user.email || user.userId)) {
         const email = String(user.email || '').toLowerCase();
-        const adminDoc = await mongoose.connection.db.collection('admins').findOne({
-            $or: [
-                { email: user.email },
-                { email }
-            ]
-        }).catch(() => null);
 
-        if (adminDoc) {
-            blockName = blockName || adminDoc.block;
-            districtName = districtName || adminDoc.district;
-            stateName = stateName || adminDoc.state;
+        // Through the repository, which spans every admin collection. Reading
+        // the unified `admins` collection directly — as this did — finds nothing
+        // for any account created since the segregation, and the hardcoded
+        // fallback below then quietly handed them somebody else's region.
+        const hit = await adminRepository.findRawByEmail(email).catch(() => null);
+        if (hit) {
+            const row = adminRepository.toAdminRow(hit.doc, hit.source);
+            blockName = blockName || row.block;
+            districtName = districtName || row.district;
+            stateName = stateName || row.state;
         }
     }
 
+    // No defaults. A default region here is not a convenience, it is a
+    // geofence failure that looks like data: an admin whose location could not
+    // be resolved would be shown Ariyalur's applications and could approve them.
+    // Empty is the honest answer, and every caller treats it as "no scope" and
+    // returns nothing rather than guessing.
     return {
-        blockName: blockName || 'Ariyalur',
-        districtName: districtName || 'Ariyalur',
-        stateName: stateName || 'Tamil Nadu',
-        // True when we never found a real value and fell back to a default —
-        // callers can log this, since it means the geofence is not trustworthy.
-        resolvedFromDefault: {
+        blockName: blockName || '',
+        districtName: districtName || '',
+        stateName: stateName || '',
+        unresolved: {
             block: !blockName,
             district: !districtName,
             state: !stateName
         }
     };
 };
+
+/**
+ * The empty dashboard, returned when an admin's own region cannot be resolved.
+ *
+ * Showing zero applications is correct here and showing some is not: there is no
+ * such thing as a safe guess about which region an admin belongs to.
+ */
+const emptyDashboard = (scope = {}, level = '') => ({
+    stats: {
+        blockName: scope.blockName || '',
+        districtName: scope.districtName || '',
+        stateName: scope.stateName || '',
+        totalMembers: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0
+    },
+    applicants: { pending: [], approved: [], rejected: [], all: [] },
+    scopeUnresolved: true,
+    message: `This account has no ${level || 'region'} on record, so no applications can be shown. `
+        + 'Ask the Super Admin to set its region.'
+});
 
 /** Case-insensitive exact-match filter across the three places a location can live. */
 const buildGeoFilter = (field, value) => {
@@ -289,7 +347,13 @@ const buildGeoFilter = (field, value) => {
     };
 };
 
-/** Shared loader: geofenced application fetch + member-profile hydration. */
+/**
+ * Shared loader: geofenced application fetch + member-profile hydration.
+ *
+ * Staffing is resolved once per dashboard load and applied to every row. Asking
+ * per application would mean one admin-collection scan per applicant; asking
+ * once and reusing the resolver keeps a 300-row dashboard at a single scan.
+ */
 const loadApplicants = async(geoFilter, memberFilter, level, scope) => {
     const [totalMembers, applications] = await Promise.all([
         Member.countDocuments(memberFilter).catch(() => 0),
@@ -316,9 +380,19 @@ const loadApplicants = async(geoFilter, memberFilter, level, scope) => {
         });
     }
 
-    const applicants = applications.map((app, index) =>
-        buildApplicant(app, memberByEmail[(app.email || '').toLowerCase()] || {}, index, level, scope)
-    );
+    // A failure here must not take the dashboard down: an unresolvable coverage
+    // map degrades to `null`, which disables fallback and leaves the plain
+    // workflow intact rather than mis-bucketing anything.
+    const coverageFor = await regionService.coverageResolver().catch(() => null);
+
+    const applicants = applications.map((app, index) => buildApplicant(
+        app,
+        memberByEmail[(app.email || '').toLowerCase()] || {},
+        index,
+        level,
+        scope,
+        coverageFor ? coverageFor({ state: app.state, district: app.district, block: app.block }) : null
+    ));
 
     return { totalMembers: totalMembers || 0, applications, applicants };
 };
@@ -359,6 +433,7 @@ class AdminService {
     }
     async getBlockDashboard(user = {}) {
         const scope = await resolveAdminScope(user);
+        if (!scope.blockName) return emptyDashboard(scope, 'block');
         const { blockName, districtName, stateName } = scope;
 
         // Geofenced query: strictly retrieve applications assigned to THIS block.
@@ -417,6 +492,7 @@ class AdminService {
 
     async getDistrictDashboard(user = {}) {
         const scope = await resolveAdminScope(user);
+        if (!scope.districtName) return emptyDashboard(scope, 'district');
         const { districtName, stateName } = scope;
 
         // Geofenced query: strictly retrieve applications assigned to THIS district.
@@ -477,6 +553,7 @@ class AdminService {
 
     async getStateDashboard(user = {}) {
         const scope = await resolveAdminScope(user);
+        if (!scope.stateName) return emptyDashboard(scope, 'state');
         const { stateName } = scope;
 
         // Geofenced query: strictly retrieve applications assigned to THIS state.
@@ -742,6 +819,48 @@ class AdminService {
         return { id: userId, action, status: member.isActive ? 'active' : 'suspended' };
     }
 
+    /**
+     * The signed-in admin's own record, read from wherever it actually lives.
+     *
+     * The settings screen used to render entirely from the user object cached at
+     * login, which meant it could only ever show what login happened to include
+     * — and login did not include the phone number, so the field was blank even
+     * when the account had one. Reading it here also means a number the Super
+     * Admin sets afterwards appears without the admin logging out and back in.
+     */
+    async getAdminProfile(user = {}) {
+        const email = String(user.email || '').toLowerCase();
+
+        if (email) {
+            const hit = await adminRepository.findRawByEmail(email).catch(() => null);
+            if (hit) {
+                const row = adminRepository.toAdminRow(hit.doc, hit.source);
+                return {
+                    fullName: row.fullName,
+                    email: row.email,
+                    phoneNumber: row.phoneNumber,
+                    state: row.state,
+                    district: row.district,
+                    block: row.block,
+                    role: row.role || user.role || ''
+                };
+            }
+        }
+
+        // No admin document (a super admin authenticated off the User collection,
+        // say). Fall back rather than 404 — the screen still has a profile to show.
+        const fallback = email ? await User.findOne({ email }).catch(() => null) : null;
+        return {
+            fullName: fallback?.fullName || fallback?.name || user.fullName || '',
+            email: email || String(fallback?.email || '').toLowerCase(),
+            phoneNumber: fallback?.phoneNumber || fallback?.phone || '',
+            state: fallback?.state || user.state || '',
+            district: fallback?.district || user.district || '',
+            block: fallback?.block || user.block || '',
+            role: user.role || fallback?.role || ''
+        };
+    }
+
     async updateAdminProfile(user = {}, profileData = {}) {
         const { fullName, email, phoneNumber, block, district, state } = profileData;
 
@@ -760,7 +879,10 @@ class AdminService {
                     $set: {
                         ...(fullName ? { fullName, name: fullName } : {}),
                         ...(email ? { email: email.toLowerCase() } : {}),
-                        ...(phoneNumber ? { phoneNumber, phone: phoneNumber } : {}),
+                        // A truthiness test here would make an emptied field mean
+                        // "unchanged", so an admin could never remove a number they
+                        // had once saved. Presence of the key is the signal.
+                        ...(typeof phoneNumber === 'string' ? { phoneNumber, phone: phoneNumber } : {}),
                         ...(block ? { block } : {}),
                         ...(district ? { district } : {}),
                         ...(state ? { state } : {})
@@ -770,32 +892,60 @@ class AdminService {
             ).catch(() => null);
         }
 
-        if (user.email || email) {
-            const targetEmail = (email || user.email || '').toLowerCase();
-            await mongoose.connection.db.collection('admins').updateOne(
-                { $or: [{ email: targetEmail }, { email: (user.email || '').toLowerCase() }] },
-                {
-                    $set: {
-                        ...(fullName ? { fullName, name: fullName } : {}),
+        // The admin account itself, wherever it actually lives.
+        //
+        // This used to write straight into the unified `admins` collection. Since
+        // the segregation that collection no longer holds the accounts the rest
+        // of the platform reads: an account created through the Super Admin UI or
+        // the pilot seed exists only in `adminsdb.{block,district,state}admins`,
+        // so an admin editing their own profile updated a document that was not
+        // there and the save reported success having changed nothing.
+        //
+        // The repository locates the record in whichever collection holds it and
+        // translates the field names per collection — `phoneNumber` is stored as
+        // `phone` in the unified collection and `phoneNumber` in the segregated
+        // ones, and writing the wrong spelling is dropped silently by strict mode.
+        const identifyingEmail = (user.email || email || '').toLowerCase();
+        if (identifyingEmail) {
+            try {
+                const hit = await adminRepository.findRawByEmail(identifyingEmail);
+                if (hit) {
+                    await adminRepository.updateById(hit, {
+                        ...(fullName ? { fullName } : {}),
                         ...(email ? { email: email.toLowerCase() } : {}),
-                        ...(phoneNumber ? { phone: phoneNumber } : {}),
+                        ...(typeof phoneNumber === 'string' ? { phoneNumber } : {}),
                         ...(block ? { block } : {}),
                         ...(district ? { district } : {}),
                         ...(state ? { state } : {})
-                    }
+                    });
                 }
-            ).catch(() => null);
+            } catch (err) {
+                // A profile edit must not 500 because the admin database is
+                // momentarily unreachable — the User document above already
+                // carries the change for the session.
+                logger.warn('Admin profile update could not be written to the admin collections', {
+                    email: identifyingEmail,
+                    error: err && err.message
+                });
+            }
         }
 
-        return {
-            fullName: fullName || updatedUser?.fullName || user.fullName || 'Block Admin',
-            email: (email || updatedUser?.email || user.email || 'admin@activ.com').toLowerCase(),
-            phoneNumber: phoneNumber || updatedUser?.phoneNumber || '',
-            block: block || updatedUser?.block || 'Ariyalur',
-            district: district || updatedUser?.district || 'Ariyalur',
-            state: state || updatedUser?.state || 'Tamil Nadu',
-            role: user.role || 'block_admin'
-        };
+        // Read the saved record back rather than echoing the request.
+        //
+        // What stood here assembled a reply from the payload with hardcoded
+        // fallbacks — 'Block Admin', 'Ariyalur', 'Tamil Nadu'. Update only your
+        // phone number and the response claimed you were the Block Admin for
+        // Ariyalur, whichever district you actually run. Nothing consumed it
+        // closely enough to break, which is precisely how a default region
+        // survives long enough to be believed.
+        return this.getAdminProfile({
+            email: (email || user.email || '').toLowerCase(),
+            role: user.role,
+            state: user.state,
+            district: user.district,
+            block: user.block,
+            fullName: fullName || user.fullName
+        });
     }
 }
 
@@ -808,3 +958,8 @@ module.exports.LEVELS = LEVELS;
 // Exported for tests: the bucket rules are the heart of the workflow.
 module.exports.classifyForLevel = classifyForLevel;
 module.exports.buildGeoFilter = buildGeoFilter;
+// Exported so the super-admin service can render the same applicant shape
+// without a second, divergent flattener.
+module.exports.buildApplicant = buildApplicant;
+module.exports.classifyForLevel = classifyForLevel;
+module.exports.escapeRegex = escapeRegex;

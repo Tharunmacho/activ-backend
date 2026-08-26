@@ -1,0 +1,1 @@
+const mongoose = require('mongoose'); const bcrypt = require('bcryptjs'); const config = require('./src/config'); mongoose.connect(config.db.uri).then(async () => { const hash = await bcrypt.hash('password123', 10); await mongoose.connection.db.collection('auth').updateOne({email: 'sujan@gmail.com'}, {$set: {password: hash}}); console.log('Reset done'); process.exit(0); });

@@ -1,0 +1,912 @@
+const ApiError = require('../../core/utils/ApiError');
+const logger = require('../../config/logger');
+const {
+    SINGLETON_KEY, ICON_NAMES,
+    SiteSettings, Home, About, EventsSettings,
+    GallerySettings, GalleryItem, ContactSettings, ContactMessage,
+} = require('./cms.models');
+const Event = require('../events/event.model');
+const { removeOrphans } = require('./media.cleanup');
+const { sanitizeHtml } = require('./richText');
+
+/**
+ * Public site content.
+ *
+ * Four rules shape this module:
+ *
+ * 1. A public GET never fails because content has not been authored yet. A new
+ *    deployment has no home page written, and a 404 would leave the landing
+ *    page unable to render at all. Empty defaults come back instead.
+ *
+ * 2. A public GET never invents content either. The pages render nothing where
+ *    nothing is authored, rather than falling back to copy baked into the
+ *    markup — otherwise deleting something in the CMS appears to do nothing,
+ *    which is the single most confusing thing a CMS can do.
+ *
+ * 3. A partial save never wipes a sibling block. A page's blocks are edited on
+ *    one screen; sending only the About block must not blank the carousel, so
+ *    updates are merged per block rather than replacing the document.
+ *
+ * 4. Events are NOT a new collection. The platform already has an `Event` model
+ *    with publish gating that the member app reads. A second store would mean
+ *    publishing everything twice and the two lists disagreeing.
+ */
+
+const EMPTY_MEDIA = { url: '', type: 'image', alt: '', fit: 'cover', position: 'center' };
+
+const EMPTY_SITE = {
+    brand: { logo: { ...EMPTY_MEDIA }, name: '', fullName: '', tagline: '' },
+    header: { navLinks: [], ctaLabel: '', ctaHref: '' },
+    footer: {
+        addressLines: [], linkColumns: [], contactHeading: '', phones: [], email: '',
+        socials: [], copyright: '', legalLinks: [], note: '',
+    },
+};
+
+const EMPTY_HOME = {
+    carousel: {
+        slides: [], headline: '', headlineHighlight: '', subheadline: '',
+        ctaLabel: '', ctaHref: '', ctaIcon: 'heart',
+        secondaryCtaLabel: '', secondaryCtaHref: '', secondaryCtaIcon: 'play',
+        highlightCard: { enabled: true, icon: 'users', eyebrow: '', value: '', caption: '', stats: [] },
+    },
+    about: {
+        badgeIcon: 'users', badgeText: '', heading: '', headingHighlight: '', eyebrow: '',
+        body: '', bullets: [], media: { ...EMPTY_MEDIA }, logoOverlay: { ...EMPTY_MEDIA },
+        linkLabel: '', linkHref: '', statsBar: [],
+    },
+};
+
+const EMPTY_ABOUT = {
+    badgeIcon: 'users', badgeText: '', heading: '', headingHighlight: '',
+    body: '', bullets: [], bulletPoints: [],
+    media: { ...EMPTY_MEDIA }, logoOverlay: { ...EMPTY_MEDIA }, statsBar: [],
+};
+
+const EMPTY_EVENTS_SETTINGS = {
+    badgeText: '', heading: '', subtitle: '',
+    viewAllLabel: '', viewAllHref: '/events', emptyText: '', homeLimit: 3,
+};
+
+const EMPTY_GALLERY_SETTINGS = {
+    badgeIcon: 'image', badgeText: '', heading: '', headingHighlight: '', description: '',
+    noteLines: [], categories: [], viewMoreLabel: '', pageSize: 8,
+    emptyText: '', emptyFilterText: '',
+};
+
+const EMPTY_CONTACT = {
+    badgeIcon: 'users', badgeText: '', heading: '', headingHighlight: '', description: '',
+    heroMedia: [],
+    formCard: {
+        icon: 'send', title: '', subtitle: '', submitLabel: '', successMessage: '',
+        namePlaceholder: '', emailPlaceholder: '', phonePlaceholder: '',
+        subjectPlaceholder: '', messagePlaceholder: '',
+        validationMessage: '', failureMessage: '',
+    },
+    infoCard: {
+        icon: 'users', title: '', subtitle: '',
+        addressLabel: '', phoneLabel: '', emailLabel: '', hoursLabel: '',
+    },
+    addressLines: [], phone: '', alternatePhone: '', email: '', workingHours: [], mapEmbedUrl: '',
+    social: { facebook: '', instagram: '', linkedin: '', youtube: '' },
+    banner: { enabled: true, icon: 'users', title: '', subtitle: '', ctaLabel: '', ctaHref: '' },
+};
+
+const actorOf = (user = {}) => ({ email: user.email || '', at: new Date() });
+
+const str = (value) => String(value ?? '').trim();
+
+/** An icon the renderer knows, or the given fallback. */
+const icon = (value, fallback = 'star') => (ICON_NAMES.includes(str(value)) ? str(value) : fallback);
+
+const asArray = (value) => {
+    if (Array.isArray(value)) return value;
+    // The admin forms send one item per line.
+    if (typeof value === 'string') return value.split('\n').map(v => v.trim()).filter(Boolean);
+    return [];
+};
+
+/** A list of plain strings, blank entries dropped. */
+const stringList = (value) => asArray(value).map(str).filter(Boolean);
+
+/**
+ * Normalise a media object.
+ *
+ * `type` is honoured when given and otherwise inferred from the extension —
+ * inference alone is unreliable (a CDN URL often has none), which is why the
+ * editor stores it explicitly, but a URL pasted without one still behaves.
+ */
+const cleanMedia = (input = {}) => {
+    const source = input || {};
+    const url = str(source.url || source.imageUrl || source.mediaUrl);
+    const declared = ['image', 'video'].includes(source.type) ? source.type : null;
+    const looksVideo = /\.(mp4|webm|ogg|mov|m4v)(\?|$)/i.test(url);
+
+    return {
+        url,
+        type: declared || (looksVideo ? 'video' : 'image'),
+        alt: str(source.alt),
+        fit: source.fit === 'contain' ? 'contain' : 'cover',
+        position: str(source.position) || 'center',
+    };
+};
+
+/** A label and its destination. Entries with neither are dropped by the caller. */
+const cleanLink = (input = {}) => ({ label: str(input.label), href: str(input.href) });
+
+const cleanLinks = (value) => asArray(value).map(cleanLink).filter(l => l.label || l.href);
+
+/** A figure, its caption and the icon beside it. */
+const cleanStats = (value, fallbackIcon = 'users') =>
+    asArray(value)
+        .map(s => ({ icon: icon(s.icon, fallbackIcon), value: str(s.value), label: str(s.label) }))
+        // A stat with neither figure nor label is an empty column.
+        .filter(s => s.value || s.label);
+
+/**
+ * Bullets carry an icon each, so a plain string list is not enough.
+ *
+ * A string is still accepted: documents written before bullets had icons store
+ * one, and the migration is "edit the page", not "run a script".
+ */
+const cleanBullets = (value) =>
+    asArray(value)
+        .map(b => (typeof b === 'string'
+            ? { icon: 'users', text: b }
+            : { icon: icon(b.icon, 'users'), text: String(b.text ?? '') }))
+        // Sanitised on the way in, not on the way out. Storing raw markup and
+        // cleaning it at render time means every future reader has to remember
+        // to do so; cleaning it once here means the database only ever holds
+        // markup that is safe to print.
+        .map(b => ({ icon: b.icon, text: sanitizeHtml(b.text) }))
+        .filter(b => b.text);
+
+const boolOf = (value, fallback = true) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    return value !== false && value !== 'false' && value !== 0 && value !== '0';
+};
+
+/** Read a singleton, or its empty shape. */
+const readSingleton = async(Model, empty) => {
+    const doc = await Model.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+    return doc ? { ...empty, ...doc } : { ...empty, key: SINGLETON_KEY };
+};
+
+/**
+ * Write a singleton.
+ *
+ * `runValidators` is on because an upsert skips them otherwise — which is how a
+ * required field ends up missing on a document nothing ever validated.
+ */
+const writeSingleton = (Model, payload, user) =>
+    Model.findOneAndUpdate(
+        { key: SINGLETON_KEY },
+        { $set: { ...payload, key: SINGLETON_KEY, editedBy: actorOf(user) } },
+        { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+    ).lean();
+
+/**
+ * Reclaim the disk space a write just freed.
+ *
+ * Called after the write has landed, never before: the cleanup counts live
+ * references, and running it first would still see the document being replaced.
+ * Nothing is awaited by the caller's response — an admin should not wait on a
+ * filesystem scan to be told their save worked — but the promise IS returned so
+ * tests can await it.
+ */
+const reclaim = (previous) => removeOrphans(previous);
+
+class CmsService {
+    // ============================================================ site chrome
+
+    async getSiteSettings() {
+        const doc = await readSingleton(SiteSettings, EMPTY_SITE);
+        return {
+            ...doc,
+            brand: {
+                ...EMPTY_SITE.brand,
+                ...(doc.brand || {}),
+                logo: { ...EMPTY_MEDIA, ...((doc.brand || {}).logo || {}) },
+            },
+            header: { ...EMPTY_SITE.header, ...(doc.header || {}) },
+            footer: { ...EMPTY_SITE.footer, ...(doc.footer || {}) },
+        };
+    }
+
+    /**
+     * Update the header, the footer or the branding.
+     *
+     * Merged per block for the same reason the home page is: the CMS screen has
+     * three save buttons and saving the footer must not blank the nav.
+     */
+    async updateSiteSettings(payload = {}, user = {}) {
+        const set = { editedBy: actorOf(user) };
+
+        if (payload.brand) {
+            const b = payload.brand;
+            set.brand = {
+                logo: cleanMedia(b.logo),
+                name: str(b.name),
+                fullName: str(b.fullName),
+                tagline: str(b.tagline),
+            };
+        }
+
+        if (payload.header) {
+            const h = payload.header;
+            set.header = {
+                navLinks: cleanLinks(h.navLinks),
+                ctaLabel: str(h.ctaLabel),
+                ctaHref: str(h.ctaHref),
+            };
+        }
+
+        if (payload.footer) {
+            const f = payload.footer;
+            set.footer = {
+                addressLines: stringList(f.addressLines),
+                linkColumns: asArray(f.linkColumns)
+                    .map(c => ({ heading: str(c.heading), links: cleanLinks(c.links) }))
+                    // A column with a heading and no links is a heading floating
+                    // in whitespace.
+                    .filter(c => c.links.length),
+                contactHeading: str(f.contactHeading),
+                phones: stringList(f.phones),
+                email: str(f.email),
+                socials: asArray(f.socials)
+                    .map(s => ({ icon: icon(s.icon, 'facebook'), href: str(s.href) }))
+                    // A social icon linking nowhere is a dead button.
+                    .filter(s => s.href),
+                copyright: str(f.copyright),
+                legalLinks: cleanLinks(f.legalLinks),
+                note: str(f.note),
+            };
+        }
+
+        // Captured before the write so a replaced logo can be reclaimed after.
+        const previous = await SiteSettings.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+
+        await SiteSettings.findOneAndUpdate(
+            { key: SINGLETON_KEY },
+            { $set: { ...set, key: SINGLETON_KEY } },
+            { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+        );
+
+        await reclaim(previous);
+        return this.getSiteSettings();
+    }
+
+    // ============================================================ home page
+
+    async getHome() {
+        const doc = await Home.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+        if (!doc) return { ...EMPTY_HOME, key: SINGLETON_KEY };
+
+        const carousel = doc.carousel || {};
+        const about = doc.about || {};
+
+        // Merged rather than spread, so a document saved before a block existed
+        // still answers with that block's empty shape instead of `undefined`.
+        return {
+            ...doc,
+            carousel: {
+                ...EMPTY_HOME.carousel,
+                ...carousel,
+                highlightCard: {
+                    ...EMPTY_HOME.carousel.highlightCard,
+                    ...(carousel.highlightCard || {}),
+                    stats: (carousel.highlightCard || {}).stats || [],
+                },
+            },
+            about: {
+                ...EMPTY_HOME.about,
+                ...about,
+                media: { ...EMPTY_MEDIA, ...(about.media || {}) },
+                logoOverlay: { ...EMPTY_MEDIA, ...(about.logoOverlay || {}) },
+                bullets: about.bullets || [],
+                statsBar: about.statsBar || [],
+            },
+        };
+    }
+
+    /**
+     * Update one or both blocks of the home page.
+     *
+     * Only the blocks present in the payload are touched. The CMS edits both on
+     * one screen but saves them separately, and a save of the About block must
+     * not blank the carousel someone spent ten minutes on.
+     */
+    async updateHome(payload = {}, user = {}) {
+        const set = { editedBy: actorOf(user) };
+
+        if (payload.carousel) {
+            const c = payload.carousel;
+            const card = c.highlightCard || {};
+
+            set.carousel = {
+                // A slide with no media is not a slide — it renders as a blank
+                // frame the visitor has to sit through.
+                slides: asArray(c.slides)
+                    .map(s => ({ media: cleanMedia(s.media || s), caption: str(s.caption) }))
+                    .filter(s => s.media.url),
+                headline: str(c.headline),
+                headlineHighlight: str(c.headlineHighlight),
+                subheadline: str(c.subheadline),
+                ctaLabel: str(c.ctaLabel),
+                ctaHref: str(c.ctaHref),
+                ctaIcon: icon(c.ctaIcon, 'heart'),
+                secondaryCtaLabel: str(c.secondaryCtaLabel),
+                secondaryCtaHref: str(c.secondaryCtaHref),
+                secondaryCtaIcon: icon(c.secondaryCtaIcon, 'play'),
+                highlightCard: {
+                    enabled: boolOf(card.enabled, true),
+                    icon: icon(card.icon, 'users'),
+                    eyebrow: str(card.eyebrow),
+                    value: str(card.value),
+                    caption: str(card.caption),
+                    stats: cleanStats(card.stats),
+                },
+            };
+        }
+
+        if (payload.about) {
+            const a = payload.about;
+            set.about = {
+                badgeIcon: icon(a.badgeIcon, 'users'),
+                badgeText: str(a.badgeText),
+                heading: str(a.heading),
+                headingHighlight: str(a.headingHighlight),
+                eyebrow: str(a.eyebrow),
+                body: sanitizeHtml(a.body),
+                bullets: cleanBullets(a.bullets),
+                media: cleanMedia(a.media || a),
+                logoOverlay: cleanMedia(a.logoOverlay),
+                linkLabel: str(a.linkLabel),
+                linkHref: str(a.linkHref),
+                statsBar: cleanStats(a.statsBar),
+            };
+        }
+
+        const previous = await Home.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+
+        await Home.findOneAndUpdate(
+            { key: SINGLETON_KEY },
+            { $set: { ...set, key: SINGLETON_KEY } },
+            { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+        );
+
+        // A removed carousel slide or a replaced About photograph.
+        await reclaim(previous);
+        return this.getHome();
+    }
+
+    // ============================================================ about page
+
+    async getAbout() {
+        const doc = await readSingleton(About, EMPTY_ABOUT);
+        return {
+            ...doc,
+            media: { ...EMPTY_MEDIA, ...(doc.media || {}) },
+            logoOverlay: { ...EMPTY_MEDIA, ...(doc.logoOverlay || {}) },
+            // A document written before bullets carried icons still renders.
+            bullets: (doc.bullets || []).length
+                ? doc.bullets
+                : (doc.bulletPoints || []).map(t => ({ icon: 'users', text: t })),
+            statsBar: doc.statsBar || [],
+        };
+    }
+
+    async updateAbout(payload = {}, user = {}) {
+        const bullets = cleanBullets(payload.bullets !== undefined ? payload.bullets : payload.bulletPoints);
+        const previous = await About.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+
+        const saved = await writeSingleton(About, {
+            badgeIcon: icon(payload.badgeIcon, 'users'),
+            badgeText: str(payload.badgeText),
+            heading: str(payload.heading),
+            headingHighlight: str(payload.headingHighlight),
+            body: sanitizeHtml(payload.body),
+            bullets,
+            // Kept in step so anything still reading the old field agrees with
+            // the new one rather than showing content two edits out of date.
+            bulletPoints: bullets.map(b => b.text),
+            media: cleanMedia(payload.media || payload),
+            logoOverlay: cleanMedia(payload.logoOverlay),
+            statsBar: cleanStats(payload.statsBar),
+        }, user);
+
+        await reclaim(previous);
+        return saved;
+    }
+
+    // ============================================================ events page
+
+    getEventsSettings() {
+        return readSingleton(EventsSettings, EMPTY_EVENTS_SETTINGS);
+    }
+
+    updateEventsSettings(payload = {}, user = {}) {
+        const limit = Number(payload.homeLimit);
+        return writeSingleton(EventsSettings, {
+            badgeText: str(payload.badgeText),
+            heading: str(payload.heading),
+            subtitle: str(payload.subtitle),
+            viewAllLabel: str(payload.viewAllLabel),
+            viewAllHref: str(payload.viewAllHref) || '/events',
+            emptyText: str(payload.emptyText),
+            homeLimit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 24) : 3,
+        }, user);
+    }
+
+    // ============================================================ gallery
+
+    getGallerySettings() {
+        return readSingleton(GallerySettings, EMPTY_GALLERY_SETTINGS);
+    }
+
+    updateGallerySettings(payload = {}, user = {}) {
+        const size = Number(payload.pageSize);
+        return writeSingleton(GallerySettings, {
+            badgeIcon: icon(payload.badgeIcon, 'image'),
+            badgeText: str(payload.badgeText),
+            heading: str(payload.heading),
+            headingHighlight: str(payload.headingHighlight),
+            description: str(payload.description),
+            noteLines: stringList(payload.noteLines),
+            categories: asArray(payload.categories)
+                // A chip may arrive as a bare string from a textarea.
+                .map(c => (typeof c === 'string'
+                    ? { label: c.trim(), icon: 'image' }
+                    : { label: str(c.label), icon: icon(c.icon, 'image') }))
+                .filter(c => c.label),
+            viewMoreLabel: str(payload.viewMoreLabel),
+            pageSize: Number.isFinite(size) && size >= 0 ? Math.min(size, 200) : 8,
+            emptyText: str(payload.emptyText),
+            emptyFilterText: str(payload.emptyFilterText),
+        }, user);
+    }
+
+    async listGallery({ includeHidden = false } = {}) {
+        const filter = includeHidden ? {} : { visible: { $ne: false } };
+        const items = await GalleryItem.find(filter)
+            .sort({ sortOrder: 1, createdAt: -1 })
+            .lean()
+            .catch(() => []);
+
+        return items.map(i => ({ ...i, media: { ...EMPTY_MEDIA, ...(i.media || {}) } }));
+    }
+
+    async addGalleryItem(payload = {}, user = {}) {
+        const media = cleanMedia(payload.media || payload);
+        if (!media.url) throw ApiError.badRequest('An image or video is required');
+
+        // Appended to the end unless a position is given, so adding never
+        // silently reorders the grid.
+        const last = await GalleryItem.findOne().sort({ sortOrder: -1 }).select('sortOrder').lean().catch(() => null);
+        const sortOrder = Number.isFinite(Number(payload.sortOrder))
+            ? Number(payload.sortOrder)
+            : ((last && last.sortOrder) || 0) + 1;
+
+        return GalleryItem.create({
+            media,
+            title: str(payload.title),
+            caption: str(payload.caption),
+            category: str(payload.category),
+            eventDate: str(payload.eventDate),
+            location: str(payload.location),
+            featured: boolOf(payload.featured, false),
+            sortOrder,
+            visible: boolOf(payload.visible, true),
+            editedBy: actorOf(user),
+        });
+    }
+
+    async updateGalleryItem(id, payload = {}, user = {}) {
+        const update = { editedBy: actorOf(user) };
+        if (payload.media || payload.url || payload.imageUrl) update.media = cleanMedia(payload.media || payload);
+
+        ['title', 'caption', 'category', 'eventDate', 'location'].forEach((field) => {
+            if (payload[field] !== undefined) update[field] = str(payload[field]);
+        });
+
+        if (payload.sortOrder !== undefined) update.sortOrder = Number(payload.sortOrder) || 0;
+        if (payload.visible !== undefined) update.visible = boolOf(payload.visible, true);
+        if (payload.featured !== undefined) update.featured = boolOf(payload.featured, false);
+
+        // Held so a replaced image is reclaimed once the new one is stored.
+        const before = await GalleryItem.findById(id).lean().catch(() => null);
+
+        const doc = await GalleryItem.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
+        if (!doc) throw ApiError.notFound('Gallery item not found');
+
+        if (before) await reclaim(before.media);
+        return doc;
+    }
+
+    async deleteGalleryItem(id) {
+        const doc = await GalleryItem.findByIdAndDelete(id);
+        if (!doc) throw ApiError.notFound('Gallery item not found');
+
+        // The row is gone, so the scan below will not count it as a reference.
+        await reclaim(doc.media);
+        return { id };
+    }
+
+    // ============================================================ contact
+
+    async getContactInfo() {
+        const doc = await readSingleton(ContactSettings, EMPTY_CONTACT);
+        return {
+            ...doc,
+            heroMedia: (doc.heroMedia || []).map(m => ({ ...EMPTY_MEDIA, ...(m || {}) })),
+            formCard: { ...EMPTY_CONTACT.formCard, ...(doc.formCard || {}) },
+            infoCard: { ...EMPTY_CONTACT.infoCard, ...(doc.infoCard || {}) },
+            social: { ...EMPTY_CONTACT.social, ...(doc.social || {}) },
+            banner: { ...EMPTY_CONTACT.banner, ...(doc.banner || {}) },
+        };
+    }
+
+    async updateContactInfo(payload = {}, user = {}) {
+        const social = payload.social || {};
+        const form = payload.formCard || {};
+        const info = payload.infoCard || {};
+        const banner = payload.banner || {};
+        const previous = await ContactSettings.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
+
+        const saved = await writeSingleton(ContactSettings, {
+            badgeIcon: icon(payload.badgeIcon, 'users'),
+            badgeText: str(payload.badgeText),
+            heading: str(payload.heading),
+            headingHighlight: str(payload.headingHighlight),
+            description: str(payload.description),
+            heroMedia: asArray(payload.heroMedia).map(cleanMedia).filter(m => m.url),
+
+            formCard: {
+                icon: icon(form.icon, 'send'),
+                title: str(form.title),
+                subtitle: str(form.subtitle),
+                submitLabel: str(form.submitLabel),
+                successMessage: str(form.successMessage),
+                namePlaceholder: str(form.namePlaceholder),
+                emailPlaceholder: str(form.emailPlaceholder),
+                phonePlaceholder: str(form.phonePlaceholder),
+                subjectPlaceholder: str(form.subjectPlaceholder),
+                messagePlaceholder: str(form.messagePlaceholder),
+                validationMessage: str(form.validationMessage),
+                failureMessage: str(form.failureMessage),
+            },
+            infoCard: {
+                icon: icon(info.icon, 'users'),
+                title: str(info.title),
+                subtitle: str(info.subtitle),
+                addressLabel: str(info.addressLabel),
+                phoneLabel: str(info.phoneLabel),
+                emailLabel: str(info.emailLabel),
+                hoursLabel: str(info.hoursLabel),
+            },
+
+            addressLines: stringList(payload.addressLines),
+            phone: str(payload.phone),
+            alternatePhone: str(payload.alternatePhone),
+            email: str(payload.email).toLowerCase(),
+            workingHours: stringList(payload.workingHours),
+            mapEmbedUrl: str(payload.mapEmbedUrl),
+
+            social: {
+                facebook: str(social.facebook),
+                instagram: str(social.instagram),
+                linkedin: str(social.linkedin),
+                youtube: str(social.youtube),
+            },
+
+            banner: {
+                enabled: boolOf(banner.enabled, true),
+                icon: icon(banner.icon, 'users'),
+                title: str(banner.title),
+                subtitle: str(banner.subtitle),
+                ctaLabel: str(banner.ctaLabel),
+                ctaHref: str(banner.ctaHref),
+            },
+        }, user);
+
+        // A hero image removed from the pair above.
+        await reclaim(previous);
+        return saved;
+    }
+
+    // ============================================================ messages
+
+    /**
+     * Store a message from the public form.
+     *
+     * The only unauthenticated write on the platform, so deliberately narrow:
+     * three required fields, everything else ignored, lengths capped. Nothing
+     * here is ever rendered as HTML.
+     */
+    async createContactMessage(payload = {}, meta = {}) {
+        const name = str(payload.name);
+        const email = str(payload.email).toLowerCase();
+        const message = str(payload.message);
+
+        if (!name) throw ApiError.badRequest('Please tell us your name');
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw ApiError.badRequest('Please provide a valid email address');
+        if (!message) throw ApiError.badRequest('Please write a message');
+
+        // Capped rather than rejected: someone pasting a long message should not
+        // lose it to a 400 they cannot act on.
+        const clip = (v, max) => String(v || '').slice(0, max);
+
+        const doc = await ContactMessage.create({
+            name: clip(name, 120),
+            email: clip(email, 200),
+            phone: clip(payload.phone, 30),
+            subject: clip(payload.subject, 200),
+            message: clip(message, 5000),
+            status: 'new',
+            meta: { ip: clip(meta.ip, 60), userAgent: clip(meta.userAgent, 300) },
+        });
+
+        logger.info('Contact message received', { email: doc.email, id: String(doc._id) });
+
+        // The sender is told it arrived; they are not handed the stored record.
+        return { id: String(doc._id), receivedAt: doc.createdAt };
+    }
+
+    async listContactMessages({ status, page = 1, limit = 20 } = {}) {
+        const filter = status && status !== 'all' ? { status } : {};
+        const skip = (Math.max(1, Number(page)) - 1) * Number(limit);
+
+        const [messages, total, unread] = await Promise.all([
+            ContactMessage.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)).lean().catch(() => []),
+            ContactMessage.countDocuments(filter).catch(() => 0),
+            ContactMessage.countDocuments({ status: 'new' }).catch(() => 0),
+        ]);
+
+        return {
+            messages,
+            unread,
+            pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) || 0 },
+        };
+    }
+
+    async setMessageStatus(id, status) {
+        if (!['new', 'read', 'archived'].includes(status)) {
+            throw ApiError.badRequest('Status must be new, read or archived');
+        }
+        const doc = await ContactMessage.findByIdAndUpdate(id, { $set: { status } }, { new: true }).lean();
+        if (!doc) throw ApiError.notFound('Message not found');
+        return doc;
+    }
+
+    async deleteContactMessage(id) {
+        const doc = await ContactMessage.findByIdAndDelete(id);
+        if (!doc) throw ApiError.notFound('Message not found');
+        return { id };
+    }
+
+    // ============================================================ events
+
+    /**
+     * Events reuse the platform's `Event` model.
+     *
+     * A separate CMS events collection was specified, but one already exists
+     * with publish gating and geographic targeting, and the member Events screen
+     * reads it. Two stores would mean publishing every event twice and the
+     * public site disagreeing with the app about what is happening.
+     */
+    /**
+     * Ordered soonest-upcoming first, then past events most-recent first.
+     *
+     * The public strip takes the first few under a heading that reads "Upcoming
+     * Events". A plain `startAt: -1` put the furthest-out event at the top, so
+     * the home page advertised next year's conference and hid next week's. A
+     * plain ascending sort has the mirror problem: it leads with the oldest
+     * event on record.
+     *
+     * The partition is done here rather than in the query because a single
+     * MongoDB sort cannot express "future ascending, then past descending", and
+     * the alternative — two queries — would have to split the limit between
+     * them without knowing how many of each exist.
+     */
+    async listEvents({ includeDrafts = false, limit = 100 } = {}) {
+        const filter = includeDrafts ? {} : { status: 'published' };
+
+        // Fetched newest-first so the limit keeps the most relevant events when
+        // there are more than it allows: an old event dropping off matters far
+        // less than a forthcoming one.
+        const events = await Event.find(filter).sort({ startAt: -1 }).limit(Number(limit)).lean().catch(() => []);
+
+        const now = Date.now();
+        const at = e => (e.startAt ? new Date(e.startAt).getTime() : 0);
+
+        const upcoming = events.filter(e => at(e) >= now).sort((a, b) => at(a) - at(b));
+        const past = events.filter(e => at(e) < now).sort((a, b) => at(b) - at(a));
+
+        return [...upcoming, ...past].map(e => ({
+            id: String(e._id),
+            title: e.title || '',
+            description: e.description || '',
+            startAt: e.startAt || null,
+            endAt: e.endAt || null,
+            location: e.venue || [e.block, e.district, e.state].filter(Boolean).join(', '),
+            venue: e.venue || '',
+            state: e.state || '',
+            district: e.district || '',
+            block: e.block || '',
+            imageUrl: e.bannerUrl || '',
+            // The same media shape every other CMS section uses, so the website
+            // can render an event banner through `CmsMediaFrame` and honour the
+            // fit and focal point the editor chose. `imageUrl` stays for the
+            // mobile app, which knows only that field.
+            media: {
+                url: e.bannerUrl || '',
+                type: /\.(mp4|webm|ogg|mov|m4v)(\?|$)/i.test(e.bannerUrl || '') ? 'video' : 'image',
+                alt: e.bannerAlt || '',
+                fit: e.bannerFit === 'contain' ? 'contain' : 'cover',
+                position: e.bannerPosition || 'center',
+            },
+            status: e.status || 'draft',
+        }));
+    }
+
+    /**
+     * The moment an event starts.
+     *
+     * `startAt` is preferred and is what the CMS sends: a full ISO instant with
+     * an offset, built in the browser where the editor's own timezone is the
+     * right one.
+     *
+     * The `date` + `time` pair is the fallback for older callers, and it is
+     * ambiguous by construction — `new Date('2026-09-14T14:30:00')` is parsed in
+     * the SERVER's timezone. In development that is IST and looks correct; on a
+     * UTC host the same input lands five and a half hours out, so an event
+     * entered as 2.30pm is shown to visitors as 8pm. Anything relying on this
+     * branch should be moved to `startAt`.
+     */
+    toStartAt(payload = {}) {
+        if (payload.startAt) {
+            const parsed = new Date(payload.startAt);
+            if (!Number.isNaN(parsed.getTime())) return parsed;
+        }
+        if (payload.date) {
+            const time = str(payload.time) || '00:00';
+            const parsed = new Date(`${payload.date}T${time.length === 5 ? time : '00:00'}:00`);
+            if (!Number.isNaN(parsed.getTime())) return parsed;
+        }
+        return null;
+    }
+
+    async createEvent(payload = {}, user = {}) {
+        const title = str(payload.title);
+        if (!title) throw ApiError.badRequest('An event needs a title');
+
+        const startAt = this.toStartAt(payload);
+        if (!startAt) throw ApiError.badRequest('An event needs a valid date');
+
+        return Event.create({
+            title,
+            description: str(payload.description),
+            startAt,
+            // An end time is optional: many events are announced with a start
+            // and no published finish.
+            endAt: payload.endAt ? new Date(payload.endAt) : undefined,
+            venue: str(payload.location || payload.venue),
+            state: str(payload.state),
+            district: str(payload.district),
+            block: str(payload.block),
+            bannerUrl: str(payload.imageUrl || payload.bannerUrl),
+            bannerAlt: str(payload.bannerAlt || payload.alt),
+            bannerFit: payload.bannerFit === 'contain' || payload.fit === 'contain' ? 'contain' : 'cover',
+            bannerPosition: str(payload.bannerPosition || payload.position) || 'center',
+            // Published by default: adding an event through the CMS means it to
+            // appear. Drafts remain available via the status control.
+            status: payload.status === 'draft' ? 'draft' : 'published',
+            createdBy: user.email || '',
+        });
+    }
+
+    async updateEvent(id, payload = {}) {
+        const update = {};
+        if (payload.title !== undefined) update.title = str(payload.title);
+        if (payload.description !== undefined) update.description = str(payload.description);
+        if (payload.location !== undefined || payload.venue !== undefined) {
+            update.venue = str(payload.location ?? payload.venue);
+        }
+        if (payload.imageUrl !== undefined || payload.bannerUrl !== undefined) {
+            update.bannerUrl = str(payload.imageUrl ?? payload.bannerUrl);
+        }
+        if (payload.bannerAlt !== undefined || payload.alt !== undefined) {
+            update.bannerAlt = str(payload.bannerAlt ?? payload.alt);
+        }
+        if (payload.bannerFit !== undefined || payload.fit !== undefined) {
+            update.bannerFit = (payload.bannerFit ?? payload.fit) === 'contain' ? 'contain' : 'cover';
+        }
+        if (payload.bannerPosition !== undefined || payload.position !== undefined) {
+            update.bannerPosition = str(payload.bannerPosition ?? payload.position) || 'center';
+        }
+        ['state', 'district', 'block'].forEach((f) => {
+            if (payload[f] !== undefined) update[f] = str(payload[f]);
+        });
+        if (payload.status !== undefined) update.status = payload.status === 'draft' ? 'draft' : 'published';
+
+        const startAt = this.toStartAt(payload);
+        if (startAt) update.startAt = startAt;
+        if (payload.endAt !== undefined) update.endAt = payload.endAt ? new Date(payload.endAt) : null;
+
+        const before = await Event.findById(id).select('bannerUrl').lean().catch(() => null);
+
+        const doc = await Event.findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true }).lean();
+        if (!doc) throw ApiError.notFound('Event not found');
+
+        if (before) await reclaim(before.bannerUrl);
+        return doc;
+    }
+
+    async deleteEvent(id) {
+        const doc = await Event.findByIdAndDelete(id);
+        if (!doc) throw ApiError.notFound('Event not found');
+
+        await reclaim(doc.bannerUrl);
+        return { id };
+    }
+
+    // ============================================================ overview
+
+    async getOverview() {
+        const [site, home, about, contact, gallery, galleryHidden, events, messages, unread] = await Promise.all([
+            SiteSettings.findOne({ key: SINGLETON_KEY }).lean().catch(() => null),
+            Home.findOne({ key: SINGLETON_KEY }).lean().catch(() => null),
+            About.findOne({ key: SINGLETON_KEY }).lean().catch(() => null),
+            ContactSettings.findOne({ key: SINGLETON_KEY }).lean().catch(() => null),
+            GalleryItem.countDocuments().catch(() => 0),
+            GalleryItem.countDocuments({ visible: false }).catch(() => 0),
+            Event.countDocuments().catch(() => 0),
+            ContactMessage.countDocuments().catch(() => 0),
+            ContactMessage.countDocuments({ status: 'new' }).catch(() => 0),
+        ]);
+
+        const h = home || {};
+        const s = site || {};
+        const carousel = h.carousel || {};
+        const homeAbout = h.about || {};
+
+        return {
+            site: {
+                // The nav is what makes the chrome usable; branding alone is not
+                // enough to call it set up.
+                configured: !!((s.header || {}).navLinks || []).length,
+                navLinks: ((s.header || {}).navLinks || []).length,
+                footerColumns: ((s.footer || {}).linkColumns || []).length,
+                socials: ((s.footer || {}).socials || []).length,
+                updatedAt: s.updatedAt,
+            },
+            home: {
+                configured: !!home,
+                slides: (carousel.slides || []).length,
+                headlineWritten: !!carousel.headline,
+                highlightStats: ((carousel.highlightCard || {}).stats || []).length,
+                aboutBullets: (homeAbout.bullets || []).length,
+                aboutStats: (homeAbout.statsBar || []).length,
+                aboutWritten: !!homeAbout.body,
+                updatedAt: h.updatedAt,
+            },
+            about: {
+                configured: !!(about && (about.body || (about.bullets || []).length)),
+                bullets: ((about || {}).bullets || []).length,
+                stats: ((about || {}).statsBar || []).length,
+                updatedAt: about && about.updatedAt,
+            },
+            contact: {
+                configured: !!(contact && (contact.email || contact.phone)),
+                addressLines: ((contact || {}).addressLines || []).length,
+                workingHours: ((contact || {}).workingHours || []).length,
+                updatedAt: contact && contact.updatedAt,
+            },
+            gallery: { total: gallery, hidden: galleryHidden },
+            events: { total: events },
+            messages: { total: messages, unread },
+        };
+    }
+}
+
+module.exports = new CmsService();

@@ -1,0 +1,170 @@
+const cmsService = require('./cms.service');
+const ApiResponse = require('../../core/utils/ApiResponse');
+const asyncHandler = require('../../core/utils/asyncHandler');
+
+// ---------------------------------------------------------------- home page
+
+const getHome = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.getHome()));
+});
+
+/**
+ * Update one or more of the home page's four blocks.
+ *
+ * Only the blocks present in the body are touched, so the CMS can save the
+ * carousel without disturbing the stats someone edited a moment earlier.
+ */
+const updateHome = asyncHandler(async(req, res) => {
+    const home = await cmsService.updateHome(req.body || {}, req.user || {});
+    res.json(ApiResponse.success(home, 'Home page updated'));
+});
+
+/**
+ * Upload one image or video and return its URL.
+ *
+ * Separate from the content save so the editor can show a real preview before
+ * committing: uploading as part of the save means an admin only finds out the
+ * media is wrong after the page is live.
+ */
+const uploadMedia = asyncHandler(async(req, res) => {
+    if (!req.file) return res.status(400).json(ApiResponse.error('No file uploaded', 400));
+
+    const mimetype = req.file.mimetype || '';
+    res.status(201).json(ApiResponse.created({
+        // Relative on purpose — an absolute URL built from the request host
+        // points at whatever network the uploading device was on.
+        url: `/uploads/${req.file.filename}`,
+        type: mimetype.startsWith('video/') ? 'video' : 'image',
+        size: req.file.size,
+    }, 'Uploaded'));
+});
+
+// ---------------------------------------------------------------- about
+
+const getAbout = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.getAbout()));
+});
+
+const updateAbout = asyncHandler(async(req, res) => {
+    const about = await cmsService.updateAbout(req.body || {}, req.user || {});
+    res.json(ApiResponse.success(about, 'About section updated'));
+});
+
+// ---------------------------------------------------------------- gallery
+
+const getGallery = asyncHandler(async(req, res) => {
+    // Only a signed-in admin may see hidden images; the public grid must not
+    // be able to ask for them.
+    const isAdmin = req.user && req.user.role === 'super_admin';
+    const includeHidden = isAdmin && String(req.query.includeHidden || '') === 'true';
+
+    res.json(ApiResponse.success(await cmsService.listGallery({ includeHidden })));
+});
+
+const addGalleryItem = asyncHandler(async(req, res) => {
+    // An uploaded file wins over a pasted URL: the admin form offers both, and
+    // a file that was just uploaded is the more deliberate action.
+    const payload = { ...req.body };
+    if (req.file && req.file.filename) payload.imageUrl = `/uploads/${req.file.filename}`;
+
+    const item = await cmsService.addGalleryItem(payload, req.user || {});
+    res.status(201).json(ApiResponse.created(item, 'Image added to the gallery'));
+});
+
+const updateGalleryItem = asyncHandler(async(req, res) => {
+    const payload = { ...req.body };
+    if (req.file && req.file.filename) payload.imageUrl = `/uploads/${req.file.filename}`;
+
+    const item = await cmsService.updateGalleryItem(req.params.id, payload, req.user || {});
+    res.json(ApiResponse.success(item, 'Image updated'));
+});
+
+const deleteGalleryItem = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.deleteGalleryItem(req.params.id), 'Image removed'));
+});
+
+// ---------------------------------------------------------------- contact details
+
+const getContactInfo = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.getContactInfo()));
+});
+
+const updateContactInfo = asyncHandler(async(req, res) => {
+    const info = await cmsService.updateContactInfo(req.body || {}, req.user || {});
+    res.json(ApiResponse.success(info, 'Contact details updated'));
+});
+
+// ---------------------------------------------------------------- contact messages
+
+/**
+ * The public contact form.
+ *
+ * The response deliberately carries nothing but an id and a timestamp: this is
+ * the one endpoint anyone on the internet can write to, and echoing the stored
+ * document back would turn it into a reflector.
+ */
+const createContactMessage = asyncHandler(async(req, res) => {
+    const result = await cmsService.createContactMessage(req.body || {}, {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+    });
+
+    res.status(201).json(ApiResponse.created(result, 'Thanks — your message has been received.'));
+});
+
+const listContactMessages = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.listContactMessages(req.query || {})));
+});
+
+const setMessageStatus = asyncHandler(async(req, res) => {
+    const doc = await cmsService.setMessageStatus(req.params.id, (req.body || {}).status);
+    res.json(ApiResponse.success(doc, 'Message updated'));
+});
+
+const deleteContactMessage = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.deleteContactMessage(req.params.id), 'Message deleted'));
+});
+
+// ---------------------------------------------------------------- events
+
+const getEvents = asyncHandler(async(req, res) => {
+    // Drafts are admin-only, exactly as on /events.
+    const includeDrafts = !!(req.user && req.user.role === 'super_admin');
+    res.json(ApiResponse.success(await cmsService.listEvents({ includeDrafts })));
+});
+
+const createEvent = asyncHandler(async(req, res) => {
+    const payload = { ...req.body };
+    if (req.file && req.file.filename) payload.imageUrl = `/uploads/${req.file.filename}`;
+
+    const event = await cmsService.createEvent(payload, req.user || {});
+    res.status(201).json(ApiResponse.created(event, 'Event created'));
+});
+
+const updateEvent = asyncHandler(async(req, res) => {
+    const payload = { ...req.body };
+    if (req.file && req.file.filename) payload.imageUrl = `/uploads/${req.file.filename}`;
+
+    const event = await cmsService.updateEvent(req.params.id, payload);
+    res.json(ApiResponse.success(event, 'Event updated'));
+});
+
+const deleteEvent = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.deleteEvent(req.params.id), 'Event deleted'));
+});
+
+// ---------------------------------------------------------------- overview
+
+const getOverview = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.getOverview()));
+});
+
+module.exports = {
+    getHome, updateHome, uploadMedia,
+    getAbout, updateAbout,
+    getGallery, addGalleryItem, updateGalleryItem, deleteGalleryItem,
+    getContactInfo, updateContactInfo,
+    createContactMessage, listContactMessages, setMessageStatus, deleteContactMessage,
+    getEvents, createEvent, updateEvent, deleteEvent,
+    getOverview,
+};

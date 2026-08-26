@@ -22,6 +22,23 @@ const memberAuthSchema = new mongoose.Schema({
     },
     lastLogin: {
         type: Date
+    },
+    /**
+     * Password reset, stored as a SHA-256 hash of the token that was emailed.
+     *
+     * Hashed rather than raw for the same reason the password is: a stolen
+     * database dump must not hand over working reset links. `select:false`
+     * keeps both fields out of every ordinary read, so a profile response can
+     * never leak a live reset token.
+     */
+    resetPasswordToken: {
+        type: String,
+        select: false,
+        index: true
+    },
+    resetPasswordExpires: {
+        type: Date,
+        select: false
     }
 }, {
     collection: 'auth',

@@ -10,6 +10,10 @@ const cacheClient = require('../../core/cache/cacheClient');
 const { CACHE_KEYS, CACHE_TTL } = require('../../core/cache/cacheKeys');
 const logger = require('../../config/logger');
 const { normalizeStatus } = require('../common/applicationStatus');
+const tierRouting = require('../common/tierRouting');
+const regionService = require('../regions/region.service');
+const auditService = require('../audit/audit.service');
+const notificationService = require('../notifications/notification.service');
 
 /**
  * The sequential approval state machine, keyed by *normalized* status.
@@ -42,6 +46,22 @@ const ROLE_TO_TIER = {
 };
 
 class ApplicationService {
+    /**
+     * Record one activity, without ever failing the caller.
+     *
+     * Required lazily rather than at the top of the file: the extras controller
+     * reaches back into member models that import this service, and a static
+     * require would close that cycle at boot.
+     */
+    async logActivity(memberId, type, entityType, entityId, description) {
+        try {
+            const { recordActivity } = require('../members/memberExtras.controller');
+            await recordActivity(memberId, type, entityType, entityId, description);
+        } catch (err) {
+            logger.warn('Could not record activity', { type, error: err && err.message });
+        }
+    }
+
     async createApplication(userId, applicationData) {
         // Check for existing pending application
         const existingApplication = await Application.findOne({
@@ -74,15 +94,44 @@ class ApplicationService {
             fullName: applicationData.fullName || (userDetails && (userDetails.fullName || userDetails.name)) || 'Applicant',
             email: applicationData.email || (userDetails && userDetails.email) || 'applicant@activ.org',
             phone: applicationData.phone || applicationData.phoneNumber || (userDetails && (userDetails.phoneNumber || userDetails.phone)) || '0000000000',
-            state: applicationData.state || (userDetails && userDetails.state) || 'Tamil Nadu',
-            district: applicationData.district || (userDetails && userDetails.district) || 'Chennai',
-            block: applicationData.block || (userDetails && userDetails.block) || 'Chennai North',
+            // No default region. These used to fall back to Tamil Nadu /
+            // Chennai / Chennai North, which defeated the coverage gate below:
+            // an application submitted with no region at all was handed a real,
+            // staffed one, passed validation, and landed in the Chennai North
+            // block admin's queue belonging to nobody. Empty fails the gate,
+            // which is the correct outcome.
+            state: applicationData.state || (userDetails && userDetails.state) || '',
+            district: applicationData.district || (userDetails && userDetails.district) || '',
+            block: applicationData.block || (userDetails && userDetails.block) || '',
             data: appData,
             role: derivedRole,
             memberType: isAspirant ? 'aspirant' : 'business',
             registrationType: isAspirant ? 'aspirant' : 'business',
             ...applicationData
         };
+
+        // The last gate before an application exists. The registration screen only
+        // offers staffed regions, but a direct API call or a stale client could
+        // still submit one nobody covers — and an application whose block has no
+        // admin is precisely the orphan this architecture exists to prevent.
+        //
+        // The canonical spellings come back from the admin database and are what
+        // gets stored: an applicant whose block name differs only in casing would
+        // otherwise fall outside their own admin's geofence regex.
+        const coverage = await regionService.validateRegion({
+            state: payload.state,
+            district: payload.district,
+            block: payload.block
+        });
+
+        if (!coverage.ok) {
+            throw ApiError.badRequest(coverage.reason);
+        }
+        if (coverage.region) {
+            payload.state = coverage.region.state;
+            payload.district = coverage.region.district;
+            payload.block = coverage.region.block;
+        }
 
         const application = new Application({
             userId: userId,
@@ -91,6 +140,9 @@ class ApplicationService {
         });
 
         await application.save();
+
+        await this.logActivity(userId, 'application_submitted', 'Application', application._id,
+            'Membership application submitted');
 
         // Update role in MemberAuth (users) & MemberDetails (members) in DB
         try {
@@ -110,6 +162,17 @@ class ApplicationService {
         }
 
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(userId));
+
+        // Acknowledge the submission. Without this the notification list is
+        // empty until the first admin acts, which reads as "nothing happened"
+        // to an applicant who has just filled in four forms.
+        await notificationService.safeCreate(userId, {
+            title: 'Application submitted',
+            message: `Your ACTIV membership application has been submitted and is now with the `
+                + `${payload.block || 'Block'} Block Admin for review.`,
+            type: 'info',
+            data: { event: 'application.submitted', applicationId: String(application._id) }
+        });
 
         logger.info('Application submitted', {
             applicationId: application._id,
@@ -226,6 +289,84 @@ class ApplicationService {
     /**
      * Block Admin Review - Level 1
      */
+    /**
+     * Decide whether `tier` may act on this application, and what it absorbs.
+     *
+     * Normally a tier may only act on a file whose status names it. Orphan
+     * fallback widens that: when the tier that formally owns the file has no
+     * active admin, ownership bubbles up, and the tier it lands on may act — but
+     * has to satisfy the steps it skipped, or the sequential state machine would
+     * only advance the file into the acting tier's *own* queue and they would
+     * have to approve the same application twice.
+     *
+     * Returns `{ fallback, absorbed, coverage }` or throws the same
+     * "not pending your review" error as before when no escalation applies.
+     */
+    async resolveTierAction(application, tier) {
+        const owner = tierRouting.owningTier(application);
+        const TIER_LABEL = { block: 'Block', district: 'District', state: 'State' };
+
+        if (!owner) {
+            throw ApiError.badRequest(`Application is not pending ${TIER_LABEL[tier]} Admin review`);
+        }
+        if (owner === tier) {
+            return { fallback: false, absorbed: [], coverage: null };
+        }
+
+        // A coverage lookup that fails must not silently widen who can act, so an
+        // error here falls through to the normal rejection below.
+        const coverage = await regionService.coverageFor({
+            state: application.state,
+            district: application.district,
+            block: application.block
+        }).catch(() => null);
+
+        const effective = tierRouting.effectiveTier(application, coverage);
+        if (!coverage || effective !== tier) {
+            throw ApiError.badRequest(`Application is not pending ${TIER_LABEL[tier]} Admin review`);
+        }
+
+        return {
+            fallback: true,
+            absorbed: tierRouting.absorbedTiers(application, tier),
+            coverage
+        };
+    }
+
+    /**
+     * Record the skipped tiers on the document, in memory.
+     *
+     * The caller saves. Each absorbed step gets its real timestamp and the acting
+     * admin's id, plus a note naming them as a fallback — so the approval trail
+     * shows who actually signed off rather than implying a block admin acted when
+     * there was none.
+     */
+    stampAbsorbedTiers(application, absorbed = [], adminId, actingTier, user = null) {
+        if (!absorbed || absorbed.length === 0) return;
+
+        const now = new Date();
+        const who = (user && user.email) ? ` (${user.email})` : '';
+        const ACTING_LABEL = { block: 'Block', district: 'District', state: 'State' };
+
+        absorbed.forEach((step) => {
+            if (step === 'block' && !application.blockApprovedAt) {
+                application.blockApprovedAt = now;
+                application.reviewedBy.blockAdmin = adminId;
+            } else if (step === 'district' && !application.districtApprovedAt) {
+                application.districtApprovedAt = now;
+                application.reviewedBy.districtAdmin = adminId;
+            }
+
+            application.notes.push({
+                adminId,
+                adminType: 'FallbackRouting',
+                note: `No active ${ACTING_LABEL[step]} Admin for this region — step completed by the ` +
+                    `${ACTING_LABEL[actingTier]} Admin under orphan fallback routing${who}`,
+                createdAt: now
+            });
+        });
+    }
+
     async blockAdminReview(applicationId, action, adminId, rejectionReason = null, user = null) {
         const application = await Application.findById(applicationId);
         if (!application) {
@@ -236,9 +377,11 @@ class ApplicationService {
 
         // Normalized so legacy rows ('PENDING', 'pending_block_approval', ...)
         // remain actionable instead of being permanently stuck.
-        if (normalizeStatus(application.status) !== 'Pending-Block') {
-            throw ApiError.badRequest('Application is not pending Block Admin review');
-        }
+        //
+        // Block is the bottom tier, so nothing ever escalates *into* it — this
+        // resolves to the plain gate. It goes through the shared helper anyway so
+        // all three tiers reject an out-of-turn action with the same message.
+        await this.resolveTierAction(application, 'block');
 
         if (action === 'approve') {
             application.status = 'Pending-District';
@@ -252,6 +395,8 @@ class ApplicationService {
                 adminId,
                 newStatus: 'Pending-District'
             });
+
+            await this.recordReviewAudit(application, 'block', 'approve', adminId, user, { newStatus: 'Pending-District' });
 
             return {
                 success: true,
@@ -275,6 +420,8 @@ class ApplicationService {
                 reason: rejectionReason
             });
 
+            await this.recordReviewAudit(application, 'block', 'reject', adminId, user, { reason: rejectionReason || '' });
+
             return {
                 success: true,
                 status: 'Rejected',
@@ -296,12 +443,14 @@ class ApplicationService {
 
         if (user) await this.assertWithinScope(application, 'district', user);
 
-        // Gate: the district queue is only reachable once the block has approved.
-        if (normalizeStatus(application.status) !== 'Pending-District') {
-            throw ApiError.badRequest('Application is not pending District Admin review');
-        }
+        // Gate: the district queue is only reachable once the block has approved
+        // — or once the block has no active admin at all, in which case the file
+        // has escalated here and the skipped block step is absorbed below.
+        const routing = await this.resolveTierAction(application, 'district');
 
         if (action === 'approve') {
+            this.stampAbsorbedTiers(application, routing.absorbed, adminId, 'district', user);
+
             application.status = 'Pending-State';
             application.districtApprovedAt = new Date();
             application.reviewedBy.districtAdmin = adminId;
@@ -314,12 +463,28 @@ class ApplicationService {
                 newStatus: 'Pending-State'
             });
 
+            await this.recordReviewAudit(application, 'district', 'approve', adminId, user, {
+                newStatus: 'Pending-State',
+                fallback: routing.fallback,
+                absorbedTiers: routing.absorbed
+            });
+
             return {
                 success: true,
                 status: 'Pending-State',
-                message: 'Application approved. Forwarded to State Admin.'
+                fallback: routing.fallback,
+                absorbedTiers: routing.absorbed,
+                message: routing.fallback
+                    ? 'Application approved on behalf of the unstaffed Block tier. Forwarded to State Admin.'
+                    : 'Application approved. Forwarded to State Admin.'
             };
         } else if (action === 'reject') {
+            // A rejection is terminal, so no skipped step needs completing — but
+            // the note still records that this tier only saw the file because the
+            // one below it was unstaffed.
+            if (routing.fallback) {
+                this.stampAbsorbedTiers(application, routing.absorbed, adminId, 'district', user);
+            }
             application.status = 'Rejected';
             application.rejectionReason = rejectionReason || 'Rejected by District Admin';
             // `rejectedAt` lives inside `rejectedBy` in the schema; a top-level
@@ -336,6 +501,12 @@ class ApplicationService {
                 applicationId,
                 adminId,
                 reason: rejectionReason
+            });
+
+            await this.recordReviewAudit(application, 'district', 'reject', adminId, user, {
+                reason: rejectionReason || '',
+                fallback: routing.fallback,
+                absorbedTiers: routing.absorbed
             });
 
             return {
@@ -360,12 +531,17 @@ class ApplicationService {
 
         if (user) await this.assertWithinScope(application, 'state', user);
 
-        // Gate: the state queue is only reachable once the district has approved.
-        if (normalizeStatus(application.status) !== 'Pending-State') {
-            throw ApiError.badRequest('Application is not pending State Admin review');
-        }
+        // Gate: the state queue is only reachable once the district has approved
+        // — or once every tier beneath is unstaffed, in which case the file has
+        // escalated all the way here and those steps are absorbed below.
+        const routing = await this.resolveTierAction(application, 'state');
 
         if (action === 'approve') {
+            // Stamped before the transaction so the absorbed steps are part of the
+            // same atomic write as the final approval, not a separate save that
+            // could survive a rolled-back commit.
+            this.stampAbsorbedTiers(application, routing.absorbed, adminId, 'state', user);
+
             // Final approval writes five documents across five collections. They
             // must land together: a partial write leaves an orphaned member row
             // whose unique email then blocks every retry, stranding the applicant
@@ -378,6 +554,13 @@ class ApplicationService {
                 memberId: memberProfile.memberDetails._id
             });
 
+            await this.recordReviewAudit(application, 'state', 'approve', adminId, user, {
+                newStatus: 'Approved',
+                memberCreated: true,
+                fallback: routing.fallback,
+                absorbedTiers: routing.absorbed
+            });
+
             return {
                 success: true,
                 status: 'Approved',
@@ -386,6 +569,9 @@ class ApplicationService {
                 memberProfile
             };
         } else if (action === 'reject') {
+            if (routing.fallback) {
+                this.stampAbsorbedTiers(application, routing.absorbed, adminId, 'state', user);
+            }
             application.status = 'Rejected';
             application.rejectionReason = rejectionReason || 'Rejected by State Admin';
             application.rejectedBy = {
@@ -400,6 +586,12 @@ class ApplicationService {
                 applicationId,
                 adminId,
                 reason: rejectionReason
+            });
+
+            await this.recordReviewAudit(application, 'state', 'reject', adminId, user, {
+                reason: rejectionReason || '',
+                fallback: routing.fallback,
+                absorbedTiers: routing.absorbed
             });
 
             return {
@@ -659,6 +851,119 @@ class ApplicationService {
     }
 
     /**
+     * Append one audit entry for a tier decision.
+     *
+     * Awaited but never fatal: audit.service.record swallows its own errors, so
+     * a logging failure can never undo an approval that already committed.
+     */
+    async recordReviewAudit(application, tier, action, adminId, user = null, extra = {}) {
+        const TIER_LABEL = { block: 'Block', district: 'District', state: 'State' };
+        const role = user?.role || `${tier}_admin`;
+        const isProxy = role === 'super_admin';
+        const applicant = application?.fullName || application?.email || 'an applicant';
+        const verb = action === 'approve' ? 'approved' : 'rejected';
+
+        // The applicant's own feed, alongside the admin audit trail below. The
+        // two answer different questions: this one is "what happened to me",
+        // the audit log is "who did what".
+        await this.logActivity(
+            application?.userId,
+            action === 'approve' ? 'application_approved' : 'application_rejected',
+            'Application',
+            application?._id,
+            action === 'approve'
+                ? `Application approved at the ${TIER_LABEL[tier]} level`
+                : `Application rejected at the ${TIER_LABEL[tier]} level`,
+        );
+
+        await auditService.record({
+            action: `application.${verb}`,
+            category: 'application',
+            summary: isProxy
+                ? `Super Admin proxy-${verb} ${applicant}'s application on behalf of the ${TIER_LABEL[tier]} tier`
+                : `${TIER_LABEL[tier]} Admin ${verb} ${applicant}'s application`,
+            actorId: adminId ? String(adminId) : '',
+            actorEmail: user?.email || '',
+            actorRole: role,
+            proxy: isProxy,
+            targetId: application?._id ? application._id.toString() : '',
+            targetLabel: applicant,
+            state: application?.state || '',
+            district: application?.district || '',
+            block: application?.block || '',
+            metadata: { tier, ...extra }
+        });
+
+        // The applicant's own copy of the same event. Hooked here rather than at
+        // each of the six review outcomes because every one of them already
+        // funnels through this method — one place to keep correct instead of six
+        // that can drift apart.
+        await this.notifyApplicant(application, tier, action, extra);
+    }
+
+    /**
+     * Tell the applicant what just happened to their file.
+     *
+     * Deliberately vague about *who* decided: an applicant is told their
+     * application moved on, not which named admin at which tier signed it off.
+     * A rejection carries the reason, because that is the one thing they can act
+     * on.
+     *
+     * Never throws — `safeCreate` swallows and logs. An approval that succeeded
+     * must not report failure because the notification could not be written; the
+     * status transition has already been saved and, for a final approval, is
+     * terminal and unrepeatable.
+     */
+    async notifyApplicant(application, tier, action, extra = {}) {
+        const recipient = application?.userId;
+        if (!recipient) return;
+
+        const status = normalizeStatus(application?.status);
+
+        if (action === 'reject') {
+            const reason = String(extra.reason || application?.rejectionReason || '').trim();
+            await notificationService.safeCreate(recipient, {
+                title: 'Application not approved',
+                message: reason
+                    ? `Your ACTIV membership application was not approved. Reason: ${reason}`
+                    : 'Your ACTIV membership application was not approved. Please contact your local admin for details.',
+                type: 'error',
+                data: { event: 'application.rejected', applicationId: String(application._id || ''), tier, reason }
+            });
+            return;
+        }
+
+        // Final approval is the one the applicant has been waiting for, and it
+        // carries the next step — approval does not yet mean an active
+        // membership, payment does.
+        if (status === 'Approved') {
+            await notificationService.safeCreate(recipient, {
+                title: 'Application approved',
+                message: 'Your ACTIV membership application has been fully approved. '
+                    + 'Complete your membership payment to activate your account.',
+                type: 'success',
+                data: { event: 'application.approved', applicationId: String(application._id || '') }
+            });
+            return;
+        }
+
+        const NEXT_STAGE = {
+            'Pending-District': 'District',
+            'Pending-State': 'State'
+        };
+        const next = NEXT_STAGE[status];
+        if (!next) return;
+
+        await notificationService.safeCreate(recipient, {
+            title: 'Application progressed',
+            message: `Your application cleared the ${tier === 'block' ? 'Block' : 'District'} review `
+                + `and is now with the ${next} Admin.`,
+            type: 'info',
+            data: { event: 'application.advanced', applicationId: String(application._id || ''), status }
+        });
+    }
+
+    /**
      * Geofence the write path. Filtering the dashboard query is not enough on its
      * own: without this, an admin who learns an application id can approve a file
      * belonging to another block/district/state by calling the endpoint directly.
@@ -716,9 +1021,30 @@ class ApplicationService {
             }
         }
 
-        if (tier === 'block') return this.blockAdminReview(applicationId, action, adminId, rejectionReason, user);
-        if (tier === 'district') return this.districtAdminReview(applicationId, action, adminId, rejectionReason, user);
-        return this.stateAdminReview(applicationId, action, adminId, rejectionReason, user);
+        let result;
+        if (tier === 'block') result = await this.blockAdminReview(applicationId, action, adminId, rejectionReason, user);
+        else if (tier === 'district') result = await this.districtAdminReview(applicationId, action, adminId, rejectionReason, user);
+        else result = await this.stateAdminReview(applicationId, action, adminId, rejectionReason, user);
+
+        // Audit trail for a super-admin override. The tier review itself records
+        // the decision under the tier's own admin fields, so without this note
+        // there is nothing saying the local admin never actually acted.
+        // Appended after the review, which re-reads and saves the document.
+        if (user.role === 'super_admin') {
+            await Application.updateOne({ _id: applicationId }, {
+                $push: {
+                    notes: {
+                        adminId,
+                        adminType: 'SuperAdmin',
+                        note: `Super admin proxy ${action === 'approve' ? 'approval' : 'rejection'} on behalf of the ${tier} tier` +
+                            (user.email ? ` (${user.email})` : ''),
+                        createdAt: new Date()
+                    }
+                }
+            }).catch(err => logger.warn('Failed to record super-admin proxy note', { applicationId, err: err?.message }));
+        }
+
+        return result;
     }
 
     async deleteApplication(id) {

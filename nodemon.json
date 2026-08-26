@@ -1,0 +1,34 @@
+{
+    "_comment": [
+        "Restart rules for `npm run dev`.",
+        "",
+        "The ignore list is the point of this file. `uploads/` receives every image",
+        "and video an admin adds through the CMS, and `backups/` receives a file",
+        "each time a migration or cleanup script runs. Watching either means the",
+        "server restarts mid-upload — the request dies, the admin sees a network",
+        "error, and the file is already on disk with no database row pointing at",
+        "it. `logs/` is worse: the server writes to it, so a restart triggers a",
+        "write which triggers a restart.",
+        "",
+        "Use `npm run dev` rather than `npm start` while developing. `start` runs",
+        "plain node, which does not reload, so edits to routes or models are",
+        "silently ignored until the process is killed by hand."
+    ],
+    "watch": [
+        "src"
+    ],
+    "ext": "js,json",
+    "ignore": [
+        "uploads/**",
+        "backups/**",
+        "logs/**",
+        "tests/**",
+        "node_modules/**",
+        "**/*.test.js",
+        "**/*.bak"
+    ],
+    "delay": 500,
+    "env": {
+        "NODE_ENV": "development"
+    }
+}

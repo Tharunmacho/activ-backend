@@ -37,6 +37,31 @@ const memberFinancialInfoSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    /**
+     * Which schemes, not merely whether any.
+     *
+     * Both clients have always asked "which government schemes have you
+     * availed?" and sent the answer as `govtSchemes`. The field did not exist
+     * here, so Mongoose strict mode discarded it on every save — silently, with
+     * a 200 and a "saved successfully" toast. All that survived was the derived
+     * `govtSchemeBenefit` boolean, which records *that* a member is a
+     * beneficiary and loses *what of*.
+     *
+     * The list is deliberately not an enum. `businessType` and `turnoverRange`
+     * are enums because a wrong value there breaks routing or reporting; a
+     * scheme name does neither, and pinning the list in the schema would mean a
+     * new government scheme could not be recorded until the server shipped.
+     */
+    govtSchemes: {
+        type: [String],
+        default: []
+    },
+    /** Free text, shown only when "Others" is among the schemes above. */
+    schemeDetails: {
+        type: String,
+        trim: true,
+        default: ''
+    },
     status: {
         type: String,
         enum: ['draft', 'submitted', 'verified', 'rejected'],

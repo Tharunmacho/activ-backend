@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { BUSINESS_TYPES } = require('./businessTypes');
 
 // Company Schema - for business accounts created from dashboard
 const companySchema = new mongoose.Schema({
@@ -23,7 +24,7 @@ const companySchema = new mongoose.Schema({
     },
     businessType: {
         type: String,
-        enum: ['Manufacturing', 'Trader', 'Service Provider', 'Others'],
+        enum: BUSINESS_TYPES,
         required: true
     },
     mobileNumber: {

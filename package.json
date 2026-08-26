@@ -9,13 +9,16 @@
         "test": "jest --coverage",
         "test:watch": "jest --watch",
         "test:workflow": "node tests/approval-workflow.test.js",
+        "test:regions": "node tests/region-architecture.test.js",
         "test:e2e": "node tests/e2e-approval-flow.test.js",
+        "test:cms": "node tests/cms-content.test.js",
         "lint": "eslint src/**/*.js",
         "lint:fix": "eslint src/**/*.js --fix",
         "pm2:start": "pm2 start pm2.config.js",
         "pm2:stop": "pm2 stop activ-backend",
         "pm2:restart": "pm2 restart activ-backend",
-        "pm2:logs": "pm2 logs activ-backend"
+        "pm2:logs": "pm2 logs activ-backend",
+        "test:forms": "node tests/registration-forms.test.js"
     },
     "keywords": [
         "activ",

@@ -6,7 +6,8 @@ const setupSecurity = (app) => {
     // Helmet - security headers
     app.use(helmet({
         contentSecurityPolicy: config.env === 'production',
-        crossOriginEmbedderPolicy: config.env === 'production'
+        crossOriginEmbedderPolicy: config.env === 'production',
+        crossOriginResourcePolicy: { policy: "cross-origin" }
     }));
 
     // CORS

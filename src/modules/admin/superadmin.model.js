@@ -1,13 +1,11 @@
 const mongoose = require('mongoose');
-const config = require('../../config');
+const { getConnection } = require('./adminsDb');
 
-// Create separate connection for adminsdb
-const adminsDbConnection = mongoose.createConnection(
-    config.mongodb.uri.replace('/activ-db', '/adminsdb'), {
-        useNewUrlParser: true,
-        useUnifiedTopology: true
-    }
-);
+// One shared connection to the legacy adminsdb, opened in ./adminsDb.
+// Creating it per model opened four sockets to the same database.
+// Falls back to the default (main-database) connection when adminsdb cannot be
+// opened, so requiring a model can never throw and take the API down at boot.
+const adminsDbConnection = getConnection() || mongoose;
 
 // SuperAdmin Schema
 const superAdminSchema = new mongoose.Schema({
@@ -42,6 +40,10 @@ const superAdminSchema = new mongoose.Schema({
     role: {
         type: String,
         default: 'super_admin'
+    },
+    profilePhoto: {
+        type: String,
+        default: ''
     },
     active: {
         type: Boolean,

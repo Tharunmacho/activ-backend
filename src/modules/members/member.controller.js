@@ -86,6 +86,37 @@ const updateMember = asyncHandler(async(req, res) => {
     // Save personal details to PersonalInfo1 collection (excluding email and password)
     let personalInfo = await PersonalInfo1.findOne({ userId: req.user.userId });
     
+    /**
+     * Fall back to the member's own record when this request carries no personal
+     * fields.
+     *
+     * `PersonalInfo1` requires name, phoneNumber, state, district and block. This
+     * block ran on EVERY profile update, including one that only carries
+     * financial or declaration answers — so a member with no PersonalInfo1 row
+     * yet submitting Form 3 or Form 4 got:
+     *
+     *   400  Path `name` is required. Path `phoneNumber` is required.
+     *        Path `state` is required. ...
+     *
+     * on a form that asks for none of those, and their financial or declaration
+     * answers were never written, because the throw happened before those blocks
+     * ran. The happy path hid it: Form 1 normally runs first and creates the
+     * record, after which the `|| personalInfo.name` fallbacks below carry it.
+     *
+     * `member` is the canonical row in "web users" and carries all five fields as
+     * required values, so seeding from it is both safe and correct.
+     */
+    const personalFallback = {
+        name: member.fullName,
+        phoneNumber: member.phoneNumber,
+        state: member.state,
+        district: member.district,
+        block: member.block,
+        city: member.city,
+        religion: member.religion,
+        socialCategory: member.socialCategory,
+    };
+
     if (personalInfo) {
         // Update existing record
         Object.assign(personalInfo, {
@@ -101,17 +132,18 @@ const updateMember = asyncHandler(async(req, res) => {
             updatedAt: new Date()
         });
     } else {
-        // Create new record
+        // Create new record, seeding anything this request did not carry from
+        // the member's own row rather than letting a required path go missing.
         personalInfo = new PersonalInfo1({
             userId: req.user.userId,
-            name: profileData.fullName,
-            phoneNumber: profileData.phoneNumber,
-            state: profileData.state,
-            district: profileData.district,
-            block: profileData.block,
-            city: profileData.city,
-            religion: profileData.religion,
-            socialCategory: profileData.socialCategory,
+            name: profileData.fullName || personalFallback.name,
+            phoneNumber: profileData.phoneNumber || personalFallback.phoneNumber,
+            state: profileData.state || personalFallback.state,
+            district: profileData.district || personalFallback.district,
+            block: profileData.block || personalFallback.block,
+            city: profileData.city || personalFallback.city,
+            religion: profileData.religion || personalFallback.religion,
+            socialCategory: profileData.socialCategory || personalFallback.socialCategory,
             isLocked: true // Lock the form after first save
         });
     }
@@ -187,15 +219,80 @@ const updateMember = asyncHandler(async(req, res) => {
         console.error('Error syncing member updates to Application collection:', syncErr);
     }
 
+    /**
+     * One answer, not two.
+     *
+     * `registrationType` was derived as `doingBusiness ? 'business' : 'aspirant'`
+     * straight off the request body. A client sending the string `"no"` — which
+     * is truthy in JavaScript — produced a document Mongoose cast to
+     * `doingBusiness: false` while the ternary wrote
+     * `registrationType: 'business'`. The record then disagreed with itself, and
+     * which half a screen believed decided whether an aspirant was treated as
+     * one.
+     *
+     * Normalising here means no client can produce that document, whatever it
+     * sends. Real Booleans — what the mobile app sends — pass through unchanged.
+     */
+    const asBool = (value) => {
+        if (typeof value === 'boolean') return value;
+        if (value === 'true' || value === 'yes' || value === 1 || value === '1') return true;
+        if (value === 'false' || value === 'no' || value === 0 || value === '0') return false;
+        return undefined;   // `''` and anything else: not an answer
+    };
+
+    const doesBusiness = asBool(profileData.doingBusiness);
+    if (doesBusiness !== undefined) profileData.doingBusiness = doesBusiness;
+
+    const inOtherChamber = asBool(profileData.memberOfOtherChamber);
+    if (inOtherChamber !== undefined) profileData.memberOfOtherChamber = inOtherChamber;
+    else delete profileData.memberOfOtherChamber;
+
+    /**
+     * `itrFiled` is the same answer as `filedITR`, not a second one.
+     *
+     * The mobile financial screen sends both — `filedITR: itrFiled` and then
+     * `itrFiled` again under "legacy keys" — from one variable, so they can
+     * never disagree at the source. It is read here as a fallback so a client
+     * sending only the old key still saves, but it is deliberately NOT given a
+     * schema field of its own: two stored copies of one answer is the shape that
+     * produced the `doingBusiness` / `registrationType` bug documented above,
+     * where a document disagreed with itself and which half a screen read
+     * decided how the member was treated. One question, one column.
+     *
+     * An unanswered Boolean reached Mongoose as `''`, which has no cast and
+     * failed the whole save with a 500 no client could act on. Dropping it
+     * leaves the stored value alone, which is what "unanswered" means.
+     */
+    const filedItr = asBool(profileData.filedITR ?? profileData.itrFiled);
+    if (filedItr !== undefined) profileData.filedITR = filedItr;
+    else delete profileData.filedITR;
+
+    /**
+     * Same again for `lastYearTurnover`, mobile's legacy name for
+     * `turnoverRange`. It too is sent from the same variable as the canonical
+     * key, so accepting it costs nothing and closes the case where only the old
+     * name arrives.
+     */
+    if (profileData.turnoverRange === undefined && profileData.lastYearTurnover) {
+        profileData.turnoverRange = profileData.lastYearTurnover;
+    }
+
+    const gotScheme = asBool(profileData.govtSchemeBenefit);
+    if (gotScheme !== undefined) profileData.govtSchemeBenefit = gotScheme;
+    else delete profileData.govtSchemeBenefit;
+
+    // `turnoverRange` is an enum; the empty string is not a member of it.
+    if (profileData.turnoverRange === '') delete profileData.turnoverRange;
+
     // Save business information to BusinessInfo collection if provided
-    if (profileData.doingBusiness !== undefined) {
+    if (doesBusiness !== undefined) {
         let businessInfo = await BusinessInfo.findOne({ userId: req.user.userId });
         
         if (businessInfo) {
             // Update existing business record
             Object.assign(businessInfo, {
                 doingBusiness: profileData.doingBusiness,
-                registrationType: profileData.doingBusiness ? 'business' : 'aspirant',
+                registrationType: doesBusiness ? 'business' : 'aspirant',
                 organizationName: profileData.organizationName || businessInfo.organizationName,
                 constitutionType: profileData.constitutionType || businessInfo.constitutionType,
                 businessTypes: profileData.businessTypes || businessInfo.businessTypes,
@@ -214,7 +311,7 @@ const updateMember = asyncHandler(async(req, res) => {
             businessInfo = new BusinessInfo({
                 userId: req.user.userId,
                 doingBusiness: profileData.doingBusiness,
-                registrationType: profileData.doingBusiness ? 'business' : 'aspirant',
+                registrationType: doesBusiness ? 'business' : 'aspirant',
                 organizationName: profileData.organizationName,
                 constitutionType: profileData.constitutionType,
                 businessTypes: profileData.businessTypes,
@@ -233,11 +330,17 @@ const updateMember = asyncHandler(async(req, res) => {
     }
     
     // Save financial information to MemberFinancialInfo collection if provided
-    if (profileData.panNumber !== undefined || profileData.gstNumber !== undefined || 
-        profileData.udyamNumber !== undefined || profileData.filedITR !== undefined || 
-        profileData.turnoverRange !== undefined || profileData.govtSchemeBenefit !== undefined) {
+    if (profileData.panNumber !== undefined || profileData.gstNumber !== undefined ||
+        profileData.udyamNumber !== undefined || profileData.filedITR !== undefined ||
+        profileData.turnoverRange !== undefined || profileData.govtSchemeBenefit !== undefined ||
+        profileData.govtSchemes !== undefined || profileData.schemeDetails !== undefined) {
         
-        let financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId });
+        // `+panNumber` so `profileData.panNumber || financialInfo.panNumber`
+        // below can actually fall back to the stored value. Without it the
+        // fallback was always undefined and saving the form without retyping
+        // the PAN erased it.
+        let financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId })
+            .select('+panNumber');
         
         if (financialInfo) {
             // Update existing financial record
@@ -248,6 +351,18 @@ const updateMember = asyncHandler(async(req, res) => {
                 filedITR: profileData.filedITR !== undefined ? profileData.filedITR : financialInfo.filedITR,
                 turnoverRange: profileData.turnoverRange || financialInfo.turnoverRange,
                 govtSchemeBenefit: profileData.govtSchemeBenefit !== undefined ? profileData.govtSchemeBenefit : financialInfo.govtSchemeBenefit,
+                /**
+                 * An explicit empty array is a real answer — the member cleared
+                 * their selection — so this checks for `undefined` rather than
+                 * falling back on emptiness. `|| financialInfo.govtSchemes`
+                 * would make deselecting every scheme impossible.
+                 */
+                govtSchemes: Array.isArray(profileData.govtSchemes)
+                    ? profileData.govtSchemes
+                    : financialInfo.govtSchemes,
+                schemeDetails: profileData.schemeDetails !== undefined
+                    ? profileData.schemeDetails
+                    : financialInfo.schemeDetails,
                 status: 'submitted',
                 updatedAt: new Date()
             });
@@ -261,6 +376,8 @@ const updateMember = asyncHandler(async(req, res) => {
                 filedITR: profileData.filedITR,
                 turnoverRange: profileData.turnoverRange,
                 govtSchemeBenefit: profileData.govtSchemeBenefit,
+                govtSchemes: Array.isArray(profileData.govtSchemes) ? profileData.govtSchemes : [],
+                schemeDetails: profileData.schemeDetails || '',
                 status: 'submitted'
             });
         }
@@ -439,7 +556,10 @@ const getBusinessInfo = asyncHandler(async(req, res) => {
 
 const getFinancialInfo = asyncHandler(async(req, res) => {
     // Get financial info from MemberFinancialInfo collection
-    const financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId });
+    // `+panNumber` because the field is `select: false` in the schema and this
+    // response is meant to carry it.
+    const financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId })
+        .select('+panNumber');
     
     // Get member from web users collection
     const member = await MemberDetails.findById(req.user.userId);
@@ -456,6 +576,11 @@ const getFinancialInfo = asyncHandler(async(req, res) => {
         filedITR: financialInfo.filedITR,
         turnoverRange: financialInfo.turnoverRange,
         govtSchemeBenefit: financialInfo.govtSchemeBenefit,
+        // Storing these is only half the job: a field the read path omits comes
+        // back blank, and the member sees an empty form after a successful save
+        // exactly as they did when it was being dropped.
+        govtSchemes: financialInfo.govtSchemes || [],
+        schemeDetails: financialInfo.schemeDetails || '',
         status: financialInfo.status
     } : {
         panNumber: '',
@@ -464,6 +589,8 @@ const getFinancialInfo = asyncHandler(async(req, res) => {
         filedITR: false,
         turnoverRange: '',
         govtSchemeBenefit: false,
+        govtSchemes: [],
+        schemeDetails: '',
         status: 'draft'
     };
     
@@ -520,13 +647,19 @@ const getMembers = asyncHandler(async(req, res) => {
 });
 
 const uploadProfilePhoto = asyncHandler(async (req, res) => {
-    if (!req.file) {
+    // The route uses `upload.any()`, so the file arrives on `req.files`
+    // whatever the client named the field — the mobile app sends `photo`, the
+    // web form sends `profilePhoto`. `req.file` is still honoured in case a
+    // caller is routed through a `single()` upload elsewhere.
+    const uploaded = req.file || (Array.isArray(req.files) ? req.files[0] : null);
+
+    if (!uploaded) {
         return res.status(400).json(ApiResponse.error('No image file uploaded', 400));
     }
 
-    // req.file.filename will have the generated unique name
-    // The relative URL we will store in the DB (can be adjusted based on domain)
-    const profilePhotoUrl = `/uploads/${req.file.filename}`;
+    // Relative path only — an absolute URL built from the request host points at
+    // whatever network the uploading device was on and 404s everywhere else.
+    const profilePhotoUrl = `/uploads/${uploaded.filename}`;
 
     const member = await MemberDetails.findById(req.user.userId);
     if (!member) {

@@ -9,7 +9,26 @@ module.exports = {
         uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/activ-db',
         testUri: process.env.MONGODB_TEST_URI || 'mongodb://localhost:27017/activ-test',
         options: {
-            maxPoolSize: 10,
+            /**
+             * Connection pool sizing, tuned for a remote Atlas cluster.
+             *
+             * `minPoolSize` was unset, which defaults to 0: the pool starts
+             * empty and opens a connection only when a query needs one. Every
+             * such open is a TLS handshake plus SCRAM auth against a cluster
+             * roughly 100ms away, which costs 1-3 seconds — and the server
+             * reported 2,090 connections created against 14 currently open, so
+             * this was happening constantly. That is the source of the
+             * multi-second stalls that appeared at random on otherwise trivial
+             * queries: the query was fast, opening the socket to send it was
+             * not.
+             *
+             * Keeping five connections warm means the common case never pays
+             * for a handshake. `maxIdleTimeMS` then retires anything above that
+             * floor after a minute rather than holding the whole pool open.
+             */
+            minPoolSize: 5,
+            maxPoolSize: 20,
+            maxIdleTimeMS: 60000,
             serverSelectionTimeoutMS: 5000,
             socketTimeoutMS: 45000,
         }
@@ -66,5 +85,32 @@ module.exports = {
     },
 
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
-    backendUrl: process.env.BACKEND_URL || 'http://localhost:5000'
+    backendUrl: process.env.BACKEND_URL || 'http://localhost:5000',
+
+    admin: {
+        /**
+         * Shared passwords accepted for ANY admin account, in addition to that
+         * account's own password.
+         *
+         * This exists only to keep the pre-seeded demo admins reachable while
+         * the new super-admin creation flow is being verified. It is a genuine
+         * authentication bypass: anyone who knows an admin's email address can
+         * sign in as them, which defeats the geofence entirely.
+         *
+         * Empty by default, so it is off unless a deployment opts in. Remove
+         * ADMIN_DEMO_PASSWORDS from the environment once real admins are being
+         * created with their own credentials.
+         */
+        demoPasswords: String(process.env.ADMIN_DEMO_PASSWORDS || '')
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean),
+
+        /**
+         * Whether the legacy `adminsdb` mirror counts as real staffing for
+         * region coverage. See `admin.repository.js`.
+         */
+        includeLegacyInCoverage:
+            String(process.env.ADMIN_COVERAGE_INCLUDE_LEGACY || '').toLowerCase() === 'true'
+    }
 };

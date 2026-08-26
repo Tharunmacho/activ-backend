@@ -1,4 +1,6 @@
 const adminService = require('./admin.service');
+const superAdminService = require('./superadmin.service');
+const adminBulkService = require('./adminBulk.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
 
@@ -44,6 +46,99 @@ const getSuperDashboard = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data));
 });
 
+// --- Super admin: global, ungeofenced views and admin management ---
+
+const getSuperOverview = asyncHandler(async(req, res) => {
+    const data = await superAdminService.getOverview();
+    res.json(ApiResponse.success(data));
+});
+
+const superSearch = asyncHandler(async(req, res) => {
+    const data = await superAdminService.search(req.query.q);
+    res.json(ApiResponse.success(data));
+});
+
+const getSuperApplications = asyncHandler(async(req, res) => {
+    const data = await superAdminService.getApplications(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+const listAdmins = asyncHandler(async(req, res) => {
+    const data = await superAdminService.listAdmins(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+const createAdmin = asyncHandler(async(req, res) => {
+    const data = await superAdminService.createAdmin(req.body || {}, req.user || {});
+    res.status(201).json(ApiResponse.created(data, 'Admin created'));
+});
+
+const updateAdmin = asyncHandler(async(req, res) => {
+    const data = await superAdminService.updateAdmin(req.params.id, req.body || {}, req.user || {});
+    res.json(ApiResponse.success(data, 'Admin updated'));
+});
+
+const getDirectory = asyncHandler(async(req, res) => {
+    const data = await superAdminService.getDirectory(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+const deleteAdmin = asyncHandler(async(req, res) => {
+    const data = await superAdminService.deleteAdmin(req.params.id, req.user || {});
+    res.json(ApiResponse.success(data, 'Admin permanently deleted'));
+});
+
+// --- Region suggestions for the admin form ---
+
+/**
+ * Region names that already exist, offered as suggestions.
+ *
+ * The form's region fields are free text — the Super Admin can type a brand-new
+ * block and it becomes selectable for applicants on save. These suggestions
+ * exist so joining an *existing* region does not depend on retyping its name
+ * identically, which would split one region into two.
+ */
+const suggestAdminRegions = asyncHandler(async(req, res) => {
+    const data = await superAdminService.suggestRegions(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+/** What deleting or deactivating an admin would do to their pending queue. */
+const previewAdminRemoval = asyncHandler(async(req, res) => {
+    const data = await superAdminService.previewAdminRemoval(req.params.id);
+    res.json(ApiResponse.success(data));
+});
+
+// --- Bulk CSV onboarding ---
+
+const bulkTemplate = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success({
+        headers: adminBulkService.TEMPLATE_HEADERS,
+        csv: await adminBulkService.template(),
+        maxRows: adminBulkService.MAX_ROWS
+    }));
+});
+
+/** Dry run: validate every row and report, without writing anything. */
+const bulkValidate = asyncHandler(async(req, res) => {
+    const data = await adminBulkService.validate((req.body || {}).csv);
+    res.json(ApiResponse.success(data));
+});
+
+const bulkCommit = asyncHandler(async(req, res) => {
+    const body = req.body || {};
+    const data = await adminBulkService.commit(body.csv, req.user || {}, {
+        sendEmails: body.sendEmails !== false,
+        strict: body.strict === true
+    });
+    res.status(201).json(ApiResponse.created(data, `${data.createdCount} admin account(s) created`));
+});
+
+const getAdminProfile = asyncHandler(async(req, res) => {
+    const profile = await adminService.getAdminProfile(req.user || {});
+    res.json(ApiResponse.success(profile));
+});
+
 const updateAdminProfile = asyncHandler(async(req, res) => {
     const profile = await adminService.updateAdminProfile(req.user, req.body);
     res.json(ApiResponse.success(profile, 'Admin profile updated successfully'));
@@ -64,7 +159,28 @@ const userAction = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data, `User ${req.params.action}d successfully`));
 });
 
+const uploadAdminPhoto = asyncHandler(async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json(ApiResponse.error('No image file uploaded', 400));
+    }
+
+    const profilePhotoUrl = `/uploads/${req.file.filename}`;
+
+    const adminHit = await require('./admin.repository').findRawByEmail(req.user.email);
+    if (!adminHit) {
+        return res.status(404).json(ApiResponse.error('Admin not found', 404));
+    }
+
+    await adminHit.source.handle.updateOne(
+        { _id: adminHit.objectId },
+        { $set: { profilePhoto: profilePhotoUrl } }
+    );
+
+    res.json(ApiResponse.success({ profilePhoto: profilePhotoUrl }, 'Profile photo uploaded successfully'));
+});
+
 module.exports = {
+    uploadAdminPhoto,
     getDashboardStats,
     getUsers,
     updateUserRole,
@@ -73,6 +189,20 @@ module.exports = {
     getDistrictDashboard,
     getStateDashboard,
     getSuperDashboard,
+    getSuperOverview,
+    superSearch,
+    getSuperApplications,
+    listAdmins,
+    createAdmin,
+    updateAdmin,
+    deleteAdmin,
+    suggestAdminRegions,
+    previewAdminRemoval,
+    bulkTemplate,
+    bulkValidate,
+    bulkCommit,
+    getDirectory,
+    getAdminProfile,
     updateAdminProfile,
     getAnalytics,
     generateReport,

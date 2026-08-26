@@ -1,0 +1,27 @@
+{
+  "note": "Union'd over india-geography.json in geography.js. States and districts the bundled export is missing outright. Blocks are deliberately empty where they are not reliably known — the Super Admin's region field carries a + that adds a block by hand, which is honest, whereas inventing block names here would put wrong-but-official-looking options in the applicant's dropdown.",
+  "states": [
+    {
+      "state": "Delhi",
+      "districts": [
+        { "district": "Central Delhi", "block": [] },
+        { "district": "East Delhi", "block": [] },
+        { "district": "New Delhi", "block": [] },
+        { "district": "North Delhi", "block": [] },
+        { "district": "North East Delhi", "block": [] },
+        { "district": "North West Delhi", "block": [] },
+        { "district": "Shahdara", "block": [] },
+        { "district": "South Delhi", "block": [] },
+        { "district": "South East Delhi", "block": [] },
+        { "district": "South West Delhi", "block": [] },
+        { "district": "West Delhi", "block": [] }
+      ]
+    },
+    {
+      "state": "Chandigarh",
+      "districts": [
+        { "district": "Chandigarh", "block": [] }
+      ]
+    }
+  ]
+}

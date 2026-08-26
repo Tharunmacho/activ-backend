@@ -1,0 +1,301 @@
+const adminRepository = require('../admin/admin.repository');
+const geography = require('./geography');
+
+/**
+ * The region tree, derived from the admin database.
+ *
+ * This module is the practical expression of "the admin database is the master
+ * truth". Nothing here reads a static list of Indian regions to decide what an
+ * applicant may choose — it reads who has actually been staffed, and offers
+ * exactly those regions. An applicant physically cannot pick a block that has
+ * nobody to review their file, so an orphaned application cannot be created.
+ *
+ * Coverage is defined bottom-up and deliberately strictly:
+ *
+ *   a block is selectable   <- it has >= 1 active block admin
+ *   a district is selectable <- it has >= 1 selectable block
+ *   a state is selectable    <- it has >= 1 selectable district
+ *
+ * Requiring the block level means every offered choice has a complete review
+ * chain, because the hierarchical creation rules guarantee that a block admin
+ * can only exist under a district admin, who can only exist under a state admin.
+ */
+
+const key = (value) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+/** Bucket the active admins by role, keeping the first-seen canonical spelling. */
+const buildCoverage = (admins) => {
+    // stateKey -> { name, admins:[], districts: Map }
+    const states = new Map();
+
+    const stateNode = (name) => {
+        const k = key(name);
+        if (!k) return null;
+        if (!states.has(k)) {
+            states.set(k, { name: String(name).trim(), admins: [], districts: new Map() });
+        }
+        return states.get(k);
+    };
+
+    const districtNode = (stateName, name) => {
+        const parent = stateNode(stateName);
+        if (!parent) return null;
+        const k = key(name);
+        if (!k) return null;
+        if (!parent.districts.has(k)) {
+            parent.districts.set(k, { name: String(name).trim(), admins: [], blocks: new Map() });
+        }
+        return parent.districts.get(k);
+    };
+
+    const blockNode = (stateName, districtName, name) => {
+        const parent = districtNode(stateName, districtName);
+        if (!parent) return null;
+        const k = key(name);
+        if (!k) return null;
+        if (!parent.blocks.has(k)) {
+            parent.blocks.set(k, { name: String(name).trim(), admins: [] });
+        }
+        return parent.blocks.get(k);
+    };
+
+    (admins || []).forEach((admin) => {
+        if (admin.role === 'state_admin') {
+            const node = stateNode(admin.state);
+            if (node) node.admins.push(admin);
+        } else if (admin.role === 'district_admin') {
+            const node = districtNode(admin.state, admin.district);
+            if (node) node.admins.push(admin);
+        } else if (admin.role === 'block_admin') {
+            const node = blockNode(admin.state, admin.district, admin.block);
+            if (node) node.admins.push(admin);
+        }
+        // super_admin is not geofenced and belongs to no node.
+    });
+
+    return states;
+};
+
+const summarise = (admins) => (admins || []).map(a => ({
+    id: a.id,
+    fullName: a.fullName,
+    email: a.email
+}));
+
+class RegionService {
+    /** The raw coverage map, rebuilt from the admin repository's cached scan. */
+    async coverageMap({ fresh = false } = {}) {
+        const admins = await adminRepository.findActive({ fresh });
+        return buildCoverage(admins);
+    }
+
+    /**
+     * The full selectable tree.
+     *
+     * `staffed` counts are carried on every node so the super admin's directory
+     * can show where the platform is thin without a second round-trip, while the
+     * applicant-facing endpoints only ever read the names.
+     */
+    async getTree(options = {}) {
+        const states = await this.coverageMap(options);
+
+        const tree = [];
+        states.forEach((stateNode) => {
+            const districts = [];
+
+            stateNode.districts.forEach((districtNode) => {
+                const blocks = [];
+                districtNode.blocks.forEach((blockNode) => {
+                    if (blockNode.admins.length === 0) return;
+                    blocks.push({
+                        name: blockNode.name,
+                        admins: blockNode.admins.length,
+                        adminList: summarise(blockNode.admins)
+                    });
+                });
+
+                if (blocks.length === 0) return;
+                blocks.sort((a, b) => a.name.localeCompare(b.name));
+
+                districts.push({
+                    name: districtNode.name,
+                    admins: districtNode.admins.length,
+                    adminList: summarise(districtNode.admins),
+                    blocks
+                });
+            });
+
+            if (districts.length === 0) return;
+            districts.sort((a, b) => a.name.localeCompare(b.name));
+
+            tree.push({
+                name: stateNode.name,
+                admins: stateNode.admins.length,
+                adminList: summarise(stateNode.admins),
+                districts
+            });
+        });
+
+        tree.sort((a, b) => a.name.localeCompare(b.name));
+        return tree;
+    }
+
+    /** State names an applicant may choose. */
+    async listStates(options = {}) {
+        const tree = await this.getTree(options);
+        return tree.map(node => node.name);
+    }
+
+    /** District names an applicant may choose inside a state. */
+    async listDistricts(state, options = {}) {
+        const tree = await this.getTree(options);
+        const node = tree.find(entry => key(entry.name) === key(state));
+        return node ? node.districts.map(d => d.name) : [];
+    }
+
+    /** Block names an applicant may choose inside a district. */
+    async listBlocks(state, district, options = {}) {
+        const tree = await this.getTree(options);
+        const stateNode = tree.find(entry => key(entry.name) === key(state));
+        if (!stateNode) return [];
+        const districtNode = stateNode.districts.find(entry => key(entry.name) === key(district));
+        return districtNode ? districtNode.blocks.map(b => b.name) : [];
+    }
+
+    /**
+     * How many active admins sit at each tier above and at a region.
+     *
+     * This is what orphan fallback routing is decided on: a tier with a count of
+     * zero cannot review anything, so its queue bubbles up to the first tier
+     * above it that still has someone.
+     */
+    async coverageFor({ state, district, block } = {}, options = {}) {
+        const states = await this.coverageMap(options);
+
+        const stateNode = states.get(key(state)) || null;
+        const districtNode = stateNode ? (stateNode.districts.get(key(district)) || null) : null;
+        const blockNode = districtNode ? (districtNode.blocks.get(key(block)) || null) : null;
+
+        return {
+            state: stateNode ? stateNode.admins.length : 0,
+            district: districtNode ? districtNode.admins.length : 0,
+            block: blockNode ? blockNode.admins.length : 0
+        };
+    }
+
+    /**
+     * Coverage for many regions at once.
+     *
+     * A dashboard classifies up to a few hundred applications per load and each
+     * one needs to know whether its block is staffed. Resolving them against one
+     * already-built map keeps that a single scan instead of N.
+     */
+    async coverageResolver(options = {}) {
+        const states = await this.coverageMap(options);
+
+        return (region = {}) => {
+            const stateNode = states.get(key(region.state)) || null;
+            const districtNode = stateNode ? (stateNode.districts.get(key(region.district)) || null) : null;
+            const blockNode = districtNode ? (districtNode.blocks.get(key(region.block)) || null) : null;
+
+            return {
+                state: stateNode ? stateNode.admins.length : 0,
+                district: districtNode ? districtNode.admins.length : 0,
+                block: blockNode ? blockNode.admins.length : 0
+            };
+        };
+    }
+
+    /** True when at least one region anywhere is selectable. */
+    async hasAnyCoverage(options = {}) {
+        const tree = await this.getTree(options);
+        return tree.length > 0;
+    }
+
+    /**
+     * Gate for registration and application submission.
+     *
+     * Returns `{ ok, reason, region }` rather than throwing, so callers can
+     * decide between rejecting and merely warning. `region` carries the
+     * canonical spellings from the admin database, which is what should be
+     * stored — an applicant who typed a differently-cased block name would
+     * otherwise fall outside their own admin's geofence regex.
+     *
+     * Bootstrap escape hatch: on a platform with no admins at all, coverage
+     * cannot be enforced without locking everybody out, so an empty tree passes
+     * and says so. That is the only case where an unstaffed region is accepted.
+     */
+    async validateRegion({ state, district, block } = {}, options = {}) {
+        const [tree, states] = await Promise.all([
+            this.getTree(options),
+            this.coverageMap(options)
+        ]);
+
+        // The bootstrap test is "does any geofenced admin exist at all", not
+        // "is the tree empty". A platform with three state admins and no block
+        // admins yet has an empty *selectable* tree, and treating that as
+        // unstaffed would wave through every region in India — the exact hole
+        // this gate exists to close. It is only skipped on a genuinely blank
+        // platform, where enforcing coverage would lock everybody out.
+        if (states.size === 0) {
+            const normalized = geography.normalizeRegion({ state, district, block });
+            return {
+                ok: true,
+                bootstrap: true,
+                reason: 'No admins exist yet, so region coverage cannot be enforced',
+                treeEmpty: tree.length === 0,
+                region: {
+                    state: normalized.state,
+                    district: normalized.district,
+                    block: normalized.block
+                }
+            };
+        }
+
+        const stateNode = tree.find(entry => key(entry.name) === key(state));
+        if (!stateNode) {
+            return {
+                ok: false,
+                reason: `No active admin covers the state "${String(state || '').trim() || '(none selected)'}". Choose a state from the list.`,
+                region: null
+            };
+        }
+
+        const districtNode = stateNode.districts.find(entry => key(entry.name) === key(district));
+        if (!districtNode) {
+            return {
+                ok: false,
+                reason: `No active admin covers the district "${String(district || '').trim() || '(none selected)'}" in ${stateNode.name}. Choose a district from the list.`,
+                region: null
+            };
+        }
+
+        const blockNode = districtNode.blocks.find(entry => key(entry.name) === key(block));
+        if (!blockNode) {
+            return {
+                ok: false,
+                reason: `No active admin covers the block "${String(block || '').trim() || '(none selected)'}" in ${districtNode.name}. Choose a block from the list.`,
+                region: null
+            };
+        }
+
+        return {
+            ok: true,
+            bootstrap: false,
+            reason: '',
+            region: {
+                state: stateNode.name,
+                district: districtNode.name,
+                block: blockNode.name
+            }
+        };
+    }
+
+    /** Drop the cached admin scan. Called after any admin write. */
+    invalidate() {
+        adminRepository.invalidate();
+    }
+}
+
+module.exports = new RegionService();
+module.exports.buildCoverage = buildCoverage;

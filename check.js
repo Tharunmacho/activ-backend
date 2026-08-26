@@ -1,0 +1,1 @@
+require('dotenv').config(); const mongoose = require('mongoose'); const config = require('./src/config'); mongoose.connect(config.db.uri).then(async () => { const MemberAuth = require('./src/modules/auth/auth.model'); const users = await MemberAuth.find(); console.log('Users found:', users.map(u => u.email)); process.exit(0); });

@@ -39,10 +39,44 @@ const logout = asyncHandler(async(req, res) => {
 });
 
 const getCurrentUser = asyncHandler(async(req, res) => {
-    const user = await authService.getCurrentUser(req.user.userId);
+    // The whole token is passed, not just the id: admins have no row in `users`
+    // and are located by the email claim instead.
+    const user = await authService.getCurrentUser(req.user.userId, req.user);
 
     res.json(
         ApiResponse.success(user, 'User fetched successfully')
+    );
+});
+
+/**
+ * Always answers the same way, whether or not the address is registered.
+ * See the note in authService.requestPasswordReset.
+ */
+const forgotPassword = asyncHandler(async(req, res) => {
+    const { email } = req.body;
+
+    const result = await authService.requestPasswordReset(email);
+
+    res.json(ApiResponse.success(result, result.message));
+});
+
+const verifyResetToken = asyncHandler(async(req, res) => {
+    const token = req.query.token || req.body.token;
+
+    const result = await authService.verifyResetToken(token);
+
+    res.json(ApiResponse.success(result));
+});
+
+const resetPassword = asyncHandler(async(req, res) => {
+    const { token, newPassword, password } = req.body;
+
+    // `password` is accepted as an alias so a client that reuses its
+    // change-password form field does not silently send nothing.
+    await authService.resetPassword(token, newPassword || password);
+
+    res.json(
+        ApiResponse.success(null, 'Password reset successfully. You can now sign in.')
     );
 });
 
@@ -62,5 +96,8 @@ module.exports = {
     refreshToken,
     logout,
     getCurrentUser,
-    changePassword
+    changePassword,
+    forgotPassword,
+    verifyResetToken,
+    resetPassword
 };

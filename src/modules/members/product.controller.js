@@ -1,7 +1,9 @@
+const mongoose = require('mongoose');
 const Product = require('../../models/Product');
 const Company = require('./company.model');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const ApiError = require('../../core/utils/ApiError');
+const { persistInlineImage } = require('../../core/utils/inlineImage');
 
 /**
  * @desc    Create a new product
@@ -25,9 +27,6 @@ const createProduct = asyncHandler(async (req, res) => {
 
   const finalName = (name || productName || '').trim();
 
-  console.log('Creating product for user:', userId);
-  console.log('Product data:', { companyId, name: finalName, category, price });
-  console.log('Product file uploaded:', req.file);
 
   if (!finalName) {
     throw new ApiError(400, 'Product name is required');
@@ -46,13 +45,20 @@ const createProduct = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Company profile not found. Please create a company profile first.');
   }
 
-  // Process uploaded image file saved in local /uploads directory
-  let finalImageUrl = bodyImageUrl || '';
+  /**
+   * A body `imageUrl` is accepted, but never stored inline.
+   *
+   * The website's product form used to send a base64 data URL here and it was
+   * written straight into the document — one product reached 2.19 MB, and every
+   * query that returned it took ~7s instead of ~140ms. `persistInlineImage`
+   * writes such a value to /uploads and hands back the path; an ordinary path
+   * passes through untouched.
+   */
+  let finalImageUrl = persistInlineImage(bodyImageUrl, 'product-img');
   if (req.file) {
     // Relative path only - an absolute URL built from req.get('host') points at
     // the uploading device's own network and 404s for everyone else.
     finalImageUrl = `/uploads/${req.file.filename}`;
-    console.log('Product image saved to disk:', finalImageUrl);
   }
 
   // Create product
@@ -70,7 +76,6 @@ const createProduct = asyncHandler(async (req, res) => {
     isActive: true
   });
 
-  console.log('✅ Product created:', product._id);
 
   res.status(201).json({
     success: true,
@@ -88,19 +93,32 @@ const getProducts = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
   const { companyId } = req.query;
 
-  console.log('Fetching products for user:', userId);
 
   const filter = { userId };
   if (companyId) {
     filter.companyId = companyId;
   }
 
+  /**
+   * No `populate` here.
+   *
+   * This populated `companyId` with businessName / location / mobileNumber,
+   * which is a second query to the companies collection — another ~100ms
+   * against a remote cluster — for fields no caller reads. Both clients use
+   * `companyId` only to re-check that a row belongs to the company on screen,
+   * and they already handle it being either an id or an object:
+   *
+   *     const owner = typeof p?.companyId === 'object' ? p?.companyId?._id : p?.companyId;
+   *
+   * so the raw ObjectId serves that check exactly as well.
+   *
+   * `discoverProducts` keeps its populate: the Discover screen genuinely
+   * renders the seller's name, phone and logo from it.
+   */
   const products = await Product.find(filter)
-    .populate('companyId', 'businessName location mobileNumber')
     .sort({ createdAt: -1 })
     .lean();
 
-  console.log(`✅ Found ${products.length} products`);
 
   res.json({
     success: true,
@@ -222,14 +240,13 @@ const updateProduct = asyncHandler(async (req, res) => {
   if (req.file) {
     // Relative path only - see the note in createProduct.
     product.imageUrl = `/uploads/${req.file.filename}`;
-    console.log('Updated product image saved to disk:', product.imageUrl);
   } else if (bodyImageUrl !== undefined) {
-    product.imageUrl = bodyImageUrl;
+    // Same conversion as createProduct - an edit can carry base64 too.
+    product.imageUrl = persistInlineImage(bodyImageUrl, 'product-img');
   }
 
   await product.save();
 
-  console.log('✅ Product updated:', product._id);
 
   res.json({
     success: true,
@@ -255,7 +272,6 @@ const deleteProduct = asyncHandler(async (req, res) => {
 
   await product.deleteOne();
 
-  console.log('✅ Product deleted:', id);
 
   res.json({
     success: true,
@@ -272,22 +288,59 @@ const getProductStats = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
   const { companyId } = req.query;
 
-  // Build filter
+  /**
+   * Built for an aggregation, which means casting by hand.
+   *
+   * `find()` and `countDocuments()` run every query value through the schema
+   * first, so passing the raw `companyId` string worked. An aggregation
+   * pipeline is handed to the driver untouched — Mongoose casts nothing inside
+   * `$match` — and `companyId` is an ObjectId on the Product schema. A string
+   * there matches no document at all and the endpoint would answer three
+   * cheerful zeros for every catalog, with no error anywhere.
+   *
+   * `userId` is genuinely a String on this schema, so it is passed as-is.
+   */
   const filter = { userId };
   if (companyId) {
-    filter.companyId = companyId;
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      throw new ApiError(400, 'Invalid company id');
+    }
+    filter.companyId = new mongoose.Types.ObjectId(companyId);
   }
 
-  const totalProducts = await Product.countDocuments(filter);
-  const featuredProducts = await Product.countDocuments({ ...filter, isFeatured: true });
-  const activeProducts = await Product.countDocuments({ ...filter, isActive: true });
+  /**
+   * One round trip, not three.
+   *
+   * This ran three sequential `countDocuments` calls. Against a remote Atlas
+   * cluster each is its own request/response over the internet, so the handler
+   * cost three times the network latency to return three numbers over the same
+   * documents: measured at a p50 of 359ms, against 105ms for a single query.
+   * Dashboard, Analytics and Settings all call this endpoint, so it was the
+   * single most expensive thing the business area did.
+   *
+   * `$cond` counts the two flags in the same pass as the total. Booleans that
+   * are absent on older rows read as false, which matches what
+   * `countDocuments({ isActive: true })` did.
+   */
+  const [counts] = await Product.aggregate([
+    { $match: filter },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        featured: { $sum: { $cond: [{ $eq: ['$isFeatured', true] }, 1, 0] } },
+        active: { $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] } }
+      }
+    }
+  ]);
 
   res.json({
     success: true,
     data: {
-      total: totalProducts,
-      featured: featuredProducts,
-      active: activeProducts
+      // An empty catalog produces no group at all, not a group of zeros.
+      total: counts?.total || 0,
+      featured: counts?.featured || 0,
+      active: counts?.active || 0
     }
   });
 });
@@ -309,10 +362,16 @@ const getRecentActivities = asyncHandler(async (req, res) => {
   }
 
   // Get recent products
+  /**
+   * No `populate` here either — it existed to fill a `companyName` field that
+   * no client has ever rendered. Mobile's dashboard reads `label` and
+   * `description`; the website's reads `label`, `description` and `time`. The
+   * feed is already scoped to one company, so naming it on every row would be
+   * repeating the heading anyway.
+   */
   const recentProducts = await Product.find(filter)
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('companyId', 'businessName')
     .lean();
 
   const activities = recentProducts.map(product => ({
@@ -320,7 +379,6 @@ const getRecentActivities = asyncHandler(async (req, res) => {
     label: 'Product created',
     description: product.name,
     productId: product._id,
-    companyName: product.companyId?.businessName,
     time: product.createdAt,
     icon: 'inventory_2'
   }));

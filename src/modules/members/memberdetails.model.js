@@ -82,7 +82,7 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     membershipStatus: {
         type: String,
-        enum: ['pending', 'active', 'expired', 'cancelled'],
+        enum: ['pending', 'approved', 'active', 'expired', 'cancelled'],
         default: 'pending',
         index: true
     },

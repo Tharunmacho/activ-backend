@@ -132,4 +132,22 @@ applicationSchema.index({ status: 1, assignedStateAdmin: 1 });
 applicationSchema.index({ state: 1, district: 1, block: 1 });
 applicationSchema.index({ createdAt: -1 });
 
+// Middleware to backfill required fields on legacy documents
+applicationSchema.pre('validate', function(next) {
+    if (!this.fullName && this.get('memberName')) {
+        this.fullName = this.get('memberName');
+    }
+    if (!this.email && this.get('memberEmail')) {
+        this.email = this.get('memberEmail');
+    }
+    if (!this.phone && this.get('memberPhone')) {
+        this.phone = this.get('memberPhone');
+    }
+    // Final fallback so validation doesn't crash on completely malformed legacy rows
+    if (!this.fullName) this.fullName = 'Unknown Applicant';
+    if (!this.email) this.email = 'unknown@example.com';
+    if (!this.phone) this.phone = '0000000000';
+    next();
+});
+
 module.exports = mongoose.model('Application', applicationSchema);

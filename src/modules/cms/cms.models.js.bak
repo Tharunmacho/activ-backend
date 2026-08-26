@@ -1,0 +1,200 @@
+const mongoose = require('mongoose');
+const { getConnection } = require('../admin/adminsDb');
+
+/**
+ * Content for the public onboarding site, stored in `adminsdb`.
+ *
+ * One collection per page, so a page's content is one document you can read,
+ * export or roll back on its own. `activ-db` holds member and application data;
+ * marketing copy has a different lifecycle and different editors, and mixing
+ * them makes both harder to reason about.
+ *
+ * The connection falls back to the default one when `adminsdb` cannot be
+ * opened, exactly as the admin models do — requiring this file must never throw
+ * and take the API down at boot.
+ */
+const db = getConnection() || mongoose;
+
+/**
+ * Singleton key.
+ *
+ * The home, about and contact documents are one-of-a-kind. Keying them on a
+ * constant gives `upsert` something to match, so the first save creates and
+ * every later one replaces. Without it a second save creates a second document
+ * and the site renders whichever the query happens to return first.
+ */
+const SINGLETON_KEY = 'default';
+
+const singletonKey = {
+    type: String,
+    default: SINGLETON_KEY,
+    unique: true,
+    immutable: true,
+};
+
+/** Who last edited, denormalised so the trail survives their account's deletion. */
+const editedBy = {
+    email: { type: String, default: '' },
+    at: { type: Date },
+};
+
+/**
+ * A picture or a video, plus how it should sit in its frame.
+ *
+ * `mediaType` is stored rather than guessed from the extension: a CDN URL
+ * often has no extension at all, and rendering a video into an `<img>` shows
+ * nothing with no error. `fit` is the editor's answer to "this image is the
+ * wrong shape" — `cover` fills and crops, `contain` shows all of it and pads.
+ */
+const media = {
+    url: { type: String, trim: true, default: '' },
+    type: { type: String, enum: ['image', 'video'], default: 'image' },
+    alt: { type: String, trim: true, default: '' },
+    fit: { type: String, enum: ['cover', 'contain'], default: 'cover' },
+    /** Focal point for `cover`, so a crop does not cut off the subject. */
+    position: { type: String, trim: true, default: 'center' },
+};
+
+// ================================================================= home page
+
+/**
+ * The home page, as four editable blocks.
+ *
+ * They are sub-documents of one page rather than four collections because they
+ * are edited together and rendered together — a half-saved home page with a new
+ * carousel and old stats is not a state worth being able to reach.
+ */
+const homeSchema = new mongoose.Schema({
+    key: singletonKey,
+
+    // ---- 1. carousel -------------------------------------------------------
+    carousel: {
+        slides: [{
+            media,
+            caption: { type: String, trim: true, default: '' },
+        }],
+        headline: { type: String, trim: true, default: '' },
+        subheadline: { type: String, trim: true, default: '' },
+        ctaLabel: { type: String, trim: true, default: '' },
+        ctaHref: { type: String, trim: true, default: '' },
+    },
+
+    // ---- 2. about block ----------------------------------------------------
+    about: {
+        heading: { type: String, trim: true, default: '' },
+        /** The small tracked label above the heading, e.g. "Who We Are". */
+        eyebrow: { type: String, trim: true, default: '' },
+        body: { type: String, default: '' },
+        media,
+        linkLabel: { type: String, trim: true, default: '' },
+        linkHref: { type: String, trim: true, default: '' },
+    },
+
+    // ---- 3. stats ----------------------------------------------------------
+    stats: [{
+        value: { type: String, trim: true, default: '' },
+        label: { type: String, trim: true, default: '' },
+    }],
+
+    // ---- 4. feature cards --------------------------------------------------
+    features: [{
+        /**
+         * A name from the allowed set, not arbitrary markup. The page maps it to
+         * a real icon component; anything unknown falls back rather than
+         * rendering nothing.
+         */
+        icon: { type: String, trim: true, default: 'star' },
+        title: { type: String, trim: true, default: '' },
+        description: { type: String, trim: true, default: '' },
+    }],
+
+    editedBy,
+}, { collection: 'home', timestamps: true });
+
+// ================================================================= about page
+
+const aboutSchema = new mongoose.Schema({
+    key: singletonKey,
+
+    heading: { type: String, trim: true, default: '' },
+    body: { type: String, default: '' },
+    bulletPoints: [{ type: String, trim: true }],
+    media,
+
+    editedBy,
+}, { collection: 'about', timestamps: true });
+
+// ================================================================= gallery
+
+const galleryItemSchema = new mongoose.Schema({
+    media,
+    title: { type: String, trim: true, default: '' },
+    caption: { type: String, trim: true, default: '' },
+
+    /** Explicit, so the grid can be rearranged without deleting and re-adding. */
+    sortOrder: { type: Number, default: 0, index: true },
+    /** Hidden rather than deleted, so a removed image can come back. */
+    visible: { type: Boolean, default: true, index: true },
+
+    editedBy,
+}, { collection: 'gallery', timestamps: true });
+
+galleryItemSchema.index({ visible: 1, sortOrder: 1, createdAt: -1 });
+
+// ================================================================= contact
+
+const contactSettingsSchema = new mongoose.Schema({
+    key: singletonKey,
+
+    addressLines: [{ type: String, trim: true }],
+    phone: { type: String, trim: true, default: '' },
+    alternatePhone: { type: String, trim: true, default: '' },
+    email: { type: String, trim: true, lowercase: true, default: '' },
+    mapEmbedUrl: { type: String, trim: true, default: '' },
+
+    social: {
+        facebook: { type: String, trim: true, default: '' },
+        instagram: { type: String, trim: true, default: '' },
+        linkedin: { type: String, trim: true, default: '' },
+        youtube: { type: String, trim: true, default: '' },
+    },
+
+    editedBy,
+}, { collection: 'contact_settings', timestamps: true });
+
+// ================================================================= messages
+
+const contactMessageSchema = new mongoose.Schema({
+    name: { type: String, trim: true, required: true },
+    email: { type: String, trim: true, lowercase: true, required: true },
+    phone: { type: String, trim: true, default: '' },
+    subject: { type: String, trim: true, default: '' },
+    message: { type: String, trim: true, required: true },
+
+    status: { type: String, enum: ['new', 'read', 'archived'], default: 'new', index: true },
+
+    /** Kept for abuse triage: the one endpoint anyone at all can write to. */
+    meta: {
+        ip: { type: String, default: '' },
+        userAgent: { type: String, default: '' },
+    },
+}, { collection: 'contact_messages', timestamps: true });
+
+contactMessageSchema.index({ status: 1, createdAt: -1 });
+contactMessageSchema.index({ createdAt: -1 });
+
+/** Icons the feature cards may use. Anything else renders the fallback. */
+const FEATURE_ICONS = [
+    'trending-up', 'users', 'shield', 'award', 'briefcase', 'globe',
+    'heart', 'lightbulb', 'target', 'handshake', 'star', 'building',
+];
+
+module.exports = {
+    SINGLETON_KEY,
+    FEATURE_ICONS,
+    Home: db.model('CmsHome', homeSchema),
+    About: db.model('CmsAbout', aboutSchema),
+    GalleryItem: db.model('CmsGalleryItem', galleryItemSchema),
+    ContactSettings: db.model('CmsContactSettings', contactSettingsSchema),
+    ContactMessage: db.model('CmsContactMessage', contactMessageSchema),
+};

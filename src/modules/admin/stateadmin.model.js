@@ -1,13 +1,11 @@
 const mongoose = require('mongoose');
-const config = require('../../config');
+const { getConnection } = require('./adminsDb');
 
-// Create separate connection for adminsdb
-const adminsDbConnection = mongoose.createConnection(
-    config.mongodb.uri.replace('/activ-db', '/adminsdb'), {
-        useNewUrlParser: true,
-        useUnifiedTopology: true
-    }
-);
+// One shared connection to the legacy adminsdb, opened in ./adminsDb.
+// Creating it per model opened four sockets to the same database.
+// Falls back to the default (main-database) connection when adminsdb cannot be
+// opened, so requiring a model can never throw and take the API down at boot.
+const adminsDbConnection = getConnection() || mongoose;
 
 // StateAdmin Schema
 const stateAdminSchema = new mongoose.Schema({
@@ -15,7 +13,10 @@ const stateAdminSchema = new mongoose.Schema({
         type: String,
         required: true,
         unique: true,
-        match: /^SA\d{4}$/,
+        // Length is deliberately not pinned. Live data carries both the
+        // short `SA0001` form and the seeded `SA01001001` form, and a
+        // stricter pattern made every existing document unsaveable.
+        match: /^SA[A-Z0-9]+$/,
         index: true
     },
     email: {
@@ -27,7 +28,7 @@ const stateAdminSchema = new mongoose.Schema({
     },
     passwordHash: {
         type: String,
-        required: true,
+        // Never returned by a normal query — only the login path asks for it.
         select: false
     },
     fullName: {
@@ -45,7 +46,9 @@ const stateAdminSchema = new mongoose.Schema({
     },
     state: {
         type: String,
-        required: true,
+        // Not `required`: seeded documents keep the value under `meta`,
+        // and rejecting those would make them impossible to read back
+        // and repair. The service layer validates before writing.
         trim: true,
         index: true
     },
@@ -56,6 +59,31 @@ const stateAdminSchema = new mongoose.Schema({
     },
     lastLoginAt: {
         type: Date
+    },
+    /**
+     * How this account came to exist: 'super_admin_ui', 'bulk_csv',
+     * 'tn_pilot_seed' or 'migrated_from_admins'.
+     *
+     * Also the marker that separates real staffing from the legacy scaffold
+     * seed, which carries no `createdVia`. See `admin.repository.js`.
+     */
+    createdVia: {
+        type: String,
+        trim: true,
+        index: true
+    },
+    /** Informational lineage only — no hierarchy is enforced on writes. */
+    parentAdminId: {
+        type: String,
+        trim: true
+    },
+    mustResetPassword: {
+        type: Boolean,
+        default: false
+    },
+    /** Legacy seeded documents keep their region under here. */
+    meta: {
+        type: mongoose.Schema.Types.Mixed
     }
 }, {
     collection: 'stateadmins',

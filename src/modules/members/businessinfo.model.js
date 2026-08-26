@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { BUSINESS_TYPES } = require('./businessTypes');
 
 // BusinessInfo Schema - for storing business information in additional form
 const businessInfoSchema = new mongoose.Schema({
@@ -30,7 +31,7 @@ const businessInfoSchema = new mongoose.Schema({
     },
     businessTypes: [{
         type: String,
-        enum: ['Manufacturing', 'Trader', 'Service Provider', 'Others']
+        enum: BUSINESS_TYPES
     }],
     businessActivities: {
         type: String,

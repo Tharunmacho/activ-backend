@@ -282,6 +282,13 @@ class PaymentService {
             }
 
             member.membershipStatus = 'active';
+
+            // The one activity a member most expects to see recorded.
+            try {
+                const { recordActivity } = require('../members/memberExtras.controller');
+                await recordActivity(member._id, 'membership_activated', 'Payment', member._id,
+                    'Membership activated');
+            } catch { /* a feed entry is never worth failing a payment over */ }
             member.membershipType = membershipType;
             member.membershipExpiresAt = membershipExpiresAt;
             member.lastPaymentDate = new Date();

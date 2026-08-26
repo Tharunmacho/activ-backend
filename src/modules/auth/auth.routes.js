@@ -27,6 +27,28 @@ router.post(
     authController.refreshToken
 );
 
+/**
+ * Password reset — public by necessity: someone who cannot sign in cannot
+ * present a token. All three carry the auth limiter, because they are the only
+ * unauthenticated endpoints that touch a credential.
+ */
+router.post(
+    '/forgot-password',
+    authLimiter,
+    authValidators.forgotPasswordValidator,
+    authController.forgotPassword
+);
+
+// GET so the reset page can check the link before rendering its form.
+router.get('/reset-password/verify', authLimiter, authController.verifyResetToken);
+
+router.post(
+    '/reset-password',
+    authLimiter,
+    authValidators.resetPasswordValidator,
+    authController.resetPassword
+);
+
 // Protected routes
 router.post('/logout', verifyToken, authController.logout);
 

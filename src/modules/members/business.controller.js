@@ -5,20 +5,31 @@ const ApiResponse = require('../../core/utils/ApiResponse');
 const ApiError = require('../../core/utils/ApiError');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const mongoose = require('mongoose');
+const { normalizeBusinessType, businessTypeError } = require('./businessTypes');
 
-console.log('=== Company Model Check ===');
-console.log('Model name:', Company.modelName);
-console.log('Collection name:', Company.collection.name);
-console.log('Schema paths:', Object.keys(Company.schema.paths));
+/**
+ * The one filter every owner-scoped company query starts from.
+ *
+ * It was written inline as `{ $exists: true, $ne: null, $ne: '' }`, which is a
+ * JavaScript object literal with a duplicate key: `$ne: null` is discarded
+ * before Mongo ever sees it, so rows with a null businessName passed a guard
+ * that was written to exclude them. `$nin` states both in one key.
+ */
+const NAMED = { businessName: { $exists: true, $nin: [null, ''] } };
+
+/**
+ * Which company "me" means when a member owns several.
+ *
+ * Declared once because read and write must agree: they did not, and the
+ * disagreement was invisible until a member created a second company.
+ */
+const NEWEST_FIRST = { createdAt: -1 };
 
 /**
  * Create a new business profile (stores in companies collection and uploads folder)
  */
 const createBusinessProfile = asyncHandler(async (req, res) => {
     const userId = req.user.userId;
-
-    console.log('Received request body:', req.body);
-    console.log('Received file:', req.file);
 
     const {
         organizationName,
@@ -49,7 +60,19 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
         throw ApiError.badRequest('Location is required');
     }
 
-    // Parse businessTypes if it's a JSON string or plain string
+    /**
+     * Business type, checked here rather than at the schema.
+     *
+     * Reaching the enum meant the request had already been accepted, the logo
+     * already written to disk, and the failure came back as a 500 with a
+     * Mongoose sentence in it ("`Wholesaler` is not a valid enum value for
+     * path `businessType`"). That is a server error for what is a choice the
+     * form should not have offered. Checked here it is a 400 that names the
+     * values that would work.
+     *
+     * `businessTypes` may arrive as a JSON array (the mobile profile screen
+     * sends `["Manufacturing"]`) or as a bare string; both are handled.
+     */
     let finalType = 'Manufacturing';
     if (rawType) {
         let types = rawType;
@@ -60,7 +83,11 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
                 types = [rawType];
             }
         }
-        finalType = Array.isArray(types) ? (types[0] || 'Manufacturing') : String(types);
+        const picked = Array.isArray(types) ? types[0] : types;
+        finalType = normalizeBusinessType(picked);
+        if (!finalType) {
+            throw ApiError.badRequest(businessTypeError(picked));
+        }
     }
 
     // Process uploaded logo file saved in local /uploads directory
@@ -72,7 +99,6 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
         // every other device and breaks whenever that IP changes. The client
         // resolves this against the API origin it is actually talking to.
         logoUrl = `/uploads/${req.file.filename}`;
-        console.log('Uploaded company logo saved to disk:', logoUrl);
     }
 
     // Create business profile in companies collection
@@ -91,8 +117,6 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
 
     await businessProfile.save();
 
-    console.log('Business profile created successfully:', businessProfile);
-
     res.status(201).json(
         ApiResponse.created(businessProfile, 'Business profile created successfully')
     );
@@ -103,25 +127,22 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
  */
 const getBusinessProfile = asyncHandler(async (req, res) => {
     const userId = req.user.userId;
-    const userMember = await MemberDetails.findById(userId);
-    const userEmail = userMember ? userMember.email : null;
 
-    const queryConditions = [
-        { userId }
-    ];
-    if (userEmail) queryConditions.push({ email: userEmail });
+    // Ownership is `userId` and nothing else.
+    //
+    // This used to also match `{ email: <the member's login address> }` against
+    // the company's own contact address. Those are different things: the
+    // company email is free text the member types, so any member who happened
+    // to enter another member's address — or who shared a shop address with
+    // them — was handed that member's company. Nothing keeps the two in step,
+    // and a business profile is not something to hand out on a coincidence.
+    const businessProfile = await Company.findOne({ userId, ...NAMED })
+        .sort(NEWEST_FIRST)
+        .lean();
 
-    const businessProfile = await Company.findOne({ 
-        $or: queryConditions,
-        businessName: { $exists: true, $ne: null, $ne: '' }
-    }).sort({ createdAt: -1 }).lean();
-    
     if (!businessProfile) {
-        throw ApiError.notFound('Business profile not found');
+        return res.json(ApiResponse.success(null, 'Business profile not found'));
     }
-
-    console.log('=== Backend: Business Profile ===');
-    console.log('userId:', userId);
 
     res.json(
         ApiResponse.success(businessProfile, 'Business profile fetched successfully')
@@ -133,18 +154,11 @@ const getBusinessProfile = asyncHandler(async (req, res) => {
  */
 const getAllBusinessProfiles = asyncHandler(async (req, res) => {
     const userId = req.user.userId;
-    const userMember = await MemberDetails.findById(userId);
-    const userEmail = userMember ? userMember.email : null;
 
-    const queryConditions = [
-        { userId }
-    ];
-    if (userEmail) queryConditions.push({ email: userEmail });
-
-    const businessProfiles = await Company.find({ 
-        $or: queryConditions,
-        businessName: { $exists: true, $ne: null, $ne: '' }
-    }).sort({ createdAt: -1 }).lean();
+    // Owner-scoped only; see the note in getBusinessProfile.
+    const businessProfiles = await Company.find({ userId, ...NAMED })
+        .sort(NEWEST_FIRST)
+        .lean();
 
     res.json(
         ApiResponse.success(businessProfiles, 'Business profiles fetched successfully')
@@ -158,23 +172,29 @@ const getBusinessProfileById = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const userId = req.user.userId;
 
+    /**
+     * Owner-scoped, with no fallback.
+     *
+     * What stood here fell back to `findOne({ _id: id })` when the owner-scoped
+     * lookup missed — which is to say, precisely when the company belonged to
+     * somebody else. Any signed-in member could read any other member's
+     * business profile by id: name, contact number, email, address. The second
+     * fallback was its own bug, quietly answering with the caller's newest
+     * company when the id matched nothing, so a stale link rendered the wrong
+     * company as though it were the one asked for.
+     *
+     * The write paths beside this one were corrected already; this read was
+     * missed. A miss is a 404 now, in every case.
+     */
     let businessProfile;
     if (id === 'me' || !mongoose.Types.ObjectId.isValid(id)) {
-        businessProfile = await Company.findOne({ 
-            userId,
-            businessName: { $exists: true, $ne: null, $ne: '' }
-        }).sort({ createdAt: -1 }).lean();
+        businessProfile = await Company.findOne({ userId, ...NAMED })
+            .sort(NEWEST_FIRST)
+            .lean();
     } else {
-        businessProfile = await Company.findOne({ 
-            _id: id,
-            userId,
-            businessName: { $exists: true, $ne: null, $ne: '' }
-        }).lean();
-        if (!businessProfile) {
-            businessProfile = await Company.findOne({ _id: id }).lean() || await Company.findOne({ userId }).sort({ createdAt: -1 }).lean();
-        }
+        businessProfile = await Company.findOne({ _id: id, userId, ...NAMED }).lean();
     }
-    
+
     if (!businessProfile) {
         throw ApiError.notFound('Business profile not found');
     }
@@ -202,8 +222,14 @@ const updateBusinessProfile = asyncHandler(async (req, res) => {
         location
     } = req.body;
 
-    const businessProfile = await Company.findOne({ userId });
-    
+    // Same row GET /me returns.
+    //
+    // The read sorted newest-first and this did not, so for a member with more
+    // than one company the dashboard showed one and the save was written to
+    // another. There is one such member in the data today: the sidebar reads
+    // "Local host" while this handler would have written to "Activ".
+    const businessProfile = await Company.findOne({ userId }).sort(NEWEST_FIRST);
+
     if (!businessProfile) {
         throw ApiError.notFound('Business profile not found');
     }
@@ -212,7 +238,7 @@ const updateBusinessProfile = asyncHandler(async (req, res) => {
     const mobile = mobileNumber || phone;
     const rawType = businessType || businessTypes;
 
-    // Parse businessTypes if it's a JSON string or plain string
+    // Same check as createBusinessProfile — an edit can send a bad type too.
     if (rawType) {
         let types = rawType;
         if (typeof rawType === 'string') {
@@ -222,14 +248,18 @@ const updateBusinessProfile = asyncHandler(async (req, res) => {
                 types = [rawType];
             }
         }
-        businessProfile.businessType = Array.isArray(types) ? (types[0] || businessProfile.businessType) : String(types);
+        const picked = Array.isArray(types) ? types[0] : types;
+        const normalized = normalizeBusinessType(picked);
+        if (!normalized) {
+            throw ApiError.badRequest(businessTypeError(picked));
+        }
+        businessProfile.businessType = normalized;
     }
 
     // Process uploaded logo file saved in local /uploads directory
     if (req.file) {
         // Relative path only - see the note in createBusinessProfile.
         businessProfile.logo = `/uploads/${req.file.filename}`;
-        console.log('Updated logo saved to disk:', businessProfile.logo);
     }
 
     // Update fields
@@ -273,14 +303,14 @@ const updateBusinessProfileById = asyncHandler(async (req, res) => {
 
     let businessProfile;
     if (id === 'me' || !mongoose.Types.ObjectId.isValid(id)) {
-        businessProfile = await Company.findOne({ userId }).sort({ createdAt: -1 });
+        businessProfile = await Company.findOne({ userId }).sort(NEWEST_FIRST);
     } else {
         // Owner-scoped only. Falling back to "any company with this id", then
         // to the member's newest company, meant an edit could be written to a
         // different record than the one the user opened.
         businessProfile = await Company.findOne({ _id: id, userId });
     }
-    
+
     if (!businessProfile) {
         throw ApiError.notFound('Business profile not found');
     }
@@ -293,7 +323,7 @@ const updateBusinessProfileById = asyncHandler(async (req, res) => {
     const mobile = mobileNumber || phone;
     const rawType = businessType || businessTypes;
 
-    // Parse businessTypes if it's a JSON string or plain string
+    // Same check as createBusinessProfile — an edit can send a bad type too.
     if (rawType) {
         let types = rawType;
         if (typeof rawType === 'string') {
@@ -303,14 +333,18 @@ const updateBusinessProfileById = asyncHandler(async (req, res) => {
                 types = [rawType];
             }
         }
-        businessProfile.businessType = Array.isArray(types) ? (types[0] || businessProfile.businessType) : String(types);
+        const picked = Array.isArray(types) ? types[0] : types;
+        const normalized = normalizeBusinessType(picked);
+        if (!normalized) {
+            throw ApiError.badRequest(businessTypeError(picked));
+        }
+        businessProfile.businessType = normalized;
     }
 
     // Process uploaded logo file saved in local /uploads directory
     if (req.file) {
         // Relative path only - see the note in createBusinessProfile.
         businessProfile.logo = `/uploads/${req.file.filename}`;
-        console.log('Updated logo saved to disk:', businessProfile.logo);
     }
 
     // Update fields
@@ -357,11 +391,17 @@ const deleteBusinessProfileById = asyncHandler(async (req, res) => {
     // in product queries.
     await Product.deleteMany({ companyId: businessProfile._id });
 
-    const remaining = await Company.countDocuments({ userId });
-    await MemberDetails.findByIdAndUpdate(userId, {
-        hasBusinessProfile: remaining > 0
-    });
-
+    /**
+     * `hasBusinessProfile` is derived, not stored.
+     *
+     * These two handlers used to write it onto the member document. It is not
+     * declared on the MemberDetails schema, so Mongoose strict mode dropped the
+     * path without error — no member document has ever carried it, and nothing
+     * reads it back. Keeping the write would be worse than useless: it reads as
+     * a maintained flag while create, transfer and bulk paths never touched it.
+     * Whether a member has a company is one count away
+     * (`Company.countDocuments({ userId })`) and cannot fall out of step.
+     */
     res.json(
         ApiResponse.success({ _id: id }, 'Business profile deleted successfully')
     );
@@ -370,8 +410,10 @@ const deleteBusinessProfileById = asyncHandler(async (req, res) => {
 const deleteBusinessProfile = asyncHandler(async (req, res) => {
     const userId = req.user.userId;
 
-    const businessProfile = await Company.findOne({ userId });
-    
+    // Newest-first, matching GET /me — deleting a different company than the
+    // one on screen is not a mistake that can be undone.
+    const businessProfile = await Company.findOne({ userId }).sort(NEWEST_FIRST);
+
     if (!businessProfile) {
         throw ApiError.notFound('Business profile not found');
     }
@@ -379,11 +421,7 @@ const deleteBusinessProfile = asyncHandler(async (req, res) => {
     await businessProfile.deleteOne();
     await Product.deleteMany({ companyId: businessProfile._id });
 
-    // Update member details
-    await MemberDetails.findByIdAndUpdate(userId, {
-        hasBusinessProfile: false
-    });
-
+    // See the note in deleteBusinessProfileById: the flag is derived.
     res.json(
         ApiResponse.success(null, 'Business profile deleted successfully')
     );
@@ -407,50 +445,81 @@ const discoverCompanies = asyncHandler(async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
 
     const baseFilter = {
-        businessName: { $exists: true, $ne: null, $ne: '' },
+        ...NAMED,
         // Members can delist a company from the directory; `$ne: false` keeps
         // legacy rows that predate the flag visible.
         isActive: { $ne: false }
     };
 
-    let companyFilter = baseFilter;
+    const COMPANY_FIELDS =
+        'businessName email description businessType mobileNumber area location logo isActive status createdAt';
+
+    let companies;
     let searchRegex = null;
 
-    if (term) {
+    if (!term) {
+        companies = await Company.find(baseFilter)
+            .select(COMPANY_FIELDS)
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .lean();
+    } else {
         searchRegex = new RegExp(escapeRegex(term), 'i');
 
-        // Companies whose catalog contains a matching product
-        const matchedProducts = await Product.find({
-            isActive: true,
-            $or: [
-                { name: searchRegex },
-                { category: searchRegex },
-                { sku: searchRegex }
-            ]
-        }).select('companyId').lean();
+        /**
+         * Two independent lookups, run together.
+         *
+         * This was three requests in a row: find matching products, then find
+         * companies whose id was in that result OR whose own name matched, then
+         * find the catalogs. Against a remote cluster each step is its own
+         * ~100ms round trip, and the first two do not actually depend on each
+         * other — only the *combination* does. Issuing them in parallel and
+         * merging the ids here turns three sequential waits into two.
+         *
+         * Company identity is matched on name and type only. `description` /
+         * `location` / `area` are prose fields, and including them made a short
+         * term match nearly every row, so the search read as "shows everything".
+         */
+        const [matchedProducts, companiesByName] = await Promise.all([
+            Product.find({
+                isActive: true,
+                $or: [
+                    { name: searchRegex },
+                    { category: searchRegex },
+                    { sku: searchRegex }
+                ]
+            }).select('companyId').lean(),
+            Company.find({
+                ...baseFilter,
+                $or: [
+                    { businessName: searchRegex },
+                    { businessType: searchRegex }
+                ]
+            }).select(COMPANY_FIELDS).sort({ createdAt: -1 }).limit(limit).lean(),
+        ]);
 
-        const companyIdsFromProducts = (matchedProducts || [])
-            .map((p) => p.companyId)
-            .filter(Boolean);
+        const seen = new Set((companiesByName || []).map((c) => String(c._id)));
 
-        // Match the company's own identity only. `description` / `location` /
-        // `area` are prose fields - including them made a short term match
-        // nearly every row, so the search read as "shows everything".
-        companyFilter = {
-            ...baseFilter,
-            $or: [
-                { businessName: searchRegex },
-                { businessType: searchRegex },
-                { _id: { $in: companyIdsFromProducts } }
-            ]
-        };
+        // Sellers of a matching product that the name search did not already
+        // return. Only these need a second lookup.
+        const extraIds = [...new Set(
+            (matchedProducts || [])
+                .map((p) => p.companyId)
+                .filter(Boolean)
+                .map(String)
+                .filter((id) => !seen.has(id))
+        )];
+
+        const extraCompanies = extraIds.length
+            ? await Company.find({ ...baseFilter, _id: { $in: extraIds } })
+                .select(COMPANY_FIELDS)
+                .sort({ createdAt: -1 })
+                .limit(limit)
+                .lean()
+            : [];
+
+        companies = [...(companiesByName || []), ...extraCompanies].slice(0, limit);
     }
-
-    const companies = await Company.find(companyFilter)
-        .select('businessName email description businessType mobileNumber area location logo isActive status createdAt')
-        .sort({ createdAt: -1 })
-        .limit(limit)
-        .lean();
 
     const companyIds = (companies || []).map((c) => c._id);
 
