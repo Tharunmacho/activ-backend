@@ -46,7 +46,7 @@ const connectRedis = async() => {
 
 const getRedisClient = () => {
     if (!redisClient || !redisClient.isOpen) {
-        logger.warn('Redis client not available');
+        // logger.warn('Redis client not available'); // Commented out to prevent log spam
         return null;
     }
     return redisClient;

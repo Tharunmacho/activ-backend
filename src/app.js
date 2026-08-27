@@ -12,6 +12,9 @@ const path = require('path');
 
 const app = express();
 
+// Trust reverse proxy for X-Forwarded-For (Caddy/Nginx)
+app.set('trust proxy', 1);
+
 // Serve uploaded images statically from /uploads folder
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
