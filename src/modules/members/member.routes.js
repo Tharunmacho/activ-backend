@@ -1,6 +1,7 @@
 const express = require('express');
 const controller = require('./member.controller');
 const extras = require('./memberExtras.controller');
+const directory = require('./directory.controller');
 const validators = require('./member.validators');
 const { verifyToken } = require('../../core/middleware/auth');
 const upload = require('../../core/middleware/upload');
@@ -19,6 +20,18 @@ router.get('/declaration-info', verifyToken, controller.getDeclarationInfo);
  * opened an `Alert` — both because there was no endpoint to call. Registered
  * before `/:id` below, or that route would swallow them as ids.
  */
+/**
+ * The member directory (DIR-001).
+ *
+ * Above `/recent-activity` only for tidiness; above the `/:id/photo` route
+ * below for correctness, and above `/` because Express matches in order. The
+ * sector list is a literal path and must precede `/directory/:id` or it is read
+ * as a member id.
+ */
+router.get('/directory/sectors', verifyToken, directory.listSectors);
+router.get('/directory', verifyToken, directory.searchDirectory);
+router.get('/directory/:id', verifyToken, directory.getDirectoryEntry);
+
 router.get('/recent-activity', verifyToken, extras.listActivity);
 router.get('/certificate/:kind', verifyToken, extras.getCertificate);
 router.put('/profile', verifyToken, validators.updateMemberValidator, controller.updateMember);

@@ -41,8 +41,17 @@ router.get('/', productController.getProducts);
 router.get('/discover', productController.discoverProducts);
 router.get('/stats', productController.getProductStats);
 router.get('/activities', productController.getRecentActivities);
+router.get('/low-stock', productController.listLowStock);
+router.get('/stock-movements', productController.listStockMovements);
 router.get('/:id', productController.getProductById);
 router.put('/:id', upload.single('image'), productController.updateProduct);
+// Stock and publish are named operations rather than a full PUT: adjusting a
+// level should not require sending back the price, and a publish toggle that
+// rewrites every field is one stale form away from reverting an edit.
+router.post('/:id/stock', productController.adjustStock);
+router.patch('/:id/publish', productController.setPublished);
+// Not owner-scoped: this is another member saying they looked at it.
+router.post('/:id/view', productController.recordProductView);
 router.delete('/:id', productController.deleteProduct);
 
 module.exports = router;

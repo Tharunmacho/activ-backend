@@ -1,5 +1,8 @@
 const mongoose = require('mongoose');
 const Product = require('../../models/Product');
+const { stockState } = require('../../models/Product');
+const StockMovement = require('./stockmovement.model');
+const { recordView } = require('../common/engagement.model');
 const Company = require('./company.model');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const ApiError = require('../../core/utils/ApiError');
@@ -70,6 +73,7 @@ const createProduct = asyncHandler(async (req, res) => {
     category: category || 'Product',
     price: parseFloat(price) || 0,
     stock: parseInt(stock) || 0,
+    minStock: Math.max(0, parseInt(req.body.minStock) || 0),
     sku: sku ? sku.trim() : `SKU-${Date.now()}`,
     imageUrl: finalImageUrl,
     isFeatured: isFeatured === 'true' || isFeatured === true,
@@ -219,6 +223,7 @@ const updateProduct = asyncHandler(async (req, res) => {
     category,
     price,
     stock,
+    minStock,
     sku,
     imageUrl: bodyImageUrl,
     isFeatured,
@@ -232,6 +237,7 @@ const updateProduct = asyncHandler(async (req, res) => {
   if (category) product.category = category;
   if (price !== undefined) product.price = parseFloat(price) || 0;
   if (stock !== undefined) product.stock = parseInt(stock) || 0;
+  if (minStock !== undefined) product.minStock = Math.max(0, parseInt(minStock) || 0);
   if (sku) product.sku = sku.trim();
   if (isFeatured !== undefined) product.isFeatured = isFeatured === 'true' || isFeatured === true;
   if (isActive !== undefined) product.isActive = isActive === 'true' || isActive === true;
@@ -389,6 +395,264 @@ const getRecentActivities = asyncHandler(async (req, res) => {
   });
 });
 
+
+/**
+ * @desc    Adjust a stock level, with a reason, and log the movement (BUS-002)
+ * @route   POST /api/v1/products/:id/stock
+ * @access  Private (owner only)
+ */
+const adjustStock = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { id } = req.params;
+
+  const product = await Product.findOne({ _id: id, userId });
+  if (!product) {
+    throw new ApiError(404, 'Product not found');
+  }
+
+  const { delta, setTo, reason, note } = req.body;
+
+  /*
+   * Two ways to say it, one of them required.
+   *
+   * `delta` is "twelve arrived"; `setTo` is "I have just counted and there are
+   * forty". Both are things a member genuinely wants to express, and forcing
+   * the second through the first means asking them to do arithmetic against a
+   * number they have just discovered was wrong.
+   *
+   * The log stores the signed delta either way, so a stock take and a delivery
+   * are the same kind of row and the history reads consistently.
+   */
+  const current = Number(product.stock || 0);
+  let movement;
+
+  if (setTo !== undefined && setTo !== null && setTo !== '') {
+    const target = Math.round(Number(setTo));
+    if (!Number.isFinite(target) || target < 0) {
+      throw new ApiError(400, 'Stock cannot be set to a negative number');
+    }
+    movement = target - current;
+  } else {
+    movement = Math.round(Number(delta));
+    if (!Number.isFinite(movement)) {
+      throw new ApiError(400, 'Give either a delta or a stock count');
+    }
+  }
+
+  if (movement === 0) {
+    throw new ApiError(400, 'That would not change anything');
+  }
+
+  const resulting = current + movement;
+  if (resulting < 0) {
+    // Refused rather than clamped to zero. Clamping would record a movement of
+    // -40 as a movement of -12 and the log would stop reconciling.
+    throw new ApiError(400, 'Only ' + current + ' in stock - that adjustment would take it below zero');
+  }
+
+  product.stock = resulting;
+  await product.save();
+
+  const VALID_REASONS = ['restock', 'sale', 'damage', 'return', 'correction', 'other'];
+  const finalReason = VALID_REASONS.includes(String(reason || '').toLowerCase())
+    ? String(reason).toLowerCase()
+    : 'other';
+
+  /*
+   * The log is written after the stock, and a failure to write it does not fail
+   * the request. The stock level is what the member's catalogue depends on; the
+   * log is the explanation. Losing the explanation is bad, losing the level
+   * because the explanation could not be filed is worse.
+   */
+  const logged = await StockMovement.create({
+    productId: product._id,
+    userId,
+    companyId: product.companyId || null,
+    delta: movement,
+    resultingStock: resulting,
+    reason: finalReason,
+    note: String(note || '').trim(),
+    productName: product.name || ''
+  }).catch(() => null);
+
+  res.json({
+    success: true,
+    message: 'Stock updated',
+    data: {
+      id: String(product._id),
+      name: product.name,
+      stock: product.stock,
+      minStock: Number(product.minStock || 0),
+      stockState: stockState(product),
+      movement: logged ? {
+        id: String(logged._id),
+        delta: logged.delta,
+        resultingStock: logged.resultingStock,
+        reason: logged.reason,
+        note: logged.note,
+        at: logged.createdAt
+      } : null
+    }
+  });
+});
+
+/**
+ * @desc    Stock movement history for the caller's catalogue
+ * @route   GET /api/v1/products/stock-movements
+ * @access  Private
+ */
+const listStockMovements = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 30, 200);
+
+  const filter = { userId };
+  if (req.query.productId && mongoose.Types.ObjectId.isValid(req.query.productId)) {
+    filter.productId = new mongoose.Types.ObjectId(req.query.productId);
+  }
+
+  const rows = await StockMovement.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean()
+    .catch(() => []);
+
+  res.json({
+    success: true,
+    data: (rows || []).map((row) => ({
+      id: String(row._id),
+      productId: String(row.productId),
+      productName: row.productName || '',
+      delta: row.delta,
+      resultingStock: row.resultingStock,
+      reason: row.reason,
+      note: row.note || '',
+      at: row.createdAt
+    })),
+    count: (rows || []).length
+  });
+});
+
+/**
+ * @desc    The lines that need reordering (BUS-002)
+ * @route   GET /api/v1/products/low-stock
+ * @access  Private
+ */
+const listLowStock = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+
+  /*
+   * Matched in the database rather than by loading the catalogue and filtering
+   * in Node: a member with a thousand lines would otherwise transfer all of
+   * them to render a list of four.
+   *
+   * The two clauses are the two halves of `stockState`: out of stock, or at or
+   * below a threshold the member actually set. `$expr` is what lets the second
+   * one compare two fields of the same document.
+   */
+  const rows = await Product.find({
+    userId,
+    isActive: true,
+    $or: [
+      { stock: { $lte: 0 } },
+      { $and: [{ minStock: { $gt: 0 } }, { $expr: { $lte: ['$stock', '$minStock'] } }] }
+    ]
+  })
+    .sort({ stock: 1 })
+    .limit(100)
+    .lean()
+    .catch(() => []);
+
+  res.json({
+    success: true,
+    data: (rows || []).map((row) => ({
+      id: String(row._id),
+      name: row.name || '',
+      category: row.category || '',
+      imageUrl: row.imageUrl || '',
+      stock: Number(row.stock || 0),
+      minStock: Number(row.minStock || 0),
+      stockState: stockState(row)
+    })),
+    count: (rows || []).length
+  });
+});
+
+/**
+ * @desc    Publish or unpublish a catalogue entry (BUS-001)
+ * @route   PATCH /api/v1/products/:id/publish
+ * @access  Private (owner only)
+ *
+ * `isActive` IS the publish flag on this schema - `discoverProducts` filters on
+ * it, so an inactive product is already invisible to every other member. This
+ * route exists so that publishing is a named operation with its own permission
+ * rather than a side effect of a full `PUT` that also rewrites price and stock.
+ */
+const setPublished = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { id } = req.params;
+
+  const published = req.body && (req.body.published === true || req.body.published === 'true');
+
+  const product = await Product.findOneAndUpdate(
+    { _id: id, userId },
+    { $set: { isActive: published } },
+    { new: true }
+  ).lean();
+
+  if (!product) {
+    throw new ApiError(404, 'Product not found');
+  }
+
+  res.json({
+    success: true,
+    message: published ? 'Product published' : 'Product unpublished',
+    data: { id: String(product._id), name: product.name, isActive: !!product.isActive }
+  });
+});
+
+/**
+ * @desc    Record that someone opened this catalogue entry (BUS-003)
+ * @route   POST /api/v1/products/:id/view
+ * @access  Private
+ *
+ * A separate route rather than a side effect of `GET /products/:id`, because
+ * that route is owner-scoped: it answers 404 for everyone except the person who
+ * created the product, so it is the one request that can never be a view by
+ * somebody else. Discover is where another member actually looks, and Discover
+ * renders from the list — so the client says when a card was opened.
+ *
+ * Answers 200 either way. A view that could not be recorded is not a failure
+ * the viewer should be told about, and the counter is not something a caller
+ * can usefully retry.
+ */
+const recordProductView = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new ApiError(400, 'Invalid product id');
+  }
+
+  // The owner is read from the product, never from the request: a client that
+  // could name the owner could credit views to anyone.
+  const product = await Product.findById(id).select('userId isActive').lean().catch(() => null);
+
+  if (product && product.isActive) {
+    await recordView({
+      kind: 'product',
+      targetId: id,
+      ownerId: String(product.userId || ''),
+      viewerId: String(req.user.userId || '')
+    });
+
+    // The denormalised counter on the product, which Discover sorts by. Kept in
+    // step with the engagement rows rather than incremented independently, so
+    // the two cannot disagree about which line is the most looked at.
+    await Product.updateOne({ _id: id }, { $inc: { views: 1 } }).catch(() => null);
+  }
+
+  res.json({ success: true, data: { recorded: !!(product && product.isActive) } });
+});
+
 module.exports = {
   createProduct,
   getProducts,
@@ -397,5 +661,10 @@ module.exports = {
   updateProduct,
   deleteProduct,
   getProductStats,
-  getRecentActivities
+  getRecentActivities,
+  adjustStock,
+  listStockMovements,
+  listLowStock,
+  setPublished,
+  recordProductView
 };

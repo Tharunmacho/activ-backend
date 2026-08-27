@@ -10,6 +10,7 @@
         "test:watch": "jest --watch",
         "test:workflow": "node tests/approval-workflow.test.js",
         "test:regions": "node tests/region-architecture.test.js",
+        "test:dashboard": "node tests/member-dashboard.test.js",
         "test:e2e": "node tests/e2e-approval-flow.test.js",
         "test:cms": "node tests/cms-content.test.js",
         "lint": "eslint src/**/*.js",

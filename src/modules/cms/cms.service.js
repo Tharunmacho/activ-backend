@@ -6,8 +6,102 @@ const {
     GallerySettings, GalleryItem, ContactSettings, ContactMessage,
 } = require('./cms.models');
 const Event = require('../events/event.model');
+const eventService = require('../events/event.service');
 const { removeOrphans } = require('./media.cleanup');
 const { sanitizeHtml } = require('./richText');
+
+const { toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders } = eventService;
+
+/**
+ * The advanced-display half of an event, lifted off the shared mapper.
+ *
+ * The CMS listing has its own shape — `imageUrl`, `location`, a `media` object —
+ * which the public site and the mobile app both read, so it cannot simply be
+ * replaced with `toEvent`'s. These fields are additive and identical in both,
+ * so they are taken from the one mapper rather than written out twice and left
+ * to drift.
+ */
+const pickEventDetail = (event = {}) => ({
+    audience: event.audience,
+    agenda: event.agenda,
+    speakers: event.speakers,
+    venueAddress: event.venueAddress,
+    venueMapUrl: event.venueMapUrl,
+    contactName: event.contactName,
+    contactPhone: event.contactPhone,
+    contactEmail: event.contactEmail,
+    registrationEnabled: event.registrationEnabled,
+    registrationDeadline: event.registrationDeadline,
+    registrationClosesAt: event.registrationClosesAt,
+    capacity: event.capacity,
+    registrationNote: event.registrationNote,
+    reminderOffsetsHours: event.reminderOffsetsHours,
+});
+
+/**
+ * The event fields the CMS editor may set beyond the basics.
+ *
+ * Shared by create and update, and applied the same way in both: a key absent
+ * from the payload is left alone, so saving the basics form does not wipe an
+ * agenda entered on the detail form.
+ */
+const eventDetailUpdates = (payload = {}) => {
+    const update = {};
+
+    if (payload.audience !== undefined) {
+        update.audience = String(payload.audience || '').toLowerCase() === 'paid' ? 'paid' : 'all';
+    }
+    if (payload.agenda !== undefined) update.agenda = sanitizeAgenda(parseArray(payload.agenda));
+    if (payload.speakers !== undefined) update.speakers = sanitizeSpeakers(parseArray(payload.speakers));
+    if (payload.reminderOffsetsHours !== undefined) {
+        update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));
+    }
+
+    ['venueAddress', 'venueMapUrl', 'contactName', 'contactPhone', 'contactEmail', 'registrationNote']
+        .forEach((key) => {
+            if (payload[key] !== undefined) update[key] = str(payload[key]);
+        });
+
+    if (payload.registrationEnabled !== undefined) {
+        update.registrationEnabled = payload.registrationEnabled === true || payload.registrationEnabled === 'true';
+    }
+
+    if (payload.registrationDeadline !== undefined) {
+        const raw = payload.registrationDeadline;
+        if (raw === null || raw === '') {
+            update.registrationDeadline = null;
+        } else {
+            const parsed = new Date(raw);
+            if (!Number.isNaN(parsed.getTime())) update.registrationDeadline = parsed;
+        }
+    }
+
+    if (payload.capacity !== undefined) {
+        const capacity = Math.round(Number(payload.capacity));
+        update.capacity = Number.isFinite(capacity) && capacity > 0 ? capacity : 0;
+    }
+
+    return update;
+};
+
+/**
+ * An array that may have arrived as a JSON string.
+ *
+ * The CMS posts events as `multipart/form-data` whenever a banner is attached,
+ * and every field of a multipart body is a string — an agenda sent alongside a
+ * file arrives as `"[{...}]"`, not as an array.
+ */
+function parseArray(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'string') return [];
+
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
 
 /**
  * Public site content.
@@ -732,6 +826,20 @@ class CmsService {
     async listEvents({ includeDrafts = false, limit = 100 } = {}) {
         const filter = includeDrafts ? {} : { status: 'published' };
 
+        /*
+         * A members-only event is not public-site content.
+         *
+         * This listing feeds the marketing site's Events page, which anyone can
+         * read without signing in. An event the super admin marked `paid` is by
+         * definition not for them, and publishing it here would put the whole
+         * point of the audience gate — that some events are a membership
+         * benefit — on a page reachable without a membership.
+         *
+         * The admin listing keeps them, because the editor has to see what they
+         * just wrote.
+         */
+        if (!includeDrafts) filter.audience = { $ne: 'paid' };
+
         // Fetched newest-first so the limit keeps the most relevant events when
         // there are more than it allows: an old event dropping off matters far
         // less than a forthcoming one.
@@ -767,6 +875,10 @@ class CmsService {
                 position: e.bannerPosition || 'center',
             },
             status: e.status || 'draft',
+            // The advanced-display fields, mapped through the one event mapper
+            // so this listing and `/events` cannot describe the same row
+            // differently. `toEvent` is the authority on their shape.
+            ...pickEventDetail(toEvent(e)),
         }));
     }
 
@@ -823,6 +935,8 @@ class CmsService {
             // appear. Drafts remain available via the status control.
             status: payload.status === 'draft' ? 'draft' : 'published',
             createdBy: user.email || '',
+            // Agenda, speakers, audience, venue detail and registration.
+            ...eventDetailUpdates(payload),
         });
     }
 
@@ -853,6 +967,10 @@ class CmsService {
         const startAt = this.toStartAt(payload);
         if (startAt) update.startAt = startAt;
         if (payload.endAt !== undefined) update.endAt = payload.endAt ? new Date(payload.endAt) : null;
+
+        // Only the detail keys actually present in this payload, so saving the
+        // basics form does not clear an agenda entered on the detail form.
+        Object.assign(update, eventDetailUpdates(payload));
 
         const before = await Event.findById(id).select('bannerUrl').lean().catch(() => null);
 

@@ -1,26 +1,39 @@
 const eventService = require('./event.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
+const { resolveMemberContext } = require('../common/memberContext');
 
-const ADMIN_ROLES = ['block_admin', 'district_admin', 'state_admin', 'super_admin'];
-
-/** Drafts are admin-only. The client never gets to ask for them. */
-const canSeeDrafts = (req) => ADMIN_ROLES.includes(req.user?.role);
-
+/**
+ * Who is asking.
+ *
+ * This replaces the `canSeeDrafts(req)` boolean the controller used to compute
+ * from `req.user.role`. Drafts were the only gate then; there are two now, and
+ * the second one — the members-only audience — cannot be answered from the
+ * token at all, because membership status changes during a token's lifetime.
+ * `resolveMemberContext` reads both from the database. See its own note.
+ */
 const listEvents = asyncHandler(async(req, res) => {
-    const data = await eventService.listEvents(req.query || {}, canSeeDrafts(req));
+    const context = await resolveMemberContext(req);
+    const data = await eventService.listEvents(req.query || {}, context);
+    res.json(ApiResponse.success(data));
+});
+
+const myRegistrations = asyncHandler(async(req, res) => {
+    const context = await resolveMemberContext(req);
+    const data = await eventService.myRegistrations(context);
     res.json(ApiResponse.success(data));
 });
 
 const getEvent = asyncHandler(async(req, res) => {
-    const data = await eventService.getEvent(req.params.id, canSeeDrafts(req));
+    const context = await resolveMemberContext(req);
+    const data = await eventService.getEvent(req.params.id, context);
     res.json(ApiResponse.success(data));
 });
 
 /** Multer puts an uploaded banner on req.file; a plain JSON body may send a URL. */
 const bodyWithBanner = (req) => {
-    if (req.file?.filename) {
-        return { ...req.body, bannerUrl: `/uploads/${req.file.filename}` };
+    if (req.file && req.file.filename) {
+        return { ...req.body, bannerUrl: '/uploads/' + req.file.filename };
     }
     return req.body || {};
 };
@@ -36,13 +49,33 @@ const updateEvent = asyncHandler(async(req, res) => {
 });
 
 const setStatus = asyncHandler(async(req, res) => {
-    const data = await eventService.setStatus(req.params.id, req.body?.status, req.user || {});
-    res.json(ApiResponse.success(data, `Event ${data.status}`));
+    const data = await eventService.setStatus(req.params.id, (req.body || {}).status, req.user || {});
+    res.json(ApiResponse.success(data, 'Event ' + data.status));
 });
 
 const deleteEvent = asyncHandler(async(req, res) => {
     const data = await eventService.deleteEvent(req.params.id, req.user || {});
     res.json(ApiResponse.success(data, 'Event deleted'));
+});
+
+const register = asyncHandler(async(req, res) => {
+    const context = await resolveMemberContext(req);
+    const data = await eventService.register(req.params.id, context, req.body || {});
+    res.status(data.alreadyRegistered ? 200 : 201).json(
+        ApiResponse.success(data, data.alreadyRegistered ? 'You are already registered' :
+            data.status === 'waitlist' ? 'Added to the waiting list' : 'Registered')
+    );
+});
+
+const cancelRegistration = asyncHandler(async(req, res) => {
+    const context = await resolveMemberContext(req);
+    const data = await eventService.cancelRegistration(req.params.id, context);
+    res.json(ApiResponse.success(data, 'Registration cancelled'));
+});
+
+const listRegistrations = asyncHandler(async(req, res) => {
+    const data = await eventService.listRegistrations(req.params.id, req.query || {});
+    res.json(ApiResponse.success(data));
 });
 
 module.exports = {
@@ -51,5 +84,9 @@ module.exports = {
     createEvent,
     updateEvent,
     setStatus,
-    deleteEvent
+    deleteEvent,
+    register,
+    cancelRegistration,
+    listRegistrations,
+    myRegistrations
 };

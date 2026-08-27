@@ -12,6 +12,7 @@ const adminRoutes = require('./modules/admin/admin.routes');
 const notificationRoutes = require('./modules/notifications/notification.routes');
 const analyticsRoutes = require('./modules/analytics/analytics.routes');
 const eventRoutes = require('./modules/events/event.routes');
+const announcementRoutes = require('./modules/announcements/announcement.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const regionRoutes = require('./modules/regions/region.routes');
 const cmsRoutes = require('./modules/cms/cms.routes');
@@ -72,6 +73,16 @@ router.use('/admin', adminRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/events', eventRoutes);
+
+/**
+ * Association Updates (MEM-001).
+ *
+ * Below `businessRoutes` deliberately: unlike `/regions` and `/cms`, every one
+ * of these endpoints requires a signed-in member, so the catch-all auth gate
+ * that mount applies is not a hazard here. The router applies `verifyToken`
+ * itself as well, so it does not depend on that ordering to be safe.
+ */
+router.use('/announcements', announcementRoutes);
 router.use('/audit', auditRoutes);
 router.use('/payment', paymentRoutes);
 router.use('/webhook', webhookRoutes);
