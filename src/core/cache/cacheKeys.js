@@ -19,6 +19,14 @@ const CACHE_KEYS = {
     ADMIN: (id) => `admin:${id}`,
     ADMIN_STATS: 'admin:stats',
 
+    /**
+     * One admin dashboard payload, keyed by tier and by the region it is scoped
+     * to — not by admin id. Co-admins on the same region share one queue by
+     * construction, so they can share one cached answer; keying by id would
+     * compute the identical payload once per person.
+     */
+    ADMIN_DASHBOARD: (tier, region) => `admin:dashboard:${tier}:${String(region || '').toLowerCase()}`,
+
     // Notifications
     NOTIFICATIONS: (userId) => `notifications:${userId}`,
 
@@ -31,6 +39,7 @@ const CACHE_KEYS = {
         MEMBER: 'member:*',
         APPLICATION: 'application:*',
         ADMIN: 'admin:*',
+        ADMIN_DASHBOARD: 'admin:dashboard:*',
         NOTIFICATIONS: 'notifications:*',
         ANALYTICS: 'analytics:*'
     }

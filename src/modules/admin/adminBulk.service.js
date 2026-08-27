@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../common/passwordHash');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 const { parseCsvRecords } = require('../../core/utils/csv');

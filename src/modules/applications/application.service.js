@@ -144,13 +144,22 @@ class ApplicationService {
         await this.logActivity(userId, 'application_submitted', 'Application', application._id,
             'Membership application submitted');
 
-        // Update role in MemberAuth (users) & MemberDetails (members) in DB
+        /*
+         * Record what the applicant is, on the profile that describes them.
+         *
+         * The `MemberAuth` half of this used to write `role`, `memberType` and
+         * `registrationType` to the `auth` collection. That collection holds an
+         * email, a password and a flag and nothing else — by design, so a
+         * credential store cannot leak profile data — so strict mode dropped all
+         * three every time and reported nothing. It is gone rather than fixed:
+         * the fields belong on the profile, not beside the password.
+         *
+         * The `MemberDetails` half threw instead of dropping, because `role`'s
+         * enum did not include `aspirant`. Both failures landed in the same
+         * catch and produced one "Non-fatal" warning, which is why nobody
+         * noticed that the declared member type was never stored anywhere.
+         */
         try {
-            await MemberAuth.findByIdAndUpdate(userId, {
-                role: derivedRole,
-                memberType: isAspirant ? 'aspirant' : 'business',
-                registrationType: isAspirant ? 'aspirant' : 'business'
-            });
             if (userDetails && userDetails.save) {
                 userDetails.role = derivedRole;
                 userDetails.memberType = isAspirant ? 'aspirant' : 'business';
@@ -158,10 +167,23 @@ class ApplicationService {
                 await userDetails.save();
             }
         } catch (updateErr) {
-            logger.warn('Non-fatal error updating user role in DB:', updateErr);
+            // Still non-fatal: the application itself is already saved, and the
+            // member type can be re-derived from it. But say what actually
+            // failed rather than logging the whole error object.
+            logger.warn('Could not stamp member type on the profile', {
+                userId: String(userId || ''),
+                role: derivedRole,
+                error: updateErr && updateErr.message
+            });
         }
 
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(userId));
+        // Every tier dashboard is a cached, region-scoped view of exactly this
+        // data, and a review is precisely the event that makes it wrong. Clear
+        // the whole pattern rather than reason about which regions moved: a
+        // rejection can change what three tiers see, and a queue an admin is
+        // about to act on is the one thing that must never be stale.
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         // Acknowledge the submission. Without this the notification list is
         // empty until the first admin acts, which reads as "nothing happened"
@@ -392,6 +414,12 @@ class ApplicationService {
         await application.save();
         await cacheClient.del(CACHE_KEYS.APPLICATION(id));
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(application.userId));
+        // Every tier dashboard is a cached, region-scoped view of exactly this
+        // data, and a review is precisely the event that makes it wrong. Clear
+        // the whole pattern rather than reason about which regions moved: a
+        // rejection can change what three tiers see, and a queue an admin is
+        // about to act on is the one thing that must never be stale.
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         return application;
     }
@@ -1165,6 +1193,12 @@ class ApplicationService {
 
         await cacheClient.del(CACHE_KEYS.APPLICATION(id));
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(application.user));
+        // Every tier dashboard is a cached, region-scoped view of exactly this
+        // data, and a review is precisely the event that makes it wrong. Clear
+        // the whole pattern rather than reason about which regions moved: a
+        // rejection can change what three tiers see, and a queue an admin is
+        // about to act on is the one thing that must never be stale.
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         return true;
     }

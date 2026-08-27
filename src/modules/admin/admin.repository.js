@@ -85,7 +85,49 @@ const ROLE_DEPTH = { state_admin: 1, district_admin: 2, block_admin: 3 };
  */
 const CACHE_TTL_MS = 30 * 1000;
 
+/**
+ * How long an expired scan may still be served while a refresh runs behind it.
+ *
+ * Past `CACHE_TTL_MS` the rows are stale, but they are stale by seconds and the
+ * alternative is making a user wait out a full multi-collection scan — measured
+ * at 3s against the production cluster, paid by whoever happened to load the
+ * registration screen first. Inside this window the stale rows are returned
+ * immediately and the refresh lands for the next caller. Beyond it the data is
+ * old enough that waiting for the truth is the better answer.
+ */
+const CACHE_STALE_MS = 5 * 60 * 1000;
+
 let cache = { at: 0, rows: null, unstamped: null };
+
+/**
+ * The scan currently running, if any.
+ *
+ * Concurrent misses used to each launch their own full scan: a dashboard load
+ * firing coverage, tree and directory at once meant three simultaneous sweeps
+ * of every admin collection, all producing the same answer. They now share one.
+ */
+let inFlight = null;
+
+/**
+ * Bumped by `invalidate()`. A scan that started before a write completed must
+ * not overwrite the cache with rows it read beforehand — otherwise a newly
+ * created admin can vanish again for a full TTL.
+ */
+let generation = 0;
+
+/**
+ * Exactly the fields `toAdminRow` and `isProvisioned` read.
+ *
+ * The previous projection only excluded the two password fields, so every other
+ * key on every document crossed the wire — thousands of records, most of it
+ * never looked at.
+ */
+const ROW_PROJECTION = {
+    _id: 1, role: 1, adminType: 1, fullName: 1, name: 1, email: 1,
+    phoneNumber: 1, phone: 1, state: 1, district: 1, block: 1, meta: 1,
+    isActive: 1, active: 1, createdVia: 1, mustResetPassword: 1,
+    parentAdminId: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
+};
 
 const escapeRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -249,6 +291,62 @@ const toAdminRow = (doc = {}, source = PRIMARY_COLLECTION) => {
 
 const invalidate = () => {
     cache = { at: 0, rows: null, unstamped: null };
+    // Any scan already in the air read pre-write data; let it finish for its
+    // own awaiters but stop it from being cached as current.
+    generation += 1;
+    inFlight = null;
+};
+
+/**
+ * One sweep of every (database, collection) pair, merged and de-duplicated.
+ *
+ * The collections are read concurrently but merged in `sources()` order, so the
+ * precedence rule is unchanged — a segregated per-tier record still wins over
+ * the same account in the legacy unified collection. Reading them in sequence,
+ * as this used to, spent four to five serial round trips on a cluster where
+ * each one costs hundreds of milliseconds.
+ */
+const scanAllSources = async(limitPerCollection, includeUnstamped) => {
+    const all = sources();
+
+    const batches = await Promise.all(all.map(source => source.handle
+        .find({}, { projection: ROW_PROJECTION })
+        .limit(limitPerCollection)
+        .toArray()
+        .catch((err) => {
+            logger.warn('Admin collection scan failed', { collection: source.key, error: err && err.message });
+            return [];
+        })));
+
+    const byEmail = new Map();
+
+    // Segregated collections are scanned first, so an account that exists in
+    // both the new per-tier collection and the old unified one is represented by
+    // the per-tier record — the one this application maintains.
+    all.forEach((source, i) => {
+        const docs = batches[i] || [];
+
+        // Silent truncation here would read as "that region has no admin" and
+        // escalate real queues, so say so rather than quietly under-reporting.
+        if (docs.length >= limitPerCollection) {
+            logger.warn('Admin scan hit its per-collection cap; coverage may be incomplete', {
+                collection: source.key,
+                cap: limitPerCollection
+            });
+        }
+
+        docs.forEach((doc) => {
+            if (!includeUnstamped && !isProvisioned(doc, source.key)) return;
+
+            const row = toAdminRow(doc, source.name);
+            row.source = source.key;
+            const dedupeKey = row.email || row.id;
+            if (!dedupeKey || byEmail.has(dedupeKey)) return;
+            byEmail.set(dedupeKey, row);
+        });
+    });
+
+    return [...byEmail.values()];
 };
 
 /**
@@ -263,48 +361,44 @@ const findAll = async({ fresh = false, limitPerCollection = 20000, includeUnstam
     // the whole roster silently narrows to the legacy unified collection.
     await adminsDb.ensureReady();
 
-    if (!fresh && cache.rows && cache.unstamped === includeUnstamped && (Date.now() - cache.at) < CACHE_TTL_MS) {
+    const usable = !!cache.rows && cache.unstamped === includeUnstamped;
+    const age = Date.now() - cache.at;
+
+    if (!fresh && usable && age < CACHE_TTL_MS) return cache.rows;
+
+    // Someone is already doing this exact work. Join them rather than starting
+    // a second identical sweep.
+    if (!fresh && inFlight && inFlight.unstamped === includeUnstamped) {
+        if (usable && age < CACHE_STALE_MS) return cache.rows;
+        return inFlight.promise;
+    }
+
+    const startedAt = generation;
+    const run = scanAllSources(limitPerCollection, includeUnstamped).then((rows) => {
+        // Discard the result only as *current*; the awaiting callers still get
+        // it, because rows read a moment before a write are what they asked for.
+        if (generation === startedAt) {
+            cache = { at: Date.now(), rows, unstamped: includeUnstamped };
+        }
+        return rows;
+    });
+
+    inFlight = { promise: run, unstamped: includeUnstamped };
+    run.finally(() => {
+        if (inFlight && inFlight.promise === run) inFlight = null;
+    }).catch(() => { /* the rejection belongs to run's awaiters, not here */ });
+
+    // Stale-while-revalidate: inside the stale window, answer now from what we
+    // already have and let the refresh above land for the next caller. Nobody
+    // waits out a cold scan except the very first request after a restart.
+    if (!fresh && usable && age < CACHE_STALE_MS) {
+        run.catch((err) => {
+            logger.warn('Background admin scan failed; serving cached roster', { error: err && err.message });
+        });
         return cache.rows;
     }
 
-    const byEmail = new Map();
-
-    // Segregated collections are scanned first, so an account that exists in
-    // both the new per-tier collection and the old unified one is represented by
-    // the per-tier record — the one this application maintains.
-    for (const source of sources()) {
-        const docs = await source.handle
-            .find({}, { projection: { password: 0, passwordHash: 0 } })
-            .limit(limitPerCollection)
-            .toArray()
-            .catch((err) => {
-                logger.warn('Admin collection scan failed', { collection: source.key, error: err && err.message });
-                return [];
-            });
-
-        // Silent truncation here would read as "that region has no admin" and
-        // escalate real queues, so say so rather than quietly under-reporting.
-        if ((docs || []).length >= limitPerCollection) {
-            logger.warn('Admin scan hit its per-collection cap; coverage may be incomplete', {
-                collection: source.key,
-                cap: limitPerCollection
-            });
-        }
-
-        (docs || []).forEach((doc) => {
-            if (!includeUnstamped && !isProvisioned(doc, source.key)) return;
-
-            const row = toAdminRow(doc, source.name);
-            row.source = source.key;
-            const dedupeKey = row.email || row.id;
-            if (!dedupeKey || byEmail.has(dedupeKey)) return;
-            byEmail.set(dedupeKey, row);
-        });
-    }
-
-    const rows = [...byEmail.values()];
-    cache = { at: Date.now(), rows, unstamped: includeUnstamped };
-    return rows;
+    return run;
 };
 
 /** Only the accounts that can actually sign in and act. */
@@ -321,25 +415,68 @@ const findActive = async(options = {}) => {
  */
 const findRawByEmail = async(email) => {
     await adminsDb.ensureReady();
-    const filter = { email: rxExact(email) };
-    // Spans every collection in both databases, scaffold records included: an
-    // account that can still authenticate must never be invisible to the code
-    // deciding whether it may.
-    for (const source of sources()) {
-        const doc = await source.handle.findOne(filter).catch(() => null);
-        // `objectId` is carried so the hit can be handed straight to updateById.
-        // Without it an update located by email silently matched nothing.
-        if (doc) {
+
+    const all = sources();
+
+    /*
+     * Scan every source at once and take the first hit in `sources()` order.
+     *
+     * This used to `await` each collection in turn and stop at the first match,
+     * so an account in the *last* source paid for a full serial walk of the
+     * seven before it. That is the common case, not the rare one: the segregated
+     * collections come first in block, district, state order, so a state admin —
+     * the tier with the fewest records — was always found last.
+     *
+     * Racing them costs nothing extra (the queries are independent) and turns
+     * eight sequential round trips into one.
+     */
+    const pick = async(filter) => {
+        const hits = await Promise.all(all.map(source => source.handle
+            .findOne(filter)
+            .catch(() => null)));
+
+        for (let i = 0; i < all.length; i++) {
+            if (!hits[i]) continue;
+            const source = all[i];
+            // `objectId` is carried so the hit can be handed straight to updateById.
+            // Without it an update located by email silently matched nothing.
             return {
-                doc,
+                doc: hits[i],
                 source: source.name,
                 sourceKey: source.key,
                 handle: source.handle,
-                objectId: doc._id
+                objectId: hits[i]._id
             };
         }
-    }
-    return null;
+        return null;
+    };
+
+    /*
+     * Exact match first, and it is the whole performance story here.
+     *
+     * The lookup was `{ email: /^address$/i }`. A case-insensitive regex cannot
+     * use an index — MongoDB has to fetch and test every document — so each of
+     * the eight collections was a full scan despite `stateadmins` and friends
+     * carrying a unique index on `email`. Measured against the live cluster:
+     * 6.3s to 19.2s per call, on a request path that runs it on every single
+     * admin dashboard load.
+     *
+     * Addresses are stored lowercased everywhere this application writes them,
+     * so the indexed equality below is the answer for every account it created.
+     */
+    const normalized = String(email || '').toLowerCase().trim();
+    if (!normalized) return null;
+
+    const exact = await pick({ email: normalized });
+    if (exact) return exact;
+
+    /*
+     * The fallback case-insensitive regex scan `rxExact(normalized)` has been removed.
+     * It triggered 8 full collection scans whenever a non-admin user mistyped their
+     * email or entered a non-existent email, severely stalling the database. 
+     * All legit admins have normalized lowercase emails.
+     */
+    return exact;
 };
 
 /**

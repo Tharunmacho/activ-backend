@@ -129,8 +129,42 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     role: {
         type: String,
-        enum: ['member', 'admin'],
+        /*
+         * `aspirant` and `business` belong here, and leaving them out was not
+         * cosmetic.
+         *
+         * `createApplication` derives the role from what the applicant declared
+         * and then saves it onto this document. With the enum limited to
+         * member/admin that save THREW on every aspirant — and because it threw,
+         * the `memberType` and `registrationType` assignments on the same
+         * document were abandoned with it. The catch around it logs
+         * "Non-fatal error updating user role in DB" and carries on, so the
+         * whole thing looked like a warning rather than three fields silently
+         * never being written.
+         */
+        enum: ['member', 'admin', 'aspirant', 'business'],
         default: 'member'
+    },
+
+    /*
+     * What the applicant declared, stored rather than re-derived.
+     *
+     * Neither path existed, so Mongoose strict mode dropped both without a
+     * word — the same silent-drop that left `memberType` undefined on the
+     * application documents. Every screen that wanted to know whether someone
+     * was an aspirant had to reconstruct it from `data.registrationType` and
+     * `data.doingBusiness` on the application, and two of them reconstructed it
+     * differently and disagreed.
+     */
+    memberType: {
+        type: String,
+        enum: ['aspirant', 'business'],
+        trim: true
+    },
+    registrationType: {
+        type: String,
+        enum: ['aspirant', 'business'],
+        trim: true
     },
     isActive: {
         type: Boolean,

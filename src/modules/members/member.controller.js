@@ -454,11 +454,11 @@ const updateMember = asyncHandler(async(req, res) => {
 });
 
 const getMyProfile = asyncHandler(async(req, res) => {
-    // Get personal details from PersonalInfo1 collection
-    const personalInfo = await PersonalInfo1.findOne({ userId: req.user.userId });
-    
-    // Get member from web users collection
-    const member = await MemberDetails.findById(req.user.userId).select('-password');
+    // Get personal details from PersonalInfo1 collection and member from web users collection concurrently
+    const [personalInfo, member] = await Promise.all([
+        PersonalInfo1.findOne({ userId: req.user.userId }),
+        MemberDetails.findById(req.user.userId).select('-password')
+    ]);
     
     if (!member) {
         return res.status(404).json(ApiResponse.error('Profile not found', 404));
@@ -540,11 +540,11 @@ const getMyProfile = asyncHandler(async(req, res) => {
 });
 
 const getBusinessInfo = asyncHandler(async(req, res) => {
-    // Get business info from BusinessInfo collection
-    const businessInfo = await BusinessInfo.findOne({ userId: req.user.userId });
-    
-    // Get member from web users collection
-    const member = await MemberDetails.findById(req.user.userId);
+    // Get business info from BusinessInfo collection and member from web users collection concurrently
+    const [businessInfo, member] = await Promise.all([
+        BusinessInfo.findOne({ userId: req.user.userId }),
+        MemberDetails.findById(req.user.userId)
+    ]);
     
     if (!member) {
         return res.status(404).json(ApiResponse.error('Profile not found', 404));
@@ -589,14 +589,11 @@ const getBusinessInfo = asyncHandler(async(req, res) => {
 });
 
 const getFinancialInfo = asyncHandler(async(req, res) => {
-    // Get financial info from MemberFinancialInfo collection
-    // `+panNumber` because the field is `select: false` in the schema and this
-    // response is meant to carry it.
-    const financialInfo = await MemberFinancialInfo.findOne({ memberId: req.user.userId })
-        .select('+panNumber');
-    
-    // Get member from web users collection
-    const member = await MemberDetails.findById(req.user.userId);
+    // Get financial info from MemberFinancialInfo collection and member from web users collection concurrently
+    const [financialInfo, member] = await Promise.all([
+        MemberFinancialInfo.findOne({ memberId: req.user.userId }).select('+panNumber'),
+        MemberDetails.findById(req.user.userId)
+    ]);
     
     if (!member) {
         return res.status(404).json(ApiResponse.error('Profile not found', 404));
@@ -637,13 +634,13 @@ const getFinancialInfo = asyncHandler(async(req, res) => {
 });
 
 const getDeclarationInfo = asyncHandler(async(req, res) => {
-    // Get declaration info from MemberDeclaration collection
-    const declarationInfo = await MemberDeclaration.findOne({
-        $or: [{ userId: req.user.userId }, { memberId: req.user.userId }]
-    });
-    
-    // Get member from web users collection
-    const member = await MemberDetails.findById(req.user.userId);
+    // Get declaration info from MemberDeclaration collection and member from web users collection concurrently
+    const [declarationInfo, member] = await Promise.all([
+        MemberDeclaration.findOne({
+            $or: [{ userId: req.user.userId }, { memberId: req.user.userId }]
+        }),
+        MemberDetails.findById(req.user.userId)
+    ]);
     
     if (!member) {
         return res.status(404).json(ApiResponse.error('Profile not found', 404));

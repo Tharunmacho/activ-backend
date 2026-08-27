@@ -50,7 +50,7 @@ const startServer = async() => {
         else logger.warn('adminsdb is unreachable — admin creation will fail until it recovers');
 
         // Connect to Redis (optional)
-        await connectRedis();
+        const redisClient = await connectRedis();
 
         // Start listening
         server.listen(config.port, '0.0.0.0', () => {
@@ -62,7 +62,7 @@ const startServer = async() => {
 ║ Port: ${config.port.toString().padEnd(30)}║
 ║ API Version: ${config.apiVersion.padEnd(24)}║
 ║ MongoDB: Connected                    ║
-║ Redis: ${(connectRedis ? 'Connected' : 'Disconnected').padEnd(29)}║
+║ Redis: ${(redisClient ? 'Connected' : 'Disconnected (memory cache)').padEnd(29)}║
 ╚═══════════════════════════════════════╝
       `);
         });

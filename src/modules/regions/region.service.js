@@ -82,11 +82,31 @@ const summarise = (admins) => (admins || []).map(a => ({
     email: a.email
 }));
 
+/**
+ * Derived-view cache.
+ *
+ * `adminRepository` already caches the admin *rows*, but every caller here then
+ * rebuilt the coverage Maps and re-sorted the whole tree from those rows —
+ * ~7,700 records bucketed, summarised and sorted, on every single request. The
+ * registration screen alone asks for states, then districts, then blocks, then
+ * validates, and `validateRegion` used to build it twice by itself.
+ *
+ * `builtFrom` is identity-compared against the rows array the repository hands
+ * back. That array is replaced whenever the repository's own cache is refilled
+ * or invalidated, so this cache expires exactly when the underlying data does —
+ * it cannot go stale independently, and no second TTL has to be kept in sync.
+ */
+let derived = { builtFrom: null, states: null, tree: null };
+
 class RegionService {
     /** The raw coverage map, rebuilt from the admin repository's cached scan. */
     async coverageMap({ fresh = false } = {}) {
         const admins = await adminRepository.findActive({ fresh });
-        return buildCoverage(admins);
+        if (derived.builtFrom === admins && derived.states) return derived.states;
+
+        const states = buildCoverage(admins);
+        derived = { builtFrom: admins, states, tree: null };
+        return states;
     }
 
     /**
@@ -98,6 +118,7 @@ class RegionService {
      */
     async getTree(options = {}) {
         const states = await this.coverageMap(options);
+        if (derived.states === states && derived.tree) return derived.tree;
 
         const tree = [];
         states.forEach((stateNode) => {
@@ -137,6 +158,10 @@ class RegionService {
         });
 
         tree.sort((a, b) => a.name.localeCompare(b.name));
+
+        // Only cache a tree built from the map currently cached. A `fresh` read
+        // may have replaced `derived` underneath this call.
+        if (derived.states === states) derived.tree = tree;
         return tree;
     }
 
@@ -226,10 +251,11 @@ class RegionService {
      * and says so. That is the only case where an unstaffed region is accepted.
      */
     async validateRegion({ state, district, block } = {}, options = {}) {
-        const [tree, states] = await Promise.all([
-            this.getTree(options),
-            this.coverageMap(options)
-        ]);
+        // Sequential, not Promise.all: `getTree()` calls `coverageMap()` itself,
+        // and racing them meant two cold builds of the same map on a cache miss —
+        // the single most expensive thing on the registration path.
+        const tree = await this.getTree(options);
+        const states = await this.coverageMap(options);
 
         // The bootstrap test is "does any geofenced admin exist at all", not
         // "is the tree empty". A platform with three state admins and no block
@@ -293,6 +319,7 @@ class RegionService {
 
     /** Drop the cached admin scan. Called after any admin write. */
     invalidate() {
+        derived = { builtFrom: null, states: null, tree: null };
         adminRepository.invalidate();
     }
 }

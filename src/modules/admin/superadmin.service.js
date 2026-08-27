@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../common/passwordHash');
 const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
 const ApiError = require('../../core/utils/ApiError');

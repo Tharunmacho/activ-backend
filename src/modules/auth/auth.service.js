@@ -8,7 +8,7 @@ const { CACHE_KEYS, CACHE_TTL } = require('../../core/cache/cacheKeys');
 
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../common/passwordHash');
 const logger = require('../../config/logger');
 const adminRepository = require('../admin/admin.repository');
 const regionService = require('../regions/region.service');
@@ -77,9 +77,26 @@ const normalizeRole = (r) => {
 
 class AuthService {
     async register(userData) {
-        // Check if email already exists
-        const existingMember = await MemberDetails.findOne({ email: userData.email.toLowerCase() });
-        if (existingMember) {
+        const email = String(userData.email || '').toLowerCase().trim();
+
+        /*
+         * Both collections, not just the profile one.
+         *
+         * A registration writes a profile to "web users" and a credential to
+         * `auth`, and only `auth` carries the unique index on email. Checking
+         * "web users" alone meant an address present in `auth` but missing from
+         * "web users" sailed past this guard, and the request died on an E11000
+         * from `memberAuth.save()` — *after* the profile row had already been
+         * written. The production log shows exactly that pair: an E11000 at
+         * 09:17:21, then the same address returning a clean 409 two minutes
+         * later, because the failed attempt had left its orphan behind.
+         */
+        const [existingMember, existingAuth] = await Promise.all([
+            MemberDetails.findOne({ email }).select('_id').lean(),
+            MemberAuth.findOne({ email }).select('_id').lean()
+        ]);
+
+        if (existingMember || existingAuth) {
             throw ApiError.conflict('Email already registered');
         }
 
@@ -111,7 +128,7 @@ class AuthService {
         // Create member in "web users" collection (NO password here)
         const memberDetails = new MemberDetails({
             fullName: userData.fullName,
-            email: userData.email.toLowerCase(),
+            email,
             phoneNumber: userData.phoneNumber,
             state: region.state,
             district: region.district,
@@ -126,14 +143,40 @@ class AuthService {
 
         await memberDetails.save();
 
-        // Save ONLY email and password to "web auth" collection
+        /*
+         * The credential write is the one that can still fail — the unique index
+         * on `auth.email` is the only real arbiter, and two requests for the same
+         * address can both clear the check above. If it does fail, the profile
+         * written a line earlier has to go, or the address is left half-registered:
+         * a profile with no way to sign in, and a pre-check that will now reject
+         * every honest retry with "Email already registered".
+         *
+         * Same compensating-delete shape as `commitFinalApproval()`, and for the
+         * same reason — two collections, no transaction across them.
+         */
         const memberAuth = new MemberAuth({
-            email: userData.email.toLowerCase(),
+            email,
             password: userData.password,
             isActive: true
         });
 
-        await memberAuth.save();
+        try {
+            await memberAuth.save();
+        } catch (err) {
+            await MemberDetails.deleteOne({ _id: memberDetails._id }).catch((cleanupErr) => {
+                logger.error('Registration rollback failed; orphaned member profile left behind', {
+                    memberId: String(memberDetails._id),
+                    email,
+                    error: cleanupErr && cleanupErr.message
+                });
+            });
+
+            // A duplicate key here is a race on the same address, not a fault.
+            if (err && err.code === 11000) {
+                throw ApiError.conflict('Email already registered');
+            }
+            throw err;
+        }
 
         // Generate tokens
         const tokens = this.generateTokens({ _id: memberDetails._id, email: memberDetails.email, role: 'member' });
