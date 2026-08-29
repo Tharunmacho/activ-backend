@@ -72,7 +72,22 @@ const normalizeRole = (r) => {
     if (lower === 'districtadmin' || lower === 'district_admin') return 'district_admin';
     if (lower === 'stateadmin' || lower === 'state_admin') return 'state_admin';
     if (lower === 'superadmin' || lower === 'super_admin') return 'super_admin';
-    return lower;
+    if (lower === 'admin') return 'admin';
+    /*
+     * Everything else is a member.
+     *
+     * `createApplication` used to write the declared member type ('business' /
+     * 'aspirant') into this field, so accounts that submitted an application
+     * under that build still carry one of those words where an authorization
+     * role belongs. Returning it verbatim minted tokens with `role: 'business'`,
+     * and every `role === 'member'` check on both clients then failed — which is
+     * what emptied the website's profile-completion bar to 0% after a logout.
+     *
+     * The write is gone; this folds the rows it already produced back to the
+     * only role a record in the member collection can have, so those accounts
+     * recover on their next sign-in without a migration.
+     */
+    return 'member';
 };
 
 class AuthService {

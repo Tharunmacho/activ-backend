@@ -5,14 +5,24 @@ const ADMIN_ROLES = ['block_admin', 'district_admin', 'state_admin', 'super_admi
 /**
  * Whether a membership counts as paid.
  *
- * Two values mean yes, and both are in live data: `POST /payment/complete`
- * writes `active`, while records activated through the approval path carry
- * `approved`. The website's `getPaymentStatus()` collapses exactly this pair,
- * and the two must agree — a member who sees paid-only cards on the dashboard
- * and then gets 403 from the endpoint behind them has been shown a door that
- * does not open.
+ * `active` is the answer, and `approved` is deliberately NOT one.
+ *
+ * `approved` means the three-tier workflow approved the *application*, which is
+ * what unlocks the payment step — it is not the payment. Counting it as paid
+ * had this backwards in both directions at once: an approved member was shown
+ * the paid dashboard and the paid-only directory without having paid a rupee,
+ * and `paymentOrder.createOrder` refused to open an order for them at all
+ * ("This membership is already active"), so the one action left to them was the
+ * one action they could not take. `commitFinalApproval` already writes
+ * `'pending'` for exactly this reason; the reads had not caught up.
+ *
+ * `completed` is tolerated because the Instamojo path in `payment.service.js`
+ * has used it. The website's `getPaymentStatus()` mirrors this list, and the
+ * two must agree — a member who sees paid-only cards on the dashboard and then
+ * gets 403 from the endpoint behind them has been shown a door that does not
+ * open.
  */
-const PAID_STATUSES = ['approved', 'active'];
+const PAID_STATUSES = ['active', 'completed'];
 
 const isPaidStatus = (value) => PAID_STATUSES.includes(String(value || '').toLowerCase());
 

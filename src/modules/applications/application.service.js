@@ -161,7 +161,25 @@ class ApplicationService {
          */
         try {
             if (userDetails && userDetails.save) {
-                userDetails.role = derivedRole;
+                /*
+                 * `role` is deliberately NOT written here.
+                 *
+                 * It is the authorization role — 'member' or an admin tier — and
+                 * this used to overwrite it with the *member type* ('business' /
+                 * 'aspirant'). Nothing failed at the time, so it looked harmless.
+                 * The damage landed at the member's NEXT sign-in: `login()` mints
+                 * the token from `memberDetails.role`, so the session came back
+                 * as role 'business', and every client check of the shape
+                 * `role === 'member'` stopped matching. On the website that is
+                 * `isMemberSession()`, which gates `ProfileContext` — so the
+                 * member's profile completion, form list and event count were
+                 * never loaded and the bar read 0% however much they had filled
+                 * in. It only appeared after a logout, because the session
+                 * written at registration still said 'member'.
+                 *
+                 * The declared type has two fields of its own, below, and both
+                 * clients already read them.
+                 */
                 userDetails.memberType = isAspirant ? 'aspirant' : 'business';
                 userDetails.registrationType = isAspirant ? 'aspirant' : 'business';
                 await userDetails.save();
@@ -505,6 +523,35 @@ class ApplicationService {
         });
     }
 
+    /**
+     * Drop every cached view of an application that a review has just changed.
+     *
+     * The three tier dashboards are cached for 20 seconds, keyed by tier and
+     * region. Both clients POST the decision and then immediately refetch the
+     * dashboard to pick up the new counts — well inside that window — so the
+     * refetch was answered from the entry written *before* the approval. The
+     * card reverted to "Pending" with its Approve / Reject buttons still on it,
+     * and the admin was looking at a queue the database no longer agreed with.
+     *
+     * `updateApplicationStatus` and `deleteApplication` have always cleared
+     * these; the three tier reviews — the paths every dashboard actually calls —
+     * never did. Failing here must not fail the review, which has already been
+     * committed, so every call is caught.
+     */
+    async invalidateReviewCaches(application) {
+        const id = application && application._id ? String(application._id) : '';
+        const ownerId = application && (application.userId || application.user);
+
+        await Promise.all([
+            id ? cacheClient.del(CACHE_KEYS.APPLICATION(id)).catch(() => null) : null,
+            ownerId ? cacheClient.del(CACHE_KEYS.APPLICATION_USER(ownerId)).catch(() => null) : null,
+            // The whole pattern rather than one region: a decision moves a file
+            // between two tiers at once, and a queue an admin is about to act on
+            // is the one thing that must never be stale.
+            cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null)
+        ]);
+    }
+
     async blockAdminReview(applicationId, action, adminId, rejectionReason = null, user = null) {
         const application = await Application.findById(applicationId);
         if (!application) {
@@ -535,6 +582,7 @@ class ApplicationService {
             });
 
             await this.recordReviewAudit(application, 'block', 'approve', adminId, user, { newStatus: 'Pending-District' });
+            await this.invalidateReviewCaches(application);
 
             return {
                 success: true,
@@ -559,6 +607,7 @@ class ApplicationService {
             });
 
             await this.recordReviewAudit(application, 'block', 'reject', adminId, user, { reason: rejectionReason || '' });
+            await this.invalidateReviewCaches(application);
 
             return {
                 success: true,
@@ -606,6 +655,7 @@ class ApplicationService {
                 fallback: routing.fallback,
                 absorbedTiers: routing.absorbed
             });
+            await this.invalidateReviewCaches(application);
 
             return {
                 success: true,
@@ -646,6 +696,7 @@ class ApplicationService {
                 fallback: routing.fallback,
                 absorbedTiers: routing.absorbed
             });
+            await this.invalidateReviewCaches(application);
 
             return {
                 success: true,
@@ -699,6 +750,8 @@ class ApplicationService {
                 absorbedTiers: routing.absorbed
             });
 
+            await this.invalidateReviewCaches(application);
+
             return {
                 success: true,
                 status: 'Approved',
@@ -731,6 +784,7 @@ class ApplicationService {
                 fallback: routing.fallback,
                 absorbedTiers: routing.absorbed
             });
+            await this.invalidateReviewCaches(application);
 
             return {
                 success: true,

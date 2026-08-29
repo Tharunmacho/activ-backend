@@ -26,7 +26,7 @@ const PASSWORD = 'FullApp123!';
 const REGION = { state: 'FA Test State', district: 'FA Test District', block: 'FA Test Block' };
 
 const COL = {
-    details: 'web users',
+    details: 'users',   // MemberDetails — schema says collection: 'users'
     business: 'additional form for bussiness 2',
     financial: 'additional form for financial 3',
     declaration: 'additional form for declaration 4',
@@ -209,7 +209,7 @@ const contract = async(label, method, path, opts = {}) => {
         });
 
         await test('declaration step writes userId (unique index) not just memberId', async() => {
-            // Profile rows are keyed by the "web users" id, which is what the JWT
+            // Profile rows are keyed by the member-profile (`users`) id, which is what the JWT
             // carries — not the memberauths id.
             const uid = new mongoose.Types.ObjectId(memberId);
             const dec = await db.collection(COL.declaration).findOne({
@@ -467,7 +467,7 @@ const contract = async(label, method, path, opts = {}) => {
     } finally {
         section('Cleanup');
         const db2 = mongoose.connection.db;
-        // Profile rows are keyed by the "web users" id (what the JWT carries).
+        // Profile rows are keyed by the member-profile (`users`) id (what the JWT carries).
         const uid = memberId ? new mongoose.Types.ObjectId(memberId) : null;
 
         const del = async(c, f) => {
@@ -493,7 +493,7 @@ const contract = async(label, method, path, opts = {}) => {
         const appsAfter = await db2.collection('applications').countDocuments();
         const usersAfter = await db2.collection(COL.details).countDocuments();
         console.log(`  applications: ${appsBefore} -> ${appsAfter}`);
-        console.log(`  web users:    ${usersBefore} -> ${usersAfter}`);
+        console.log(`  users:        ${usersBefore} -> ${usersAfter}`);
 
         if (broken.length) {
             section(`BROKEN INTEGRATIONS (${broken.length}) — app calls these, server does not answer`);

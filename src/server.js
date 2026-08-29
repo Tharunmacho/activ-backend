@@ -52,6 +52,32 @@ const startServer = async() => {
         // Connect to Redis (optional)
         const redisClient = await connectRedis();
 
+        /*
+         * Warm the admin roster before the port opens, then keep it warm.
+         *
+         * Every dashboard needs the roster (for the admin's own scope) and the
+         * coverage map built from it (for orphan-fallback routing). Both come
+         * from one scan of eight collections — 448 rows, already parallel and
+         * projected, but ~3.5s against the remote cluster because the cost is
+         * round trips rather than work. Measured cold, a district dashboard took
+         * 9.2s end to end; warm it is 0.7s.
+         *
+         * `findAll` already spares callers a refresh inside its five-minute
+         * stale window, so the only requests that ever paid full price were the
+         * first one after a restart and the first one after five idle minutes.
+         * This closes both, off the request path.
+         *
+         * Awaited, so the first admin to load a dashboard after a deploy does
+         * not race the warm-up — and non-fatal, because a warm-up is an
+         * optimisation and must never stop the server coming up.
+         */
+        const adminRepository = require('./modules/admin/admin.repository');
+        await adminRepository.startRosterRefresh().catch((err) => {
+            logger.warn('Admin roster warm-up failed; first request will be slower', {
+                error: err && err.message
+            });
+        });
+
         // Start listening
         server.listen(config.port, '0.0.0.0', () => {
             logger.info(`

@@ -9,6 +9,7 @@ const Activity = require('../common/activity.model');
 const MembershipPlan = require('./membershipplan.model');
 const MemberDetails = require('./memberdetails.model');
 const memberService = require('./member.service');
+const { isPaidStatus } = require('../common/memberContext');
 
 /**
  * The endpoints the mobile app calls that this backend never served.
@@ -290,8 +291,9 @@ const getCertificate = asyncHandler(async(req, res) => {
     const member = await MemberDetails.findById(owner).lean();
     if (!member) throw ApiError.notFound('No member profile for this account');
 
-    const status = String(member.membershipStatus || '').toLowerCase();
-    const active = ['approved', 'active', 'completed'].includes(status)
+    // Paid, not merely approved — a certificate names someone as a paid-up
+    // member. `PAID_STATUSES` is the one list every such check reads.
+    const active = isPaidStatus(member.membershipStatus)
         || String(member.paymentStatus || '').toLowerCase() === 'completed';
 
     if (!active) {

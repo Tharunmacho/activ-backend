@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const PaymentOrder = require('./paymentorder.model');
 const MemberDetails = require('../members/memberdetails.model');
 const { getPlan } = require('./membershipPlans');
+const { isPaidStatus } = require('../common/memberContext');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 
@@ -96,8 +97,18 @@ class PaymentOrderService {
         const member = await MemberDetails.findById(userId).catch(() => null);
         if (!member) throw ApiError.notFound('No member profile for this account');
 
-        const status = String(member.membershipStatus || '').toLowerCase();
-        if (status === 'approved' || status === 'active') {
+        /*
+         * Refuse only a membership that has genuinely been paid for.
+         *
+         * `approved` used to count here, and it is not a payment — it is the
+         * three-tier workflow approving the *application*, which is precisely
+         * the event that unlocks this screen. Every member who got all the way
+         * through the approval flow was therefore told "This membership is
+         * already active" the moment they pressed Pay, and no order could ever
+         * be created for them: the payment step was unreachable for exactly the
+         * members entitled to it.
+         */
+        if (isPaidStatus(member.membershipStatus)) {
             // Not merely wasteful: a second activation would overwrite the
             // first payment's record on the member.
             throw ApiError.badRequest('This membership is already active');
@@ -267,7 +278,19 @@ class PaymentOrderService {
         const member = await MemberDetails.findByIdAndUpdate(
             claimed.memberId,
             {
-                membershipStatus: 'approved',
+                /*
+                 * `active`, not `approved`.
+                 *
+                 * `approved` is the application-approval state, written by
+                 * `commitFinalApproval`'s predecessor and still on live records
+                 * that never paid. Writing it here too made the two
+                 * indistinguishable, so nothing downstream could tell a member
+                 * who had paid from one who had merely been approved. The other
+                 * payment path (`payment.service.js`) has always written
+                 * `active`; this now agrees with it, and `PAID_STATUSES` is the
+                 * single list every reader checks against.
+                 */
+                membershipStatus: 'active',
                 membershipType: claimed.membershipType,
                 membershipActivatedAt: new Date(),
                 membershipExpiresAt: expiresAt,

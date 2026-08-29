@@ -408,6 +408,63 @@ const findActive = async(options = {}) => {
 };
 
 /**
+ * Keep the roster cache warm so no request ever pays for a cold scan.
+ *
+ * The scan itself is already parallel and projected — it reads 448 rows across
+ * eight collections — but it still costs ~3.5s against the remote Atlas cluster,
+ * because the price is round trips, not work. `coverageMap()` is built from the
+ * same rows, and a dashboard needs both, so a cold request was measured at 9.2s
+ * end to end while a warm one is 0.7s.
+ *
+ * `findAll` already refuses to make anyone wait for a refresh *inside* the
+ * five-minute stale window. Two gaps let requests through anyway, and this
+ * closes both:
+ *
+ *   - the very first request after a restart, when there is no cache at all —
+ *     hence the warm at boot, before the port is even listening on;
+ *   - any request after five idle minutes, when the rows have aged out of the
+ *     stale window entirely — hence the interval, set well inside it.
+ *
+ * The refresh runs off the request path, so a user is never the one waiting for
+ * it. Failures are logged and dropped: a warm-up that cannot reach the database
+ * must not stop the server from starting or kill the process later.
+ */
+const REFRESH_INTERVAL_MS = 2 * 60 * 1000;
+let refreshTimer = null;
+
+const startRosterRefresh = async() => {
+    if (refreshTimer) return;
+
+    const refresh = async(reason) => {
+        try {
+            const startedAt = Date.now();
+            const rows = await findAll({ fresh: true });
+            logger.info('Admin roster refreshed', {
+                reason,
+                admins: rows.length,
+                ms: Date.now() - startedAt
+            });
+        } catch (error) {
+            logger.warn('Admin roster refresh failed; serving whatever is cached', {
+                reason,
+                error: error && error.message
+            });
+        }
+    };
+
+    refreshTimer = setInterval(() => refresh('interval'), REFRESH_INTERVAL_MS);
+    // Node should be free to exit on its own; this timer must not hold it open.
+    if (refreshTimer.unref) refreshTimer.unref();
+
+    await refresh('boot');
+};
+
+const stopRosterRefresh = () => {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = null;
+};
+
+/**
  * Locate one admin by email across both databases.
  *
  * Returns the raw document, password field included — this is the only read
@@ -758,6 +815,8 @@ module.exports = {
     sources,
     findAll,
     findActive,
+    startRosterRefresh,
+    stopRosterRefresh,
     findById,
     findRawById,
     findRawByEmail,

@@ -25,7 +25,7 @@ const ADMINS = [
 ];
 
 const COL = {
-    details: 'web users',
+    details: 'users',   // MemberDetails — schema says collection: 'users'
     business: 'additional form for bussiness 2',
     financial: 'additional form for financial 3',
     declaration: 'additional form for declaration 4'

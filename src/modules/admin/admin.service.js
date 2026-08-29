@@ -14,12 +14,20 @@ const { CACHE_KEYS } = require('../../core/cache/cacheKeys');
 /**
  * How long a tier dashboard is reused.
  *
- * Short, because a queue is the thing an admin is about to act on. An approve
- * or reject clears the key outright (see `invalidateDashboards`), so this only
- * bounds how long a change made *somewhere else* — another admin's action, a
- * new submission — takes to appear.
+ * An approve or reject clears the key outright — see `invalidateReviewCaches`
+ * in `application.service`, which every one of the six tier-review branches
+ * calls — so this never delays the admin's own action. It only bounds how long
+ * a change made *somewhere else* takes to appear: another admin's decision, or
+ * a new application arriving.
+ *
+ * Raised from 20s to 120s once that invalidation was in place. At 20s a state
+ * admin reading a queue for a couple of minutes paid for six rebuilds, each
+ * measured at 0.5–1.7s against the remote cluster; the rebuilt payload was
+ * identical every time, because nothing had happened. Two minutes is the point
+ * where a queue is worth re-reading on its own — a decision the admin makes
+ * themselves no longer waits for it either way.
  */
-const DASHBOARD_TTL_SECONDS = 20;
+const DASHBOARD_TTL_SECONDS = 120;
 
 /** How long an admin's own profile record is reused. Cleared on edit. */
 const ADMIN_PROFILE_TTL_SECONDS = 300;
@@ -1255,6 +1263,36 @@ class AdminService {
             const cacheKey = CACHE_KEYS.ADMIN(email);
             const cached = await cacheClient.get(cacheKey).catch(() => null);
             if (cached) return cached;
+
+            /*
+             * The warm roster first, the eight-collection lookup only if it misses.
+             *
+             * `findRawByEmail` fans out across every admin collection in both
+             * databases. It is indexed and parallel, but it is still eight round
+             * trips to a remote cluster — measured at 1.3–2.2s, and this endpoint
+             * is called on every admin screen load. The roster the repository
+             * already keeps warm carries exactly the seven fields below, so a hit
+             * there answers with no query at all.
+             *
+             * A miss falls through deliberately rather than 404ing: the roster
+             * excludes the unstamped scaffold accounts, and one of those can
+             * still legitimately sign in.
+             */
+            const roster = await adminRepository.findAll().catch(() => []);
+            const known = (roster || []).find(r => String(r.email || '').toLowerCase() === email);
+            if (known) {
+                const profile = {
+                    fullName: known.fullName,
+                    email: known.email,
+                    phoneNumber: known.phoneNumber,
+                    state: known.state,
+                    district: known.district,
+                    block: known.block,
+                    role: known.role || user.role || ''
+                };
+                await cacheClient.set(cacheKey, profile, ADMIN_PROFILE_TTL_SECONDS).catch(() => null);
+                return profile;
+            }
 
             const hit = await adminRepository.findRawByEmail(email).catch(() => null);
             if (hit) {

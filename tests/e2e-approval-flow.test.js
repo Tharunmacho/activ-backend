@@ -35,11 +35,19 @@ const OTHER_REGION = {
 
 const PASSWORD = 'E2ePassw0rd!';
 
-// The four member models write to legacy, human-named collections — NOT to the
-// pluralised names Mongoose would infer. Cleanup must target these exact names
-// or the test leaves orphaned rows behind in real collections.
+// Three of the four member models write to legacy, human-named collections —
+// NOT to the pluralised names Mongoose would infer. Cleanup must target these
+// exact names or the test leaves orphaned rows behind in real collections.
+//
+// `MemberDetails` is the exception and was wrong here: its schema declares
+// `collection: 'users'`, while this map still named the retired `web users`.
+// Both halves of that failed silently in opposite directions — every assertion
+// that a member profile had been created read an empty collection and reported
+// "MemberDetails not created", and the cleanup then deleted from that same
+// empty collection, so each run left two synthetic member rows behind in the
+// real `users` collection of the shared cluster.
 const COL = {
-    details: 'web users',                              // MemberDetails
+    details: 'users',                                  // MemberDetails
     business: 'additional form for bussiness 2',       // BusinessInfo  (sic)
     financial: 'additional form for financial 3',      // MemberFinancialInfo
     declaration: 'additional form for declaration 4'   // MemberDeclaration
