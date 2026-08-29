@@ -312,9 +312,25 @@ class EventService {
 
         if (!isAdmin) {
             query.status = 'published';
-            // A member who has not paid sees only the open events. An admin
-            // sees everything, so they can check what they just published.
-            if (!context.isPaid) query.audience = 'all';
+            /*
+             * A member who has not paid sees only the open events. An admin
+             * sees everything, so they can check what they just published.
+             *
+             * `$ne: 'paid'` rather than `= 'all'`, and the difference is not
+             * cosmetic. `audience` was added after the first events were
+             * written, so those documents have no such key — and an equality
+             * match on a missing field matches nothing. The whole published
+             * programme therefore vanished for every member who had not paid:
+             * measured against live data, an unpaid member's event list came
+             * back with zero of five published events.
+             *
+             * Asking "is this explicitly restricted" instead of "is this
+             * explicitly public" is also the safer question. Only a document
+             * that actually says `paid` is withheld, which matches the schema's
+             * own `default: 'all'` and keeps a row written by any other path
+             * visible rather than silently hidden.
+             */
+            if (!context.isPaid) query.audience = { $ne: 'paid' };
         } else if (filters.status && filters.status !== 'all') {
             const status = str(filters.status).toLowerCase();
             if (['draft', 'published'].includes(status)) query.status = status;
