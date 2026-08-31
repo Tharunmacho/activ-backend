@@ -7,10 +7,21 @@ async function run() {
   
   // Set to Admin@123
   const hash = await bcrypt.hash('Admin@123', 10);
-  
-  await db.collection('superadmins').updateOne(
+  const result = await db.collection('superadmins').updateOne(
     { email: 'cms@activ.org.in' },
-    { $set: { passwordHash: hash } }
+    { 
+      $set: { 
+        email: 'cms@activ.org.in',
+        passwordHash: hash,
+        fullName: 'CMS Admin',
+        role: 'cms_admin',
+        active: true
+      },
+      $setOnInsert: {
+        adminId: 'SUPER002'
+      }
+    },
+    { upsert: true }
   );
   
   console.log('Password reset successfully!');

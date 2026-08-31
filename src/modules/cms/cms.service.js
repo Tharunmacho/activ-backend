@@ -22,6 +22,7 @@ const { toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders } = eventSe
  * to drift.
  */
 const pickEventDetail = (event = {}) => ({
+    category: event.category,
     audience: event.audience,
     agenda: event.agenda,
     speakers: event.speakers,
@@ -57,7 +58,7 @@ const eventDetailUpdates = (payload = {}) => {
         update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));
     }
 
-    ['venueAddress', 'venueMapUrl', 'contactName', 'contactPhone', 'contactEmail', 'registrationNote']
+    ['category', 'venueAddress', 'venueMapUrl', 'contactName', 'contactPhone', 'contactEmail', 'registrationNote']
         .forEach((key) => {
             if (payload[key] !== undefined) update[key] = str(payload[key]);
         });
@@ -158,8 +159,15 @@ const EMPTY_ABOUT = {
 };
 
 const EMPTY_EVENTS_SETTINGS = {
-    badgeText: '', heading: '', subtitle: '',
-    viewAllLabel: '', viewAllHref: '/events', emptyText: '', homeLimit: 3,
+    badgeText: '', heading: '', headingHighlight: '', lede: '', subtitle: '',
+    heroMedia: { ...EMPTY_MEDIA },
+    heroBadge: { enabled: true, icon: 'calendar-days', title: '', subtitle: '' },
+    stats: [],
+    searchPlaceholder: 'Search events...',
+    categories: [],
+    viewAllLabel: '', viewAllHref: '/events',
+    emptyText: '', emptyFilterText: '', homeLimit: 3,
+    banner: { enabled: true, icon: 'calendar-days', title: '', subtitle: '', ctaLabel: '', ctaHref: '' },
 };
 
 const EMPTY_GALLERY_SETTINGS = {
@@ -536,20 +544,65 @@ class CmsService {
 
     // ============================================================ events page
 
-    getEventsSettings() {
-        return readSingleton(EventsSettings, EMPTY_EVENTS_SETTINGS);
+    async getEventsSettings() {
+        const doc = await readSingleton(EventsSettings, EMPTY_EVENTS_SETTINGS);
+        // A document written before the hero fields existed has no `heroBadge`
+        // or `banner` sub-document at all, and the page would read `.title` off
+        // undefined. Filling from the defaults here means every caller gets the
+        // whole shape whatever the row's age.
+        return {
+            ...doc,
+            heroMedia: { ...EMPTY_MEDIA, ...(doc.heroMedia || {}) },
+            heroBadge: { ...EMPTY_EVENTS_SETTINGS.heroBadge, ...(doc.heroBadge || {}) },
+            banner: { ...EMPTY_EVENTS_SETTINGS.banner, ...(doc.banner || {}) },
+            stats: doc.stats || [],
+            categories: doc.categories || [],
+        };
     }
 
     updateEventsSettings(payload = {}, user = {}) {
         const limit = Number(payload.homeLimit);
+        const badge = payload.heroBadge || {};
+        const banner = payload.banner || {};
+
         return writeSingleton(EventsSettings, {
             badgeText: str(payload.badgeText),
             heading: str(payload.heading),
+            headingHighlight: str(payload.headingHighlight),
+            lede: str(payload.lede),
             subtitle: str(payload.subtitle),
+
+            heroMedia: cleanMedia(payload.heroMedia || {}),
+            heroBadge: {
+                enabled: boolOf(badge.enabled, true),
+                icon: icon(badge.icon, 'calendar-days'),
+                title: str(badge.title),
+                subtitle: str(badge.subtitle),
+            },
+            stats: cleanStats(payload.stats, 'calendar-days'),
+
+            searchPlaceholder: str(payload.searchPlaceholder) || 'Search events...',
+            categories: asArray(payload.categories)
+                // A chip may arrive as a bare string from a textarea.
+                .map(c => (typeof c === 'string'
+                    ? { label: c.trim(), icon: 'calendar-days' }
+                    : { label: str(c.label), icon: icon(c.icon, 'calendar-days') }))
+                .filter(c => c.label),
+
             viewAllLabel: str(payload.viewAllLabel),
             viewAllHref: str(payload.viewAllHref) || '/events',
             emptyText: str(payload.emptyText),
+            emptyFilterText: str(payload.emptyFilterText),
             homeLimit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 24) : 3,
+
+            banner: {
+                enabled: boolOf(banner.enabled, true),
+                icon: icon(banner.icon, 'calendar-days'),
+                title: str(banner.title),
+                subtitle: str(banner.subtitle),
+                ctaLabel: str(banner.ctaLabel),
+                ctaHref: str(banner.ctaHref),
+            },
         }, user);
     }
 

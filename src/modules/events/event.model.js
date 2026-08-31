@@ -86,6 +86,25 @@ const eventSchema = new mongoose.Schema({
         default: ''
     },
     /**
+     * What kind of event this is — "Conference", "Workshop", "Networking".
+     *
+     * Free text matched against the chips in `eventsSettings.categories`, the
+     * same arrangement `galleryItem.category` already uses against
+     * `gallerySettings.categories`. Deliberately not an enum: the chip list is
+     * authored in the CMS, and an enum here would mean a schema change every
+     * time an editor invents a category.
+     *
+     * Additive and optional. A row created before this existed comes back with
+     * an empty string, which the public site reads as "no badge, matches only
+     * the All chip" rather than as a missing field.
+     */
+    category: {
+        type: String,
+        trim: true,
+        default: '',
+        index: true
+    },
+    /**
      * How the banner sits in its frame, and what it depicts.
      *
      * Additive and optional, so the mobile app — which reads this same

@@ -257,13 +257,64 @@ const eventsSettingsSchema = new mongoose.Schema({
 
     badgeText: text(),
     heading: text(),
+    /**
+     * The tail of the heading, set in the accent colour.
+     *
+     * Split from `heading` rather than derived from it. The Events page renders
+     * "Our" in white and "Events & Conclaves" in the accent, and the only way
+     * to get that from a single string is to guess where to cut — a rule that
+     * happens to work for this heading and produces nonsense for the next one
+     * an editor types. Gallery, About and Contact already store the two halves
+     * separately; this brings Events onto the same shape.
+     */
+    headingHighlight: text(),
+    /** The paragraph under the heading, on the hero band. */
+    lede: text(),
+    /** Kept: the small centred caption between rules on the HOME page's grid. */
     subtitle: text(),
+
+    /** The photograph in the hero. Empty renders no frame rather than a hole. */
+    heroMedia: media(),
+    /** The small badge pinned to the hero photograph. */
+    heroBadge: {
+        enabled: { type: Boolean, default: true },
+        icon: text('calendar-days'),
+        title: text(),
+        subtitle: text(),
+    },
+    /** The figures across the hero band. */
+    stats: [statItem()],
+
+    /** Placeholder for the search box above the grid. */
+    searchPlaceholder: text('Search events...'),
+    /**
+     * The filter chips above the grid. `All` is prepended by the page, so
+     * listing it here would render it twice. Each label is matched against an
+     * event's `category`.
+     */
+    categories: [{
+        label: text(),
+        icon: text('calendar-days'),
+    }],
+
     viewAllLabel: text(),
     viewAllHref: text(),
     /** Shown in place of the grid when nothing is published. */
     emptyText: text(),
+    /** Shown when a filter matches nothing. `{query}` is substituted. */
+    emptyFilterText: text(),
     /** How many appear on the home page before "see all" takes over. */
     homeLimit: { type: Number, default: 3 },
+
+    /** The call-to-action strip under the grid. */
+    banner: {
+        enabled: { type: Boolean, default: true },
+        icon: text('calendar-days'),
+        title: text(),
+        subtitle: text(),
+        ctaLabel: text(),
+        ctaHref: text(),
+    },
 
     editedBy,
 }, { collection: 'web_events_settings', timestamps: true });

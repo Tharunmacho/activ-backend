@@ -173,12 +173,54 @@ const ABOUT = {
 
 const EVENTS_SETTINGS = {
     badgeText: 'Upcoming Events',
-    heading: 'Our Events & Conclaves',
+    // Split in two so the Events hero can set the tail in the accent colour.
+    heading: 'Our',
+    headingHighlight: 'Events & Conclaves',
+    lede: 'Discover impactful events, conclaves and programs designed to connect, empower and grow the SC/ST entrepreneurial community.',
+    // The small centred caption between rules, on the HOME page's grid only.
     subtitle: 'join the network',
+
+    heroMedia: img(
+        'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&q=80',
+        'An ACTIV conclave in session',
+    ),
+    heroBadge: {
+        enabled: true,
+        icon: 'calendar-days',
+        title: "Don't Miss Out!",
+        subtitle: 'Be part of our next big event.',
+    },
+    stats: [
+        { icon: 'calendar-days', value: '15+', label: 'Events Every Year' },
+        { icon: 'users', value: '3K+', label: 'Participants' },
+        { icon: 'map-pin', value: '20+', label: 'Cities Covered' },
+        { icon: 'handshake', value: '100+', label: 'Partners' },
+    ],
+
+    searchPlaceholder: 'Search events...',
+    categories: [
+        { label: 'Conferences', icon: 'users' },
+        { label: 'Workshops', icon: 'book-open' },
+        { label: 'Networking', icon: 'grid' },
+        { label: 'Exhibitions', icon: 'tent' },
+        { label: 'Training', icon: 'mic' },
+        { label: 'Webinars', icon: 'monitor-play' },
+    ],
+
     viewAllLabel: 'See All Events',
     viewAllHref: '/events',
     emptyText: 'No events are scheduled at the moment. Please check back soon.',
+    emptyFilterText: 'No events match {query}. Try another filter.',
     homeLimit: 3,
+
+    banner: {
+        enabled: true,
+        icon: 'calendar-days',
+        title: 'Have an Event to Share?',
+        subtitle: 'Partner with us to create impactful experiences for the community.',
+        ctaLabel: 'Partner With Us',
+        ctaHref: '/contact',
+    },
 };
 
 const GALLERY_SETTINGS = {
