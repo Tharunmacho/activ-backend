@@ -15,6 +15,23 @@ const regionService = require('../regions/region.service');
 const mailer = require('../../core/utils/mailer');
 
 /**
+ * What a blocked member is told at sign-in.
+ *
+ * One constant because two paths reject the same person — the credential record
+ * and the profile record — and they must not give different reasons for the same
+ * state. It says WHO blocked them and WHAT to do, because "Account is
+ * deactivated" reads like a fault in the system and sends the member to support
+ * asking why the app is broken.
+ *
+ * It does NOT say why they were blocked. The reason is a matter between the
+ * association and the member, not something to print on a login screen that
+ * anyone who guesses an email can reach.
+ */
+const BLOCKED_MESSAGE =
+    'Your account has been blocked by the organisation. '
+    + 'Please contact the ACTIV administration if you believe this is a mistake.';
+
+/**
  * How long a password-reset link stays usable.
  *
  * An hour is long enough to survive a slow mail server and a user who checks
@@ -267,7 +284,7 @@ class AuthService {
 
         if (memberAuth) {
             if (!memberAuth.isActive) {
-                throw ApiError.forbidden('Account is deactivated');
+                throw ApiError.forbidden(BLOCKED_MESSAGE);
             }
 
             // Verify password
@@ -278,6 +295,19 @@ class AuthService {
 
             // Get full user details from "web users" collection
             const memberDetails = await MemberDetails.findOne({ email: normalizedEmail });
+
+            /*
+             * BOTH records decide. A member is a credential plus a profile, and
+             * an admin blocking someone writes to both — but a record blocked
+             * before that was true, or by a script, or by a future path that
+             * touches only one of them, would otherwise still sign in. The check
+             * sits after the password so a wrong password on a blocked account
+             * still answers "Invalid credentials": telling an attacker which
+             * emails belong to blocked members is a free directory.
+             */
+            if (memberDetails && memberDetails.isActive === false) {
+                throw ApiError.forbidden(BLOCKED_MESSAGE);
+            }
 
             if (memberDetails) {
                 const userRole = normalizeRole(memberDetails.role);

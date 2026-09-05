@@ -424,5 +424,104 @@ test('generated passwords do not repeat', () => {
     assert.strictEqual(seen.size, 200);
 });
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed > 0 ? 1 : 0);
+// --- the two shapes of the region tree ---------------------------------------
+
+/**
+ * `getTree` answers two different questions and the difference is load-bearing.
+ *
+ * The pruned tree is the applicant's: bottom-up, so a registration dropdown
+ * cannot offer a state with no block beneath it to finish choosing through. The
+ * unpruned one is every region the admin database knows, which is what content
+ * targeting needs — a state carrying only a state admin is a real audience.
+ *
+ * Reading the pruned tree for targeting silently deleted such a state from the
+ * super admin's event picker: two staffed states in the database, one offered on
+ * screen, and nothing to say the other had been withheld or why. These assert
+ * both shapes off one fixture, so the pruning cannot quietly migrate from one to
+ * the other.
+ *
+ * `findActive` is stubbed rather than mocked at the connection: `getTree` calls
+ * it through the module object at call time, and pointing it at a fixture keeps
+ * this a pure test with no database.
+ */
+const runTreeTests = async() => {
+    console.log('\nThe region tree, pruned and unpruned');
+
+    const regionService = require('../src/modules/regions/region.service');
+    const adminRepository = require('../src/modules/admin/admin.repository');
+
+    // Tamil Nadu is staffed down to blocks; Kerala has a state admin and
+    // nothing beneath it — the case that was disappearing.
+    const MIXED = [
+        admin('state_admin', 'Tamil Nadu'),
+        admin('district_admin', 'Tamil Nadu', 'Ariyalur'),
+        admin('block_admin', 'Tamil Nadu', 'Ariyalur', 'Sendurai'),
+        admin('state_admin', 'Kerala')
+    ];
+
+    const realFindActive = adminRepository.findActive;
+    adminRepository.findActive = async() => MIXED;
+
+    try {
+        const selectable = await regionService.getTree();
+        const all = await regionService.getTree({ prune: false });
+        const names = (tree) => tree.map(node => node.name).sort();
+
+        await asyncTest('the selectable tree drops a state with no block admin', () => {
+            assert.deepStrictEqual(names(selectable), ['Tamil Nadu']);
+        });
+
+        await asyncTest('the unpruned tree keeps it', () => {
+            assert.deepStrictEqual(names(all), ['Kerala', 'Tamil Nadu']);
+        });
+
+        await asyncTest('a state with no districts is reported as having none, not omitted', () => {
+            const kerala = all.find(node => node.name === 'Kerala');
+            assert.ok(kerala, 'Kerala is in the unpruned tree');
+            assert.deepStrictEqual(kerala.districts, [], 'and carries an empty district list');
+            assert.strictEqual(kerala.admins, 1, 'with its own staffing count intact');
+        });
+
+        await asyncTest('the staffed branch is identical in both shapes', () => {
+            const inSelectable = selectable.find(node => node.name === 'Tamil Nadu');
+            const inAll = all.find(node => node.name === 'Tamil Nadu');
+            assert.deepStrictEqual(
+                inAll.districts.map(d => `${d.name}:${d.blocks.map(b => b.name).join(',')}`),
+                inSelectable.districts.map(d => `${d.name}:${d.blocks.map(b => b.name).join(',')}`)
+            );
+        });
+
+        await asyncTest('the two shapes do not evict each other from the cache', () => {
+            // Both were cached in one slot at first, so asking for one shape
+            // returned the other's answer to the next caller — which would put
+            // an unreachable state in an applicant's dropdown.
+            assert.deepStrictEqual(names(selectable), ['Tamil Nadu']);
+            assert.deepStrictEqual(names(all), ['Kerala', 'Tamil Nadu']);
+        });
+    } finally {
+        adminRepository.findActive = realFindActive;
+    }
+};
+
+/** The sync harness above, for a check that has to be awaited. */
+async function asyncTest(name, fn) {
+    try {
+        await fn();
+        passed += 1;
+        console.log(`  PASS  ${name}`);
+    } catch (error) {
+        failed += 1;
+        console.error(`  FAIL  ${name}`);
+        console.error(`        ${error.message}`);
+    }
+}
+
+runTreeTests()
+    .catch((error) => {
+        failed += 1;
+        console.error('\nThe tree tests crashed:', error.message);
+    })
+    .then(() => {
+        console.log(`\n${passed} passed, ${failed} failed\n`);
+        process.exit(failed > 0 ? 1 : 0);
+    });

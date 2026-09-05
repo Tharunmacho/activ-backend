@@ -9,8 +9,86 @@ const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const bcrypt = require('bcrypt');
 
+/**
+ * The short names every client actually sends, mapped to the schema's names.
+ *
+ * This is the single biggest source of silent data loss on this endpoint, and
+ * it fails in the worst possible way: the request answers 200, the client shows
+ * "saved successfully", and Mongoose strict mode has dropped the field on the
+ * floor. The member then opens their profile and the answer they typed is gone,
+ * with nothing anywhere reporting an error.
+ *
+ * Measured against the live clients, EVERY ONE of these was being lost:
+ *
+ *   web "Complete your profile" wizard  organization, constitution, businessYear,
+ *                                       employees, chamber, chamberDetails,
+ *                                       govtOrgs, pan, gst, udyam, scheme1..3
+ *   web Settings                        the same set again
+ *   mobile                              lastYearTurnover, itrFiled
+ *
+ * The alternative fix — correcting each client to send canonical names — was
+ * done too, but it cannot be the only fix. There are three clients and any
+ * future one will guess the short name just as readily; a released mobile build
+ * cannot be corrected retroactively at all. Normalising here is the only place
+ * that covers all of them, and it is cheap: a rename before anything reads the
+ * body.
+ *
+ * Canonical always wins. A client sending both `panNumber` and `pan` means the
+ * first, and an alias must never overwrite a value the caller stated properly.
+ */
+const FIELD_ALIASES = {
+    // business
+    organizationName: ['organization', 'organisationName', 'organisation'],
+    constitutionType: ['constitution'],
+    businessCommencementYear: ['businessYear', 'commencementYear'],
+    numberOfEmployees: ['employees', 'employeeCount'],
+    memberOfOtherChamber: ['chamber'],
+    otherChamber: ['chamberDetails', 'otherChamberName'],
+    govtOrganizations: ['govtOrgs'],
+    // financial
+    panNumber: ['pan'],
+    gstNumber: ['gst'],
+    udyamNumber: ['udyam'],
+    turnoverRange: ['lastYearTurnover'],
+    filedITR: ['itrFiled'],
+    // declaration
+    agreeToDeclaration: ['agreeToTerms', 'declarationAccepted']
+};
+
+/**
+ * Apply the table above, in place, and fold the scheme fields together.
+ *
+ * `scheme1`, `scheme2` and `scheme3` are three inputs behind one schema field:
+ * the wizard asks "which other schemes?" as three boxes and the model stores
+ * one free-text line. They are joined rather than aliased because none of them
+ * is `schemeDetails` on its own, and taking only the first would lose the other
+ * two just as silently as dropping all three did.
+ */
+const normalizeProfileAliases = (data) => {
+    Object.entries(FIELD_ALIASES).forEach(([canonical, aliases]) => {
+        if (data[canonical] !== undefined && data[canonical] !== '') return;
+
+        const alias = aliases.find((name) => data[name] !== undefined && data[name] !== '');
+        if (alias !== undefined) data[canonical] = data[alias];
+    });
+
+    if (data.schemeDetails === undefined) {
+        const joined = [data.scheme1, data.scheme2, data.scheme3]
+            .map((value) => String(value || '').trim())
+            .filter(Boolean)
+            .join(', ');
+
+        if (joined) data.schemeDetails = joined;
+    }
+
+    return data;
+};
+
 const updateMember = asyncHandler(async(req, res) => {
-    const { password, confirmPassword, currentPassword, email, ...profileData } = req.body;
+    const { password, confirmPassword, currentPassword, email, ...rawProfileData } = req.body;
+
+    // Before anything reads the body: see `FIELD_ALIASES` above.
+    const profileData = normalizeProfileAliases(rawProfileData);
     
     // Get member from "web users" collection
     const member = await MemberDetails.findById(req.user.userId);
@@ -250,6 +328,10 @@ const updateMember = asyncHandler(async(req, res) => {
     /**
      * `itrFiled` is the same answer as `filedITR`, not a second one.
      *
+     * The rename itself now happens in `normalizeProfileAliases` above; the
+     * `??` here is kept because it costs nothing and this must not depend on
+     * the order of those two steps.
+     *
      * The mobile financial screen sends both — `filedITR: itrFiled` and then
      * `itrFiled` again under "legacy keys" — from one variable, so they can
      * never disagree at the source. It is read here as a fallback so a client
@@ -267,15 +349,8 @@ const updateMember = asyncHandler(async(req, res) => {
     if (filedItr !== undefined) profileData.filedITR = filedItr;
     else delete profileData.filedITR;
 
-    /**
-     * Same again for `lastYearTurnover`, mobile's legacy name for
-     * `turnoverRange`. It too is sent from the same variable as the canonical
-     * key, so accepting it costs nothing and closes the case where only the old
-     * name arrives.
-     */
-    if (profileData.turnoverRange === undefined && profileData.lastYearTurnover) {
-        profileData.turnoverRange = profileData.lastYearTurnover;
-    }
+    // `lastYearTurnover` — mobile's legacy name for `turnoverRange` — is
+    // handled by `normalizeProfileAliases`, along with the rest of them.
 
     const gotScheme = asBool(profileData.govtSchemeBenefit);
     if (gotScheme !== undefined) profileData.govtSchemeBenefit = gotScheme;
@@ -333,7 +408,8 @@ const updateMember = asyncHandler(async(req, res) => {
     if (profileData.panNumber !== undefined || profileData.gstNumber !== undefined ||
         profileData.udyamNumber !== undefined || profileData.filedITR !== undefined ||
         profileData.turnoverRange !== undefined || profileData.govtSchemeBenefit !== undefined ||
-        profileData.govtSchemes !== undefined || profileData.schemeDetails !== undefined) {
+        profileData.govtSchemes !== undefined || profileData.schemeDetails !== undefined ||
+        profileData.itrYears !== undefined || profileData.turnoverLast3Years !== undefined) {
         
         // `+panNumber` so `profileData.panNumber || financialInfo.panNumber`
         // below can actually fall back to the stored value. Without it the
@@ -363,6 +439,20 @@ const updateMember = asyncHandler(async(req, res) => {
                 schemeDetails: profileData.schemeDetails !== undefined
                     ? profileData.schemeDetails
                     : financialInfo.schemeDetails,
+                /*
+                 * `''` is what an emptied number box sends, and Number('') is 0
+                 * — "I cleared this" would be stored as "I have filed for zero
+                 * years". Blank leaves the stored answer alone; an actual
+                 * number, including 0, replaces it.
+                 */
+                itrYears: profileData.itrYears === undefined || profileData.itrYears === ''
+                    ? financialInfo.itrYears
+                    : Number(profileData.itrYears),
+                /* An explicit empty array clears the three boxes — same
+                   reasoning as `govtSchemes` above. */
+                turnoverLast3Years: Array.isArray(profileData.turnoverLast3Years)
+                    ? profileData.turnoverLast3Years
+                    : financialInfo.turnoverLast3Years,
                 status: 'submitted',
                 updatedAt: new Date()
             });
@@ -378,6 +468,12 @@ const updateMember = asyncHandler(async(req, res) => {
                 govtSchemeBenefit: profileData.govtSchemeBenefit,
                 govtSchemes: Array.isArray(profileData.govtSchemes) ? profileData.govtSchemes : [],
                 schemeDetails: profileData.schemeDetails || '',
+                itrYears: profileData.itrYears === undefined || profileData.itrYears === ''
+                    ? undefined
+                    : Number(profileData.itrYears),
+                turnoverLast3Years: Array.isArray(profileData.turnoverLast3Years)
+                    ? profileData.turnoverLast3Years
+                    : [],
                 status: 'submitted'
             });
         }
@@ -612,6 +708,8 @@ const getFinancialInfo = asyncHandler(async(req, res) => {
         // exactly as they did when it was being dropped.
         govtSchemes: financialInfo.govtSchemes || [],
         schemeDetails: financialInfo.schemeDetails || '',
+        itrYears: financialInfo.itrYears,
+        turnoverLast3Years: financialInfo.turnoverLast3Years || [],
         status: financialInfo.status
     } : {
         panNumber: '',
@@ -622,6 +720,8 @@ const getFinancialInfo = asyncHandler(async(req, res) => {
         govtSchemeBenefit: false,
         govtSchemes: [],
         schemeDetails: '',
+        itrYears: null,
+        turnoverLast3Years: [],
         status: 'draft'
     };
     

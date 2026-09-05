@@ -7,6 +7,7 @@ const Company = require('./company.model');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const ApiError = require('../../core/utils/ApiError');
 const { persistInlineImage } = require('../../core/utils/inlineImage');
+const { regionOwnerIds } = require('../common/regionOwners');
 
 /**
  * @desc    Create a new product
@@ -152,6 +153,26 @@ const discoverProducts = asyncHandler(async (req, res) => {
   const filter = { isActive: true };
   if (companyId) {
     filter.companyId = companyId;
+  }
+
+  /*
+   * Region, resolved through the OWNER — products carry none of their own.
+   *
+   * A product row has a `userId` and a `companyId` and no idea where either of
+   * them is; the region tree the whole platform is filtered on lives on the
+   * member record. So a region filter has to become a set of owner ids first.
+   *
+   * `regionOwnerIds` returns `null` for "no region asked for", which is
+   * different from `[]` — the empty array is a real answer meaning "nobody is
+   * registered there", and collapsing the two would turn an unpopulated block
+   * into a network-wide listing.
+   */
+  const owners = await regionOwnerIds(req.query);
+  if (owners !== null) {
+    if (!owners.length) {
+      return res.json({ success: true, data: [], count: 0 });
+    }
+    filter.userId = { $in: owners };
   }
 
   if (term) {

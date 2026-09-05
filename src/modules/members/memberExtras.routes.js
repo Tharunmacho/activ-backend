@@ -54,4 +54,14 @@ const membershipRouter = express.Router();
  */
 membershipRouter.get('/plans', publicLimiter, controller.listPlans);
 
+/**
+ * The plans THIS applicant is offered, resolved from their commencement year.
+ *
+ * Authenticated, unlike the listing above, because the answer is about one
+ * person. `verifyToken` explicitly rather than relying on the catch-all gate in
+ * `businessRoutes`: this router is mounted ABOVE that one (see the note in
+ * `routes.js`), so nothing else is guarding it.
+ */
+membershipRouter.get('/plans/mine', verifyToken, controller.listMyPlans);
+
 module.exports = { browseRouter, companyRouter, membershipRouter };

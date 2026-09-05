@@ -8,6 +8,10 @@ const Company = require('./company.model');
 const Activity = require('../common/activity.model');
 const MembershipPlan = require('./membershipplan.model');
 const MemberDetails = require('./memberdetails.model');
+const membershipPlanService = require('./membershipplan.service');
+// Where the commencement year lives. Keyed by `userId` — see the collection
+// table in CLAUDE.md; the wrong key here returns null and nothing reports it.
+const BusinessInfo = require('./businessinfo.model');
 const memberService = require('./member.service');
 const { isPaidStatus } = require('../common/memberContext');
 
@@ -193,6 +197,10 @@ const deleteCompany = asyncHandler(async(req, res) => {
  * they have an account to sign in with.
  */
 const listPlans = asyncHandler(async(req, res) => {
+    // Seeded on the way through, so a database that has never been written to
+    // answers with the plans the platform shipped rather than with nothing.
+    await membershipPlanService.listActive().catch(() => []);
+
     const plans = await MembershipPlan.find({ isActive: { $ne: false } })
         .sort({ displayOrder: 1, amountPaise: 1 })
         .lean()
@@ -209,6 +217,54 @@ const listPlans = asyncHandler(async(req, res) => {
         })),
         total: plans.length,
     }));
+});
+
+/**
+ * THE PLANS THIS APPLICANT IS ACTUALLY OFFERED.
+ *
+ * Separate from the public listing above, and deliberately so. That one is
+ * "what does membership cost" and has to answer before anybody signs in; this
+ * one is "what do *I* pay", which cannot be answered without knowing who is
+ * asking and how long their company has traded.
+ *
+ * THE BAND IS RESOLVED ON THE SERVER, from the commencement year on the
+ * member's own business record. Doing it in the browser would mean the price a
+ * client shows is a client's opinion — and the two clients would drift the
+ * moment one of them shipped a different threshold.
+ *
+ * `reason` travels with the answer so the screen can say WHY it is showing one
+ * price or several: matched a band, no commencement year on file, no band
+ * covers it, or the Super Admin has asked for every plan to be shown.
+ */
+const listMyPlans = asyncHandler(async(req, res) => {
+    const user = req.user || {};
+    const userId = user.userId || user.id;
+
+    /*
+     * Business record first, member profile second.
+     *
+     * `BusinessInfo` is where the commencement year is captured, and it is
+     * keyed by `userId` — see the collection table in CLAUDE.md, where getting
+     * this wrong fails silently. A member with no business record is an
+     * aspirant as far as pricing is concerned, which is the same conclusion
+     * `doingBusiness: false` reaches.
+     */
+    const business = await BusinessInfo.findOne({ userId: String(userId) }).lean().catch(() => null);
+
+    const declaredAspirant = business
+        ? business.doingBusiness === false
+        : true;
+
+    const commencementYear = business
+        ? (business.businessCommencementYear || business.commencementYear || '')
+        : '';
+
+    const resolved = await membershipPlanService.resolveForMember({
+        commencementYear,
+        isAspirant: declaredAspirant
+    });
+
+    res.json(ApiResponse.success(resolved));
 });
 
 // ============================================================ activity
@@ -323,7 +379,7 @@ const getCertificate = asyncHandler(async(req, res) => {
 module.exports = {
     browseMembers, searchMembers,
     listCompanies, getCompany, createCompany, updateCompany, deleteCompany,
-    listPlans,
+    listPlans, listMyPlans,
     listActivity, recordActivity,
     getCertificate,
 };

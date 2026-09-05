@@ -84,7 +84,24 @@ router.get('/gallery-settings', publicLimiter, controller.getGallerySettings);
  * gets neither. Without a token these behave exactly as public routes.
  */
 router.get('/gallery', publicLimiter, optionalAuth, controller.getGallery);
+/**
+ * One gallery item, for the page a poster on the landing page links to.
+ *
+ * Public — it is where a visitor who clicked a poster lands, and requiring a
+ * token would 401 the click. The write methods on the same path stay below the
+ * guard: Express matches on method as well as path, so a GET here and a
+ * PUT/DELETE there do not collide.
+ */
+router.get('/gallery/:id', publicLimiter, optionalAuth, controller.getGalleryItem);
 router.get('/events', publicLimiter, optionalAuth, controller.getEvents);
+/**
+ * One event, for the page an events card links to.
+ *
+ * Public for the same reason `/gallery/:id` is: it is where a visitor who
+ * clicked a card lands, and the write methods on this path stay below the guard
+ * — Express matches on method as well as path.
+ */
+router.get('/events/:id', publicLimiter, optionalAuth, controller.getEvent);
 
 // ---------------------------------------------------------------- public write
 

@@ -6,6 +6,7 @@ const ApiError = require('../../core/utils/ApiError');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const mongoose = require('mongoose');
 const { normalizeBusinessType, businessTypeError } = require('./businessTypes');
+const { regionOwnerIds } = require('../common/regionOwners');
 
 /**
  * The one filter every owner-scoped company query starts from.
@@ -450,6 +451,28 @@ const discoverCompanies = asyncHandler(async (req, res) => {
         // legacy rows that predate the flag visible.
         isActive: { $ne: false }
     };
+
+    /*
+     * Region, resolved through the OWNER — a company's own `location` is prose.
+     *
+     * `location` and `area` are free text the member typed; "Hosur", "hosur
+     * sipcot" and "Near Bus Stand, Hosur" are three values for one place, so
+     * filtering on them would answer a different question every time. The
+     * region tree lives on the member record and is reconciled to one spelling
+     * per region by the admin database, which is why the join goes through the
+     * owner. See `regionOwners.js`.
+     *
+     * `null` means no region was asked for. `[]` means nobody is registered in
+     * the region that WAS asked for, and must return nothing rather than
+     * falling through to a network-wide listing.
+     */
+    const regionOwners = await regionOwnerIds(req.query);
+    if (regionOwners !== null) {
+        if (!regionOwners.length) {
+            return res.json(ApiResponse.success([], 'Companies fetched successfully'));
+        }
+        baseFilter.userId = { $in: regionOwners };
+    }
 
     const COMPANY_FIELDS =
         'businessName email description businessType mobileNumber area location logo isActive status createdAt';

@@ -1,6 +1,9 @@
 const adminService = require('./admin.service');
 const superAdminService = require('./superadmin.service');
 const adminBulkService = require('./adminBulk.service');
+// Membership pricing. Lives beside the plan model rather than here, because the
+// payment path reads the same service and neither owns it.
+const membershipPlanService = require('../members/membershipplan.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
 
@@ -59,12 +62,12 @@ const superSearch = asyncHandler(async(req, res) => {
 });
 
 const getSuperApplications = asyncHandler(async(req, res) => {
-    const data = await superAdminService.getApplications(req.query || {});
+    const data = await superAdminService.getApplications(req.query || {}, req.user || {});
     res.json(ApiResponse.success(data));
 });
 
 const listAdmins = asyncHandler(async(req, res) => {
-    const data = await superAdminService.listAdmins(req.query || {});
+    const data = await superAdminService.listAdmins(req.query || {}, req.user || {});
     res.json(ApiResponse.success(data));
 });
 
@@ -79,7 +82,7 @@ const updateAdmin = asyncHandler(async(req, res) => {
 });
 
 const getDirectory = asyncHandler(async(req, res) => {
-    const data = await superAdminService.getDirectory(req.query || {});
+    const data = await superAdminService.getDirectory(req.query || {}, req.user || {});
     res.json(ApiResponse.success(data));
 });
 
@@ -99,13 +102,13 @@ const deleteAdmin = asyncHandler(async(req, res) => {
  * identically, which would split one region into two.
  */
 const suggestAdminRegions = asyncHandler(async(req, res) => {
-    const data = await superAdminService.suggestRegions(req.query || {});
+    const data = await superAdminService.suggestRegions(req.query || {}, req.user || {});
     res.json(ApiResponse.success(data));
 });
 
 /** What deleting or deactivating an admin would do to their pending queue. */
 const previewAdminRemoval = asyncHandler(async(req, res) => {
-    const data = await superAdminService.previewAdminRemoval(req.params.id);
+    const data = await superAdminService.previewAdminRemoval(req.params.id, req.user || {});
     res.json(ApiResponse.success(data));
 });
 
@@ -188,6 +191,79 @@ const uploadAdminPhoto = asyncHandler(async (req, res) => {
     res.json(ApiResponse.success({ profilePhoto: profilePhotoUrl }, 'Profile photo uploaded successfully'));
 });
 
+
+// ============================================================ membership plans
+
+/**
+ * What a membership costs, and which commencement-year band earns which plan.
+ *
+ * These write the collection the payment path reads, so an edit here changes
+ * what is taken from the card — not merely what the membership screen
+ * advertises. See `membershipplan.service` for why the two must be one lookup.
+ *
+ * The listing returns RETIRED plans as well as active ones, because an editor
+ * has to be able to see the thing they turned off in order to turn it back on.
+ * Every other reader of this collection filters to active.
+ */
+const listMembershipPlans = asyncHandler(async(req, res) => {
+    const [plans, settings] = await Promise.all([
+        membershipPlanService.listAll(),
+        membershipPlanService.getSettings()
+    ]);
+
+    res.json(ApiResponse.success({ plans, settings }));
+});
+
+const createMembershipPlan = asyncHandler(async(req, res) => {
+    const plan = await membershipPlanService.savePlan(req.body.key, req.body, { create: true });
+    res.status(201).json(ApiResponse.success(plan, 'Plan created'));
+});
+
+const updateMembershipPlan = asyncHandler(async(req, res) => {
+    const plan = await membershipPlanService.savePlan(req.params.key, req.body);
+    res.json(ApiResponse.success(plan, 'Plan updated'));
+});
+
+/** Takes it off every listing, keeping the record a paid membership points at. */
+const retireMembershipPlan = asyncHandler(async(req, res) => {
+    const plan = await membershipPlanService.retirePlan(req.params.key);
+    res.json(ApiResponse.success(plan, 'Plan retired'));
+});
+
+/**
+ * Delete for real, when nothing references it.
+ *
+ * Refused with a count when payments do — see `deletePlan`. Separate from
+ * retiring rather than a flag on it, because the two have different outcomes
+ * and an editor pressing Delete should not silently get a retire instead.
+ */
+const deleteMembershipPlan = asyncHandler(async(req, res) => {
+    const result = await membershipPlanService.deletePlan(req.params.key);
+    res.json(ApiResponse.success(result, `"${result.name}" deleted`));
+});
+
+const updateMembershipSettings = asyncHandler(async(req, res) => {
+    const settings = await membershipPlanService.updateSettings(req.body || {});
+    res.json(ApiResponse.success(settings, 'Membership settings updated'));
+});
+
+/**
+ * Snap the bands into one continuous run — no gaps, no overlaps.
+ *
+ * Its own endpoint rather than a sequence of plan updates from the browser,
+ * because the intermediate states of that sequence are exactly the ones the
+ * overlap check rejects. One request, one consistent result.
+ */
+const alignMembershipBands = asyncHandler(async(req, res) => {
+    const result = await membershipPlanService.alignBands();
+    res.json(ApiResponse.success(
+        result,
+        result.changed
+            ? `Adjusted ${result.changed} ${result.changed === 1 ? 'plan' : 'plans'}`
+            : 'The bands were already continuous'
+    ));
+});
+
 module.exports = {
     uploadAdminPhoto,
     getDashboardStats,
@@ -215,5 +291,12 @@ module.exports = {
     updateAdminProfile,
     getAnalytics,
     generateReport,
-    userAction
+    userAction,
+    listMembershipPlans,
+    createMembershipPlan,
+    updateMembershipPlan,
+    retireMembershipPlan,
+    updateMembershipSettings,
+    alignMembershipBands,
+    deleteMembershipPlan
 };

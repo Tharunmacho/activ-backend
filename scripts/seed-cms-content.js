@@ -117,6 +117,11 @@ const HOME = {
         secondaryCtaLabel: 'Learn More',
         secondaryCtaHref: '/about',
         secondaryCtaIcon: 'play',
+        // The banner also carries the recent gallery posters, each linking to
+        // its own page. They are read from the gallery at render time, so there
+        // is nothing to seed here beyond how many and where.
+        galleryPosters: { enabled: true, limit: 6, position: 'after' },
+
         highlightCard: {
             enabled: true,
             icon: 'users',
@@ -243,6 +248,18 @@ const GALLERY_SETTINGS = {
     pageSize: 8,
     emptyText: 'No photographs have been published yet.',
     emptyFilterText: 'Nothing in {category} yet.',
+
+    // The labels on one item's own page.
+    detail: {
+        backLabel: 'Back to Gallery',
+        aboutHeading: 'About this event',
+        highlightsHeading: 'Highlights',
+        photosHeading: 'More photographs',
+        relatedHeading: 'More from the gallery',
+        ctaLabel: '',
+        ctaHref: '',
+        missingText: 'This item is no longer available.',
+    },
 };
 
 /**
@@ -250,16 +267,21 @@ const GALLERY_SETTINGS = {
  *
  * `category` matches a chip label above; the first three are `featured`, which
  * is what fills the collage at the top of the page.
+ *
+ * `caption` and `description` are what the item's own page shows once a visitor
+ * clicks the poster — on the landing page or in the grid. Placeholder wording,
+ * exactly like the titles and dates around them: enough for the page to be
+ * shaped correctly before an administrator writes the real thing.
  */
 const GALLERY_ITEMS = [
-    { title: 'Annual Business Conference 2024', category: 'Conferences', eventDate: '20 Jan 2024', location: 'Chennai, India', featured: true, url: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&q=80' },
-    { title: 'Entrepreneurship Growth Seminar', category: 'Seminars', eventDate: '15 Feb 2024', location: 'Bangalore, India', featured: true, url: 'https://images.unsplash.com/photo-1515169067868-5387ec356754?auto=format&fit=crop&q=80' },
-    { title: 'National Entrepreneurs Meet', category: 'Networking', eventDate: '10 Mar 2024', location: 'Hyderabad, India', featured: true, url: 'https://images.unsplash.com/photo-1556761175-4b46a572b786?auto=format&fit=crop&q=80' },
-    { title: 'SC/ST Business Expo 2024', category: 'Exhibitions', eventDate: '05 Apr 2024', location: 'Mumbai, India', featured: false, url: 'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&q=80' },
-    { title: 'Digital Transformation Workshop', category: 'Workshops', eventDate: '22 Apr 2024', location: 'Pune, India', featured: false, url: 'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?auto=format&fit=crop&q=80' },
-    { title: 'Leadership Excellence Awards 2024', category: 'Conferences', eventDate: '30 May 2024', location: 'New Delhi, India', featured: false, url: 'https://images.unsplash.com/photo-1505373877841-8d25f7d46678?auto=format&fit=crop&q=80' },
-    { title: 'Community Outreach Program', category: 'Community', eventDate: '15 Jun 2024', location: 'Coimbatore, India', featured: false, url: 'https://images.unsplash.com/photo-1582213782179-e0d53f98f2ca?auto=format&fit=crop&q=80' },
-    { title: 'Infrastructure Development Visit', category: 'Projects', eventDate: '28 Jun 2024', location: 'Trichy, India', featured: false, url: 'https://images.unsplash.com/photo-1541888087405-bd804cb74d81?auto=format&fit=crop&q=80' },
+    { title: 'Annual Business Conference 2024', caption: "A full day of keynotes, panels and introductions.", description: "Members and invited guests gathered in Chennai for the association's annual conference. The day ran from a morning of keynotes into afternoon panels on finance, procurement and scaling a first business, and closed with an open networking hour.", category: 'Conferences', eventDate: '20 Jan 2024', location: 'Chennai, India', featured: true, url: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&q=80' },
+    { title: 'Entrepreneurship Growth Seminar', caption: "Practical sessions on funding, compliance and growth.", description: "A working seminar for members preparing to take on their first large contract, covering funding routes, statutory compliance and the paperwork buyers ask for.", category: 'Seminars', eventDate: '15 Feb 2024', location: 'Bangalore, India', featured: true, url: 'https://images.unsplash.com/photo-1515169067868-5387ec356754?auto=format&fit=crop&q=80' },
+    { title: 'National Entrepreneurs Meet', caption: "Members from across the country, in one room.", description: "Delegates from several states met to compare what is working in their own regions, followed by a structured introduction round that paired members with complementary businesses.", category: 'Networking', eventDate: '10 Mar 2024', location: 'Hyderabad, India', featured: true, url: 'https://images.unsplash.com/photo-1556761175-4b46a572b786?auto=format&fit=crop&q=80' },
+    { title: 'SC/ST Business Expo 2024', caption: "Member businesses, exhibiting to buyers and partners.", description: "Member firms took stands to show their products and services to buyers, distributors and prospective partners over two days.", category: 'Exhibitions', eventDate: '05 Apr 2024', location: 'Mumbai, India', featured: false, url: 'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&q=80' },
+    { title: 'Digital Transformation Workshop', caption: "Hands-on training on the tools a small business actually needs.", description: "A hands-on workshop covering accounting software, online listings and the basics of selling through digital channels, taught in small groups.", category: 'Workshops', eventDate: '22 Apr 2024', location: 'Pune, India', featured: false, url: 'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?auto=format&fit=crop&q=80' },
+    { title: 'Leadership Excellence Awards 2024', caption: "Recognising the year's standout member businesses.", description: "An evening recognising members whose businesses grew, hired or opened new markets over the year, with the awards presented by the office bearers of the association.", category: 'Conferences', eventDate: '30 May 2024', location: 'New Delhi, India', featured: false, url: 'https://images.unsplash.com/photo-1505373877841-8d25f7d46678?auto=format&fit=crop&q=80' },
+    { title: 'Community Outreach Program', caption: "Taking the association to the people it exists for.", description: "An outreach day held with local partners, introducing the work of the association to entrepreneurs who had not yet joined and helping them through the registration process.", category: 'Community', eventDate: '15 Jun 2024', location: 'Coimbatore, India', featured: false, url: 'https://images.unsplash.com/photo-1582213782179-e0d53f98f2ca?auto=format&fit=crop&q=80' },
+    { title: 'Infrastructure Development Visit', caption: "On site with the members building it.", description: "A site visit hosted by member firms working in construction and infrastructure, walking through the project and the contracting process behind it.", category: 'Projects', eventDate: '28 Jun 2024', location: 'Trichy, India', featured: false, url: 'https://images.unsplash.com/photo-1541888087405-bd804cb74d81?auto=format&fit=crop&q=80' },
 ];
 
 const CONTACT = {
@@ -419,10 +441,15 @@ async function main() {
             const payload = {
                 media: img(item.url, item.title),
                 title: item.title,
+                caption: item.caption || '',
                 category: item.category,
                 eventDate: item.eventDate,
                 location: item.location,
+                description: item.description || '',
                 featured: item.featured,
+                // Every seeded item floats on the landing page; the strip's own
+                // limit decides how many of them are actually drawn.
+                showOnHome: true,
                 sortOrder: i,
                 visible: true,
             };

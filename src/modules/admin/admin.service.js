@@ -1150,11 +1150,37 @@ class AdminService {
 
         if (action !== 'delete') {
             if (!member) throw ApiError.notFound('This applicant has no member record to update');
-            member.isActive = action === 'activate';
+
+            const active = action === 'activate';
+
+            member.isActive = active;
             await member.save();
+
+            /*
+             * THE SIGN-IN RECORD TOO, or blocking blocks nothing.
+             *
+             * A member is two documents: the profile in `users` and the
+             * credential in the auth collection. `login()` reads the CREDENTIAL's
+             * `isActive` and never looks at the profile — so suspending someone
+             * flipped a flag that showed "Inactive" on the admin's own screen
+             * while the person carried on signing in exactly as before. The
+             * suspension was visible to everyone except the suspended.
+             *
+             * Written even when the profile save succeeded and this one fails:
+             * an admin blocking someone for malpractice must not be told it
+             * worked when the account still opens. The error propagates.
+             */
+            if (auth) {
+                auth.isActive = active;
+                await auth.save();
+            }
 
             logger.info('Member status changed by admin', {
                 memberId: member._id.toString(),
+                authId: auth ? auth._id.toString() : null,
+                // Flagged: an account blocked with no credential record found is
+                // an account that may still be able to sign in.
+                signInBlocked: !!auth,
                 action,
                 adminId: user.userId || user.id || '',
                 role: user.role || ''
@@ -1165,7 +1191,10 @@ class AdminService {
                 action,
                 isActive: member.isActive,
                 memberStatus: member.isActive ? 'Active' : 'Inactive',
-                status: member.isActive ? 'active' : 'suspended'
+                status: member.isActive ? 'active' : 'suspended',
+                // So the client can say "blocked, and they can no longer sign in"
+                // rather than leaving the admin to assume it.
+                signInBlocked: !active && !!auth
             };
         }
 

@@ -13,6 +13,25 @@ const mongoose = require('mongoose');
  * one arithmetic operation away from 498.99999999.
  */
 const membershipPlanSchema = new mongoose.Schema({
+    /**
+     * The stable id a client sends when it buys — `basic`, `aspirant`, and so on.
+     *
+     * THIS IS THE FIELD THAT MOVED PRICING INTO THE DATABASE. Payment resolves a
+     * plan by key and charges what the row says, so the Super Admin editing an
+     * amount here changes what is actually taken, not merely what is displayed.
+     * Before this, the price lived in a frozen table in `payment/membershipPlans.js`
+     * and nothing in the product could change it.
+     *
+     * `sparse` on the unique index: rows written before the field existed carry
+     * no key, and a plain unique index would let exactly one of them exist.
+     */
+    key: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        default: '',
+        index: { unique: true, sparse: true }
+    },
     name: {
         type: String,
         required: true,
@@ -24,6 +43,55 @@ const membershipPlanSchema = new mongoose.Schema({
         trim: true,
         default: '',
         index: true
+    },
+
+    /**
+     * WHO THE PLAN IS FOR, and it is the first half of choosing one.
+     *
+     *   business   priced by how long the applicant's company has traded — the
+     *              band below decides which one of these they are offered.
+     *   aspirant   an applicant who declared no business. Bands do not apply;
+     *              there is one such plan and everybody without a company gets
+     *              it, at whatever the Super Admin has set.
+     */
+    audience: {
+        type: String,
+        enum: ['business', 'aspirant'],
+        default: 'business',
+        index: true
+    },
+
+    /**
+     * THE COMMENCEMENT-YEAR BAND, in years traded, as a HALF-OPEN interval
+     * `[minYears, maxYears)`.
+     *
+     * Half-open so the bands the Super Admin types cannot overlap or leave a
+     * gap. "0 to 5" and "5 to 10" read as touching to a person and as
+     * overlapping to a computer; with `max` exclusive, a company at exactly five
+     * years lands in the second band and in only one band, without anybody
+     * having to think about it.
+     *
+     * `maxYears: null` is the open-ended top band — "10 and above". Null and not
+     * a large number, because a sentinel like 999 is a number somebody
+     * eventually edits.
+     *
+     * Ignored for `audience: 'aspirant'`, which has no company to date.
+     */
+    minYears: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    maxYears: {
+        type: Number,
+        default: null,
+        min: 0
+    },
+
+    /** Drawn with the "most popular" flourish. At most one, by convention. */
+    popular: {
+        type: Boolean,
+        default: false
     },
     tagline: {
         type: String,

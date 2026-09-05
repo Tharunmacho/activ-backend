@@ -3,6 +3,7 @@ const ApiResponse = require('../../core/utils/ApiResponse');
 const ApiError = require('../../core/utils/ApiError');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const { recordView } = require('../common/engagement.model');
+const { resolveMemberContext } = require('../common/memberContext');
 const mongoose = require('mongoose');
 
 /**
@@ -23,8 +24,31 @@ const pickFilters = (query = {}) => FILTERS.reduce((acc, key) => {
 
 const searchDirectory = asyncHandler(async(req, res) => {
     const query = req.query || {};
+
+    /*
+     * The viewer's own region travels back with the results.
+     *
+     * It is NOT applied here. A member looking for a supplier almost always
+     * wants their own block first, and the screen should open there — but a
+     * region filter the server applies invisibly is one the member cannot see,
+     * cannot account for and cannot widen. What they would report is "the
+     * directory is empty", not "my block has two members in it". So the region
+     * comes back as data, the screen pre-fills its dropdowns with it and shows
+     * them as active filters, and clearing them searches the association.
+     *
+     * Read from the member record rather than the token: `auth.service` mints
+     * some member tokens without the location claims, so half of all callers
+     * would get an empty region and silently fall through to a national search.
+     * See `resolveMemberContext`.
+     */
+    const viewer = await resolveMemberContext(req);
+
     const data = await directoryService.search(pickFilters(query), query.page, query.limit);
-    res.json(ApiResponse.success(data));
+
+    res.json(ApiResponse.success({
+        ...data,
+        viewerRegion: directoryService.viewerRegion(viewer)
+    }));
 });
 
 const listSectors = asyncHandler(async(req, res) => {

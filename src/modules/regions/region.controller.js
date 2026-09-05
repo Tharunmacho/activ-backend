@@ -61,11 +61,28 @@ const getBlocks = asyncHandler(async(req, res) => {
  *
  * A mobile client on a slow connection would otherwise make three round-trips
  * while the applicant waits between dropdowns. Names and counts only.
+ *
+ * `?include=all` widens it from the SELECTABLE regions to every region the
+ * admin database knows. The default stays `selectable`, because the callers
+ * that predate this parameter are the registration screens, and a dropdown
+ * there must not offer an applicant a state they cannot finish choosing
+ * through. Content targeting asks the opposite question and passes
+ * `include=all` — see `getTree` in the service for why the two differ.
+ *
+ * Compared against the literal `'all'` rather than treated as a boolean, so a
+ * stray `?include=1` or `?include=true` from a client that half-implemented
+ * this falls back to the narrower, safer answer.
  */
 const getTree = asyncHandler(async(req, res) => {
-    const tree = await regionService.getTree();
+    const includeAll = String(req.query.include || '').toLowerCase() === 'all';
+    const tree = await regionService.getTree({ prune: !includeAll });
 
     res.json(ApiResponse.success({
+        // What this listing actually is, echoed back. A client cannot otherwise
+        // tell a platform with one staffed state from a narrower listing of a
+        // platform with several, and that ambiguity is the bug that prompted the
+        // parameter.
+        include: includeAll ? 'all' : 'selectable',
         coverageAvailable: tree.length > 0,
         states: tree.map(stateNode => ({
             name: stateNode.name,

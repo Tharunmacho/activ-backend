@@ -7,10 +7,16 @@ const {
 } = require('./cms.models');
 const Event = require('../events/event.model');
 const eventService = require('../events/event.service');
+// One rule, two shapes: the clause for the grid and the predicate for the
+// single-event page. See the file itself for why they cannot be written twice.
+const { onboardingClause, isOnboardingContent } = require('../events/onboardingVisibility');
 const { removeOrphans } = require('./media.cleanup');
 const { sanitizeHtml } = require('./richText');
 
-const { toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders } = eventService;
+const {
+    toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders, sanitizeTargets,
+    sanitizeRegistrationFields
+} = eventService;
 
 /**
  * The advanced-display half of an event, lifted off the shared mapper.
@@ -23,6 +29,9 @@ const { toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders } = eventSe
  */
 const pickEventDetail = (event = {}) => ({
     category: event.category,
+    // Who the event was aimed at, as a person reads it. Derived by the one
+    // mapper so the CMS card and the dashboards print it identically.
+    targetLabel: event.targetLabel,
     audience: event.audience,
     agenda: event.agenda,
     speakers: event.speakers,
@@ -37,6 +46,27 @@ const pickEventDetail = (event = {}) => ({
     capacity: event.capacity,
     registrationNote: event.registrationNote,
     reminderOffsetsHours: event.reminderOffsetsHours,
+    // What a seat costs, and every region the event was aimed at. Both have to
+    // reach the editor or it cannot show back what was just saved.
+    registrationFee: event.registrationFee,
+    targets: event.targets,
+    /*
+     * The two fields that decide whether the public can read this event.
+     *
+     * BOTH are needed, and sending only the flag was not enough. It postdates
+     * every event in the collection, so an untargeted CMS event — which is on
+     * the public site, via its channel — reads back `showOnOnboarding: false`.
+     * An editor form that trusted the flag alone would show "not on the public
+     * site" for an event anyone can already read. With the channel here the
+     * form can derive the same answer the server does.
+     */
+    showOnOnboarding: event.showOnOnboarding,
+    channel: event.channel,
+    // The first of the two audience boxes. Sent back with `targets`, not in
+    // place of it — the form restores both or it restores neither.
+    reachEveryone: event.reachEveryone,
+    // The form the editor designed, so the CMS can show back what it saved.
+    registrationFields: event.registrationFields,
 });
 
 /**
@@ -67,6 +97,30 @@ const eventDetailUpdates = (payload = {}) => {
         update.registrationEnabled = payload.registrationEnabled === true || payload.registrationEnabled === 'true';
     }
 
+    /*
+     * "Post this in the onboarding events section too."
+     *
+     * Read from the payload the same way `registrationEnabled` is, and for the
+     * same reason: a multipart body — which is what the CMS posts whenever a
+     * banner is attached — carries every field as a string, so the switch
+     * arrives as `"true"` rather than `true` on exactly the saves that also
+     * upload an image. Comparing against `true` alone made the flag survive a
+     * text-only save and silently drop on any save with a banner.
+     *
+     * Absent means untouched, not false. The CMS's own screen does not render
+     * this switch — a `channel: 'public'` event is onboarding content already —
+     * so re-saving an event there must not clear what the super admin set.
+     */
+    if (payload.showOnOnboarding !== undefined) {
+        update.showOnOnboarding = payload.showOnOnboarding === true || payload.showOnOnboarding === 'true';
+    }
+
+    // "Everyone in the association" — see the schema. Absent means untouched,
+    // like every other flag here.
+    if (payload.reachEveryone !== undefined) {
+        update.reachEveryone = payload.reachEveryone === true || payload.reachEveryone === 'true';
+    }
+
     if (payload.registrationDeadline !== undefined) {
         const raw = payload.registrationDeadline;
         if (raw === null || raw === '') {
@@ -80,6 +134,42 @@ const eventDetailUpdates = (payload = {}) => {
     if (payload.capacity !== undefined) {
         const capacity = Math.round(Number(payload.capacity));
         update.capacity = Number.isFinite(capacity) && capacity > 0 ? capacity : 0;
+    }
+
+    if (payload.registrationFee !== undefined) {
+        const fee = Math.round(Number(payload.registrationFee));
+        update.registrationFee = Number.isFinite(fee) && fee > 0 ? fee : 0;
+    }
+
+    // The registration form the editor designed. Cleaned by the SAME function
+    // the events API uses — this editor and that endpoint write one collection,
+    // and two cleaning rules would mean two ideas of what a valid field is.
+    if (payload.registrationFields !== undefined) {
+        update.registrationFields = sanitizeRegistrationFields(parseArray(payload.registrationFields));
+    }
+
+    /*
+     * The region list, and the legacy fields mirrored from its first entry.
+     *
+     * Cleaned by `eventService.sanitizeTargets` — the SAME function the events
+     * API uses — because this editor and that endpoint write the same
+     * collection. Two cleaning rules would mean an event posted from the CMS
+     * and one posted from the app could disagree about whether a block without
+     * a district is a valid target.
+     *
+     * The mirror is written here and not left to the caller for the reason the
+     * events service gives: they are two representations of one fact, and a
+     * write that touches one without the other leaves an event whose audience
+     * depends on which client is asking.
+     */
+    if (payload.targets !== undefined) {
+        const targets = sanitizeTargets(parseArray(payload.targets));
+        update.targets = targets;
+
+        const primary = targets[0] || { state: '', district: '', block: '' };
+        update.state = primary.state;
+        update.district = primary.district;
+        update.block = primary.block;
     }
 
     return update;
@@ -132,6 +222,7 @@ const EMPTY_MEDIA = { url: '', type: 'image', alt: '', fit: 'cover', position: '
 const EMPTY_SITE = {
     brand: { logo: { ...EMPTY_MEDIA }, fullName: '', tagline: '' },
     header: { navLinks: [], ctaLabel: '', ctaHref: '', background: '#ffffff', textColor: '#1c2e68' },
+    extraFields: [],
     footer: {
         addressLines: [], linkColumns: [], contactHeading: '', phones: [], email: '',
         socials: [], copyright: '', legalLinks: [], note: '',
@@ -143,12 +234,13 @@ const EMPTY_HOME = {
         slides: [], headline: '', headlineHighlight: '', subheadline: '',
         ctaLabel: '', ctaHref: '', ctaIcon: 'heart',
         secondaryCtaLabel: '', secondaryCtaHref: '', secondaryCtaIcon: 'play',
+        galleryPosters: { enabled: true, limit: 6, position: 'after' },
         highlightCard: { enabled: true, icon: 'users', eyebrow: '', value: '', caption: '', stats: [] },
     },
     about: {
         badgeIcon: 'users', badgeText: '', heading: '', headingHighlight: '', eyebrow: '',
         body: '', bullets: [], media: { ...EMPTY_MEDIA }, logoOverlay: { ...EMPTY_MEDIA },
-        linkLabel: '', linkHref: '', statsBar: [],
+        linkLabel: '', linkHref: '', statsBar: [], extraFields: [],
     },
 };
 
@@ -156,6 +248,7 @@ const EMPTY_ABOUT = {
     badgeIcon: 'users', badgeText: '', heading: '', headingHighlight: '',
     body: '', bullets: [], bulletPoints: [],
     media: { ...EMPTY_MEDIA }, logoOverlay: { ...EMPTY_MEDIA }, statsBar: [],
+    extraFields: [],
 };
 
 const EMPTY_EVENTS_SETTINGS = {
@@ -168,12 +261,23 @@ const EMPTY_EVENTS_SETTINGS = {
     viewAllLabel: '', viewAllHref: '/events',
     emptyText: '', emptyFilterText: '', homeLimit: 3,
     banner: { enabled: true, icon: 'calendar-days', title: '', subtitle: '', ctaLabel: '', ctaHref: '' },
+    extraFields: [],
 };
 
 const EMPTY_GALLERY_SETTINGS = {
     badgeIcon: 'image', badgeText: '', heading: '', headingHighlight: '', description: '',
     noteLines: [], categories: [], viewMoreLabel: '', pageSize: 8,
     emptyText: '', emptyFilterText: '',
+    detail: {
+        backLabel: 'Back to Gallery',
+        aboutHeading: 'About this event',
+        highlightsHeading: 'Highlights',
+        photosHeading: 'More photographs',
+        relatedHeading: 'More from the gallery',
+        ctaLabel: '', ctaHref: '',
+        missingText: 'This item is no longer available.',
+    },
+    extraFields: [],
 };
 
 const EMPTY_CONTACT = {
@@ -192,6 +296,7 @@ const EMPTY_CONTACT = {
     addressLines: [], phone: '', alternatePhone: '', email: '', workingHours: [], mapEmbedUrl: '',
     social: { facebook: '', instagram: '', linkedin: '', youtube: '' },
     banner: { enabled: true, icon: 'users', title: '', subtitle: '', ctaLabel: '', ctaHref: '' },
+    extraFields: [],
 };
 
 const actorOf = (user = {}) => ({ email: user.email || '', at: new Date() });
@@ -238,6 +343,59 @@ const cleanMedia = (input = {}) => {
         position: str(source.position) || 'center',
     };
 };
+
+/**
+ * A list of media objects — the extra photographs on a gallery item.
+ *
+ * Entries with no URL are dropped rather than stored: the editor's repeatable
+ * list starts each new row empty, and a row the admin added and never filled in
+ * would otherwise become a blank frame on the public page.
+ */
+const cleanPhotos = (value) => {
+    // A multipart save (a file upload alongside the fields) stringifies arrays,
+    // so the list can arrive as JSON text rather than as an array.
+    let source = value;
+    if (typeof source === 'string' && source.trim().startsWith('[')) {
+        try { source = JSON.parse(source); } catch { source = []; }
+    }
+
+    return asArray(source)
+        .map(m => cleanMedia(typeof m === 'string' ? { url: m } : m))
+        .filter(m => m.url)
+        .slice(0, 24);
+};
+
+/**
+ * The editor's own named fields on a gallery item.
+ *
+ * A row with neither a label nor a value is dropped — the editor's list starts
+ * each new row empty, and a row somebody added and never filled in would
+ * otherwise render as a stray colon on the public page. A row with a label and
+ * no value is KEPT, because "Sponsors: —" is a thing an editor may deliberately
+ * be part-way through writing.
+ */
+const cleanExtraFields = (value) => {
+    let source = value;
+    // A multipart save stringifies arrays; see `cleanPhotos`.
+    if (typeof source === 'string' && source.trim().startsWith('[')) {
+        try { source = JSON.parse(source); } catch { source = []; }
+    }
+
+    return asArray(source)
+        .map(f => ({ label: str(f && f.label), value: String((f && f.value) ?? '').trim().slice(0, 2000) }))
+        .filter(f => f.label || f.value)
+        .slice(0, 20);
+};
+
+/**
+ * The long write-up on a gallery item.
+ *
+ * Trimmed at the ends and capped, but NOT collapsed: the paragraph breaks an
+ * editor typed are the only structure this field has, and the public page
+ * renders them verbatim. Stored as plain text and printed by React, so it is
+ * escaped on the way out — no markup is interpreted and none needs stripping.
+ */
+const cleanDescription = (value) => String(value ?? '').trim().slice(0, 8000);
 
 /** A label and its destination. Entries with neither are dropped by the caller. */
 const cleanLink = (input = {}) => ({ label: str(input.label), href: str(input.href) });
@@ -317,6 +475,7 @@ class CmsService {
                 logo: { ...EMPTY_MEDIA, ...((doc.brand || {}).logo || {}) },
             },
             header: { ...EMPTY_SITE.header, ...(doc.header || {}) },
+            extraFields: doc.extraFields || [],
             footer: { ...EMPTY_SITE.footer, ...(doc.footer || {}) },
         };
     }
@@ -386,6 +545,10 @@ class CmsService {
             };
         }
 
+        // The editor's own footer rows. Sent independently of the two blocks
+        // above, so a header-only save does not blank them.
+        if (payload.extraFields !== undefined) set.extraFields = cleanExtraFields(payload.extraFields);
+
         // Captured before the write so a replaced logo can be reclaimed after.
         const previous = await SiteSettings.findOne({ key: SINGLETON_KEY }).lean().catch(() => null);
 
@@ -415,6 +578,13 @@ class CmsService {
             carousel: {
                 ...EMPTY_HOME.carousel,
                 ...carousel,
+                // A document saved before the banner could carry gallery posters
+                // has no such block; the default turns them on, which is what
+                // makes the feature appear without an editor hunting for it.
+                galleryPosters: {
+                    ...EMPTY_HOME.carousel.galleryPosters,
+                    ...(carousel.galleryPosters || {}),
+                },
                 highlightCard: {
                     ...EMPTY_HOME.carousel.highlightCard,
                     ...(carousel.highlightCard || {}),
@@ -428,6 +598,7 @@ class CmsService {
                 logoOverlay: { ...EMPTY_MEDIA, ...(about.logoOverlay || {}) },
                 bullets: about.bullets || [],
                 statsBar: about.statsBar || [],
+                extraFields: about.extraFields || [],
             },
         };
     }
@@ -445,8 +616,17 @@ class CmsService {
         if (payload.carousel) {
             const c = payload.carousel;
             const card = c.highlightCard || {};
+            const posters = c.galleryPosters || {};
+            const posterLimit = Number(posters.limit);
 
             set.carousel = {
+                galleryPosters: {
+                    enabled: boolOf(posters.enabled, true),
+                    // Capped at 10: past that the banner takes longer to cycle
+                    // than anybody stays on the page.
+                    limit: Number.isFinite(posterLimit) && posterLimit >= 0 ? Math.min(posterLimit, 10) : 6,
+                    position: posters.position === 'before' ? 'before' : 'after',
+                },
                 // A slide with no media is not a slide — it renders as a blank
                 // frame the visitor has to sit through.
                 slides: asArray(c.slides)
@@ -487,6 +667,7 @@ class CmsService {
                 linkLabel: str(a.linkLabel),
                 linkHref: str(a.linkHref),
                 statsBar: cleanStats(a.statsBar),
+                extraFields: cleanExtraFields(a.extraFields),
             };
         }
 
@@ -536,6 +717,7 @@ class CmsService {
             media: cleanMedia(payload.media || payload),
             logoOverlay: cleanMedia(payload.logoOverlay),
             statsBar: cleanStats(payload.statsBar),
+            extraFields: cleanExtraFields(payload.extraFields),
         }, user);
 
         await reclaim(previous);
@@ -603,17 +785,34 @@ class CmsService {
                 ctaLabel: str(banner.ctaLabel),
                 ctaHref: str(banner.ctaHref),
             },
+
+            extraFields: cleanExtraFields(payload.extraFields),
         }, user);
     }
 
     // ============================================================ gallery
 
-    getGallerySettings() {
-        return readSingleton(GallerySettings, EMPTY_GALLERY_SETTINGS);
+    /**
+     * `detail` is merged key by key.
+     *
+     * `readSingleton` merges one level deep, so a document saved before that
+     * block existed would hand the poster page an `undefined`, and one saved by
+     * an older build of the editor a half-populated one. Merging here means
+     * every reader gets the whole shape, whatever generation of document is in
+     * the database.
+     */
+    async getGallerySettings() {
+        const doc = await readSingleton(GallerySettings, EMPTY_GALLERY_SETTINGS);
+        return {
+            ...doc,
+            detail: { ...EMPTY_GALLERY_SETTINGS.detail, ...(doc.detail || {}) },
+        };
     }
 
     updateGallerySettings(payload = {}, user = {}) {
         const size = Number(payload.pageSize);
+        const detail = payload.detail || {};
+
         return writeSingleton(GallerySettings, {
             badgeIcon: icon(payload.badgeIcon, 'image'),
             badgeText: str(payload.badgeText),
@@ -631,17 +830,101 @@ class CmsService {
             pageSize: Number.isFinite(size) && size >= 0 ? Math.min(size, 200) : 8,
             emptyText: str(payload.emptyText),
             emptyFilterText: str(payload.emptyFilterText),
+
+            detail: {
+                backLabel: str(detail.backLabel) || 'Back to Gallery',
+                aboutHeading: str(detail.aboutHeading) || 'About this event',
+                highlightsHeading: str(detail.highlightsHeading) || 'Highlights',
+                photosHeading: str(detail.photosHeading) || 'More photographs',
+                relatedHeading: str(detail.relatedHeading) || 'More from the gallery',
+                ctaLabel: str(detail.ctaLabel),
+                ctaHref: str(detail.ctaHref),
+                missingText: str(detail.missingText) || 'This item is no longer available.',
+            },
+
+            extraFields: cleanExtraFields(payload.extraFields),
         }, user);
     }
 
-    async listGallery({ includeHidden = false } = {}) {
+    /**
+     * The gallery, in the order the page it is bound for wants it.
+     *
+     * `homeOnly` is the landing banner, and it differs from the grid in both what
+     * it selects and how it sorts. The grid is an ARRANGEMENT — `sortOrder`
+     * ascending, so an editor decides what sits where. The landing banner is a
+     * FEED: "what has this association been doing lately", newest first, which
+     * is the opposite end of the same list and is why it cannot simply slice the
+     * grid's order.
+     *
+     * The write-up, bullets and extra photographs are projected away for the
+     * banner. Nothing on a banner slide reads them, and an event with twelve
+     * photographs would otherwise put all twelve URLs into the payload of the
+     * one page whose weight matters most.
+     */
+    async listGallery({ includeHidden = false, homeOnly = false, limit = 0 } = {}) {
         const filter = includeHidden ? {} : { visible: { $ne: false } };
-        const items = await GalleryItem.find(filter)
-            .sort({ sortOrder: 1, createdAt: -1 })
-            .lean()
-            .catch(() => []);
+        // `$ne: false` rather than `true`: rows created before the field existed
+        // have no `showOnHome`, and they are the ones already on the site.
+        if (homeOnly) filter.showOnHome = { $ne: false };
 
-        return items.map(i => ({ ...i, media: { ...EMPTY_MEDIA, ...(i.media || {}) } }));
+        /*
+         * `pinned` leads both surfaces; the rest follows each one's own order.
+         *
+         * `-1` because MongoDB sorts `false` before `true`.
+         *
+         * THE FIELD MUST EXIST ON EVERY ROW. Mongo ranks a MISSING field below
+         * an explicit `false`, so a row that has never been pinned would sort
+         * *under* one that was pinned and then unpinned — toggling the switch on
+         * and off would promote an item permanently, for no visible reason. The
+         * schema default covers every new row, and the existing ones were
+         * backfilled when this shipped. Nothing may `$unset` it.
+         */
+        let query = GalleryItem.find(filter)
+            .sort(homeOnly
+                ? { pinned: -1, createdAt: -1 }
+                : { pinned: -1, sortOrder: 1, createdAt: -1 });
+
+        if (homeOnly) query = query.select('-description -highlights -photos -customFields');
+
+        const cap = Number(limit);
+        if (Number.isFinite(cap) && cap > 0) query = query.limit(Math.min(cap, 60));
+
+        const items = await query.lean().catch(() => []);
+
+        return items.map(i => ({
+            ...i,
+            media: { ...EMPTY_MEDIA, ...(i.media || {}) },
+            ...(i.photos ? { photos: i.photos.map(p => ({ ...EMPTY_MEDIA, ...(p || {}) })) } : {}),
+        }));
+    }
+
+    /**
+     * One item, for its own page.
+     *
+     * A hidden item is a 404 to the public and readable to an admin, matching
+     * how the list behaves — an editor checking a link before publishing should
+     * not have to make the image live to do it.
+     */
+    async getGalleryItem(id, { includeHidden = false } = {}) {
+        // Checked here rather than left to Mongoose: a malformed id makes
+        // `findById` throw a CastError, which surfaces as a 500 on what is
+        // really a visitor following a stale link.
+        if (!/^[0-9a-fA-F]{24}$/.test(String(id || ''))) {
+            throw ApiError.notFound('Gallery item not found');
+        }
+
+        const doc = await GalleryItem.findById(id).lean().catch(() => null);
+        if (!doc || (!includeHidden && doc.visible === false)) {
+            throw ApiError.notFound('Gallery item not found');
+        }
+
+        return {
+            ...doc,
+            media: { ...EMPTY_MEDIA, ...(doc.media || {}) },
+            photos: (doc.photos || []).map(p => ({ ...EMPTY_MEDIA, ...(p || {}) })),
+            highlights: doc.highlights || [],
+            customFields: doc.customFields || [],
+        };
     }
 
     async addGalleryItem(payload = {}, user = {}) {
@@ -662,7 +945,13 @@ class CmsService {
             category: str(payload.category),
             eventDate: str(payload.eventDate),
             location: str(payload.location),
+            description: cleanDescription(payload.description),
+            highlights: stringList(payload.highlights),
+            photos: cleanPhotos(payload.photos),
+            customFields: cleanExtraFields(payload.customFields),
             featured: boolOf(payload.featured, false),
+            pinned: boolOf(payload.pinned, false),
+            showOnHome: boolOf(payload.showOnHome, true),
             sortOrder,
             visible: boolOf(payload.visible, true),
             editedBy: actorOf(user),
@@ -677,9 +966,18 @@ class CmsService {
             if (payload[field] !== undefined) update[field] = str(payload[field]);
         });
 
+        // Not in the loop above: the write-up is long-form and carries its own
+        // length cap, and the other two are lists rather than strings.
+        if (payload.description !== undefined) update.description = cleanDescription(payload.description);
+        if (payload.highlights !== undefined) update.highlights = stringList(payload.highlights);
+        if (payload.photos !== undefined) update.photos = cleanPhotos(payload.photos);
+        if (payload.customFields !== undefined) update.customFields = cleanExtraFields(payload.customFields);
+
         if (payload.sortOrder !== undefined) update.sortOrder = Number(payload.sortOrder) || 0;
         if (payload.visible !== undefined) update.visible = boolOf(payload.visible, true);
         if (payload.featured !== undefined) update.featured = boolOf(payload.featured, false);
+        if (payload.pinned !== undefined) update.pinned = boolOf(payload.pinned, false);
+        if (payload.showOnHome !== undefined) update.showOnHome = boolOf(payload.showOnHome, true);
 
         // Held so a replaced image is reclaimed once the new one is stored.
         const before = await GalleryItem.findById(id).lean().catch(() => null);
@@ -687,7 +985,10 @@ class CmsService {
         const doc = await GalleryItem.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
         if (!doc) throw ApiError.notFound('Gallery item not found');
 
-        if (before) await reclaim(before.media);
+        // The extra photographs are reclaimed alongside the poster: removing a
+        // row from the photo list is as much a replacement as swapping the main
+        // image, and `removeOrphans` only deletes what nothing still points at.
+        if (before) await reclaim([before.media, before.photos]);
         return doc;
     }
 
@@ -696,7 +997,7 @@ class CmsService {
         if (!doc) throw ApiError.notFound('Gallery item not found');
 
         // The row is gone, so the scan below will not count it as a reference.
-        await reclaim(doc.media);
+        await reclaim([doc.media, doc.photos]);
         return { id };
     }
 
@@ -711,6 +1012,7 @@ class CmsService {
             infoCard: { ...EMPTY_CONTACT.infoCard, ...(doc.infoCard || {}) },
             social: { ...EMPTY_CONTACT.social, ...(doc.social || {}) },
             banner: { ...EMPTY_CONTACT.banner, ...(doc.banner || {}) },
+            extraFields: doc.extraFields || [],
         };
     }
 
@@ -775,6 +1077,8 @@ class CmsService {
                 ctaLabel: str(banner.ctaLabel),
                 ctaHref: str(banner.ctaHref),
             },
+
+            extraFields: cleanExtraFields(payload.extraFields),
         }, user);
 
         // A hero image removed from the pair above.
@@ -893,6 +1197,24 @@ class CmsService {
          */
         if (!includeDrafts) filter.audience = { $ne: 'paid' };
 
+        /*
+         * WHAT REACHES THE ONBOARDING SITE: THE CMS PROGRAMME, PLUS WHATEVER
+         * THE SUPER ADMIN EXPLICITLY POSTED THERE.
+         *
+         * The rule, and the reasoning behind every clause of it, lives in
+         * `events/onboardingVisibility.js`. It is there and not here because the
+         * single-event page below has to apply the SAME rule to one loaded
+         * document, and two inline copies of it is how a page the grid hides
+         * ends up served to anyone who has the link.
+         *
+         * Pushed onto `$and` rather than assigned onto `filter`, so this and the
+         * caller's own conditions cannot overwrite each other — which a
+         * top-level `filter.channel = …` could, and did.
+         */
+        if (!includeDrafts) {
+            filter.$and = [...(filter.$and || []), onboardingClause()];
+        }
+
         // Fetched newest-first so the limit keeps the most relevant events when
         // there are more than it allows: an old event dropping off matters far
         // less than a forthcoming one.
@@ -900,11 +1222,44 @@ class CmsService {
 
         const now = Date.now();
         const at = e => (e.startAt ? new Date(e.startAt).getTime() : 0);
+        const undated = e => !e.startAt;
 
-        const upcoming = events.filter(e => at(e) >= now).sort((a, b) => at(a) - at(b));
-        const past = events.filter(e => at(e) < now).sort((a, b) => at(b) - at(a));
+        /*
+         * AN UNDATED EVENT IS NOT A PAST ONE.
+         *
+         * `at()` returns 0 for a missing date, so the plain comparison filed
+         * every event whose date is not settled yet at the far end of the past —
+         * behind 1970 — which is where nobody scrolls. Since the schema stopped
+         * requiring a date that is a normal state for a real announcement, not
+         * an anomaly.
+         *
+         * They lead the upcoming list instead: something with no date has not
+         * happened, which is what "upcoming" means to a reader. Among
+         * themselves they keep the order the query returned (newest-written
+         * first), and every dated event follows in date order.
+         */
+        const upcoming = events
+            .filter(e => undated(e) || at(e) >= now)
+            .sort((a, b) => {
+                if (undated(a) !== undated(b)) return undated(a) ? -1 : 1;
+                if (undated(a)) return 0;
+                return at(a) - at(b);
+            });
 
-        return [...upcoming, ...past].map(e => ({
+        const past = events.filter(e => !undated(e) && at(e) < now).sort((a, b) => at(b) - at(a));
+
+        return this.mapEvents([...upcoming, ...past]);
+    }
+
+    /**
+     * The website shape of an event.
+     *
+     * Its own method so the listing and the single-event page below map through
+     * exactly one function. Two copies of this is how a card and the page it
+     * opens end up disagreeing about the same row.
+     */
+    mapEvents(list = []) {
+        return (list || []).map(e => ({
             id: String(e._id),
             title: e.title || '',
             description: e.description || '',
@@ -962,12 +1317,65 @@ class CmsService {
         return null;
     }
 
+    /**
+     * One event, for its own public page.
+     *
+     * Built from the same mapper as the listing, so the page a visitor opens
+     * cannot describe an event differently from the card they clicked.
+     *
+     * TWO THINGS ARE HIDDEN, and for the same reason they are hidden from the
+     * listing: a draft is not published, and a members-only event is a
+     * membership benefit that does not belong on a page anyone can read without
+     * signing in. Both answer 404 rather than 403 — a public visitor has no
+     * business learning that a members-only event exists at this id.
+     */
+    async listEvent(id, { includeDrafts = false } = {}) {
+        // Checked here rather than left to Mongoose: a malformed id throws a
+        // CastError, which surfaces as a 500 on what is a stale link.
+        if (!/^[0-9a-fA-F]{24}$/.test(String(id || ''))) throw ApiError.notFound('Event not found');
+
+        const doc = await Event.findById(id).lean().catch(() => null);
+        if (!doc) throw ApiError.notFound('Event not found');
+
+        const isDraft = (doc.status || 'draft') !== 'published';
+        const membersOnly = String(doc.audience || 'all').toLowerCase() === 'paid';
+
+        /*
+         * A THIRD THING IS HIDDEN: an event that is not onboarding content.
+         *
+         * The same rule the listing applies, from the same module, evaluated
+         * against this one document. Without it the opt-in is only a filter on
+         * the grid: an event the super admin kept inside the association would
+         * be absent from the list and fully readable at `/events/:id`, which is
+         * exactly where a link copied out of a member dashboard lands an
+         * anonymous visitor.
+         */
+        if (!includeDrafts && (isDraft || membersOnly || !isOnboardingContent(doc))) {
+            throw ApiError.notFound('Event not found');
+        }
+
+        // `listEvents` maps a whole array; one document goes through the same
+        // path so the shapes cannot drift.
+        const [mapped] = this.mapEvents([doc]);
+        return mapped;
+    }
+
+    /**
+     * NOTHING HERE IS REQUIRED — see the note at the top of the event schema.
+     *
+     * The two guards this replaces rejected an event with no title or no
+     * settled date. Both are ordinary states for something being written: the
+     * date is agreed after the speaker is, and an editor who cannot save
+     * without one types "TBC" and ships it. `status` carries readiness; these
+     * fields carry what is known.
+     *
+     * `toStartAt` returns `null` for a missing or unparseable date, and `null`
+     * is stored as-is. The distinction it keeps is between "no date yet" and
+     * "the epoch" — the listings sort on this field.
+     */
     async createEvent(payload = {}, user = {}) {
         const title = str(payload.title);
-        if (!title) throw ApiError.badRequest('An event needs a title');
-
         const startAt = this.toStartAt(payload);
-        if (!startAt) throw ApiError.badRequest('An event needs a valid date');
 
         return Event.create({
             title,
@@ -987,6 +1395,9 @@ class CmsService {
             // Published by default: adding an event through the CMS means it to
             // appear. Drafts remain available via the status control.
             status: payload.status === 'draft' ? 'draft' : 'published',
+            // Which site this belongs to. Sent by the screen that posted it:
+            // the CMS says 'public', the super admin's Events screen 'members'.
+            channel: payload.channel === 'members' ? 'members' : 'public',
             createdBy: user.email || '',
             // Agenda, speakers, audience, venue detail and registration.
             ...eventDetailUpdates(payload),
@@ -995,6 +1406,19 @@ class CmsService {
 
     async updateEvent(id, payload = {}) {
         const update = {};
+
+        /*
+         * Re-saving from a screen (re)declares which site the event belongs to.
+         *
+         * This is how a row posted before `channel` existed gets corrected: open
+         * it where it belongs and press Save. Only a value the client actually
+         * sent is honoured — an older client that knows nothing of the field
+         * leaves it alone rather than silently reassigning the event.
+         */
+        if (payload.channel !== undefined) {
+            update.channel = payload.channel === 'members' ? 'members' : 'public';
+        }
+
         if (payload.title !== undefined) update.title = str(payload.title);
         if (payload.description !== undefined) update.description = str(payload.description);
         if (payload.location !== undefined || payload.venue !== undefined) {

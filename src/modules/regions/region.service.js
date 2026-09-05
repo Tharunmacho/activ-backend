@@ -96,7 +96,7 @@ const summarise = (admins) => (admins || []).map(a => ({
  * or invalidated, so this cache expires exactly when the underlying data does —
  * it cannot go stale independently, and no second TTL has to be kept in sync.
  */
-let derived = { builtFrom: null, states: null, tree: null };
+let derived = { builtFrom: null, states: null, tree: null, fullTree: null };
 
 class RegionService {
     /** The raw coverage map, rebuilt from the admin repository's cached scan. */
@@ -105,20 +105,51 @@ class RegionService {
         if (derived.builtFrom === admins && derived.states) return derived.states;
 
         const states = buildCoverage(admins);
-        derived = { builtFrom: admins, states, tree: null };
+        derived = { builtFrom: admins, states, tree: null, fullTree: null };
         return states;
     }
 
     /**
-     * The full selectable tree.
+     * The region tree, in one of two shapes.
      *
      * `staffed` counts are carried on every node so the super admin's directory
      * can show where the platform is thin without a second round-trip, while the
      * applicant-facing endpoints only ever read the names.
+     *
+     * TWO SHAPES, BECAUSE "WHICH REGIONS EXIST" AND "WHICH REGIONS AN APPLICANT
+     * MAY PICK" ARE DIFFERENT QUESTIONS, and answering both with one tree is
+     * what made a state with a state admin and no block admins invisible to
+     * everything.
+     *
+     *   prune: true (default)  the SELECTABLE tree. Bottom-up: a block needs a
+     *          block admin, a district needs such a block, a state needs such a
+     *          district. This is the registration contract — creating a block
+     *          admin is what opens a region — and it is bottom-up precisely so
+     *          it cannot offer an applicant a dead end.
+     *
+     *   prune: false           EVERY region the admin database knows, with its
+     *          own staffing counts. A state carrying only a state admin appears,
+     *          with however many districts its admins named — possibly none.
+     *
+     * The unpruned shape exists because the pruning rule, applied where it does
+     * not belong, deletes real regions from the answer. Aiming an event at a
+     * state whose only staffed account is its state admin is an ordinary thing
+     * to want: that admin and every member standing in that state are a real
+     * audience, and none of them needs a block admin to exist first. The event
+     * picker was reading the applicant tree, so a platform with two staffed
+     * states offered one, with nothing on screen to say the other had been
+     * withheld or why.
+     *
+     * Cached in its own slot. Both shapes are derived from the same coverage map
+     * and invalidate together with it, so one `builtFrom` identity check still
+     * governs both.
      */
     async getTree(options = {}) {
+        const prune = options.prune !== false;
+        const slot = prune ? 'tree' : 'fullTree';
+
         const states = await this.coverageMap(options);
-        if (derived.states === states && derived.tree) return derived.tree;
+        if (derived.states === states && derived[slot]) return derived[slot];
 
         const tree = [];
         states.forEach((stateNode) => {
@@ -127,7 +158,7 @@ class RegionService {
             stateNode.districts.forEach((districtNode) => {
                 const blocks = [];
                 districtNode.blocks.forEach((blockNode) => {
-                    if (blockNode.admins.length === 0) return;
+                    if (prune && blockNode.admins.length === 0) return;
                     blocks.push({
                         name: blockNode.name,
                         admins: blockNode.admins.length,
@@ -135,7 +166,7 @@ class RegionService {
                     });
                 });
 
-                if (blocks.length === 0) return;
+                if (prune && blocks.length === 0) return;
                 blocks.sort((a, b) => a.name.localeCompare(b.name));
 
                 districts.push({
@@ -146,7 +177,7 @@ class RegionService {
                 });
             });
 
-            if (districts.length === 0) return;
+            if (prune && districts.length === 0) return;
             districts.sort((a, b) => a.name.localeCompare(b.name));
 
             tree.push({
@@ -161,7 +192,7 @@ class RegionService {
 
         // Only cache a tree built from the map currently cached. A `fresh` read
         // may have replaced `derived` underneath this call.
-        if (derived.states === states) derived.tree = tree;
+        if (derived.states === states) derived[slot] = tree;
         return tree;
     }
 
@@ -254,7 +285,11 @@ class RegionService {
         // Sequential, not Promise.all: `getTree()` calls `coverageMap()` itself,
         // and racing them meant two cold builds of the same map on a cache miss —
         // the single most expensive thing on the registration path.
-        const tree = await this.getTree(options);
+        //
+        // THE UNPRUNED TREE, matching what the applicant was offered. Validating
+        // against the pruned one while the dropdown lists the full one is the
+        // arrangement that rejects a region the form itself suggested.
+        const tree = await this.getTree({ ...options, prune: false });
         const states = await this.coverageMap(options);
 
         // The bootstrap test is "does any geofenced admin exist at all", not
@@ -278,6 +313,28 @@ class RegionService {
             };
         }
 
+        /*
+         * VALIDATED TO THE DEPTH THE APPLICANT ACTUALLY GAVE.
+         *
+         * This used to demand all three levels, matched against the PRUNED
+         * tree — so the only acceptable region was one staffed all the way down
+         * to a block admin. That made a state carrying only a state admin
+         * unusable: it was missing from the dropdown, and typed in by hand it
+         * was rejected for having no districts.
+         *
+         * What the gate is actually for is making sure an application does not
+         * land in nobody's queue. A node exists in this tree only because a live
+         * admin account names it, and `tierRouting.effectiveTier` walks up from
+         * the tier the status names to the first one that has an admin. So a
+         * state that is present here has an owner, whether or not anything below
+         * it does, and requiring the two lower levels protected nothing.
+         *
+         * The levels below are still checked WHEN GIVEN, because a district that
+         * is not in the tree is a typo or an unstaffed guess either way, and
+         * accepting it would put the applicant in a region nothing routes from.
+         * Skipping a level and filling the next is likewise refused: a block
+         * without its district cannot be placed.
+         */
         const stateNode = tree.find(entry => key(entry.name) === key(state));
         if (!stateNode) {
             return {
@@ -287,32 +344,52 @@ class RegionService {
             };
         }
 
-        const districtNode = stateNode.districts.find(entry => key(entry.name) === key(district));
-        if (!districtNode) {
+        const wantsDistrict = !!String(district || '').trim();
+        const wantsBlock = !!String(block || '').trim();
+
+        if (wantsBlock && !wantsDistrict) {
             return {
                 ok: false,
-                reason: `No active admin covers the district "${String(district || '').trim() || '(none selected)'}" in ${stateNode.name}. Choose a district from the list.`,
+                reason: 'Choose a district before choosing a block.',
                 region: null
             };
         }
 
-        const blockNode = districtNode.blocks.find(entry => key(entry.name) === key(block));
-        if (!blockNode) {
-            return {
-                ok: false,
-                reason: `No active admin covers the block "${String(block || '').trim() || '(none selected)'}" in ${districtNode.name}. Choose a block from the list.`,
-                region: null
-            };
+        let districtNode = null;
+        if (wantsDistrict) {
+            districtNode = stateNode.districts.find(entry => key(entry.name) === key(district));
+            if (!districtNode) {
+                return {
+                    ok: false,
+                    reason: `No active admin covers the district "${String(district).trim()}" in ${stateNode.name}. Choose a district from the list, or leave it blank.`,
+                    region: null
+                };
+            }
+        }
+
+        let blockNode = null;
+        if (wantsBlock) {
+            blockNode = districtNode.blocks.find(entry => key(entry.name) === key(block));
+            if (!blockNode) {
+                return {
+                    ok: false,
+                    reason: `No active admin covers the block "${String(block).trim()}" in ${districtNode.name}. Choose a block from the list, or leave it blank.`,
+                    region: null
+                };
+            }
         }
 
         return {
             ok: true,
             bootstrap: false,
             reason: '',
+            // Canonical spellings, and empty for the levels that were not given.
+            // Empty is meaningful downstream: `buildGeoFilter` reads a missing
+            // level as "not narrowed to one", which is exactly the case here.
             region: {
                 state: stateNode.name,
-                district: districtNode.name,
-                block: blockNode.name
+                district: districtNode ? districtNode.name : '',
+                block: blockNode ? blockNode.name : ''
             }
         };
     }

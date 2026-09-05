@@ -29,6 +29,129 @@ const PRIMARY_ADMIN_COLLECTION = adminRepository.PRIMARY_COLLECTION;
 
 const MANAGEABLE_ROLES = adminRepository.MANAGEABLE_ROLES;
 
+// ============================================================ delegation
+
+/**
+ * Which tiers an admin may manage, and where.
+ *
+ * A state admin runs a state: every district inside it and every block inside
+ * those. A district admin runs a district: the blocks inside it. Neither may
+ * touch their own tier or anything above it, and neither may reach outside their
+ * own patch — which is the same rule the application queues already enforce with
+ * `assertWithinScope`, applied to the staff records rather than to the files.
+ *
+ * Written as data rather than as branches because every entry point below —
+ * list, create, update, delete, removal preview — has to ask the same two
+ * questions, and five copies of "is this role beneath mine, is this region
+ * inside mine" is five chances for one of them to be subtly different. The
+ * dangerous one is create: an escalation bug there hands out an account with
+ * more power than the account that made it.
+ */
+const MANAGEABLE_BY = {
+    super_admin: ['state_admin', 'district_admin', 'block_admin'],
+    state_admin: ['district_admin', 'block_admin'],
+    district_admin: ['block_admin'],
+    // A block admin has nothing beneath them. Not absent — explicitly empty, so
+    // a lookup returns a list rather than `undefined`.
+    block_admin: []
+};
+
+/** The tiers this actor may see and manage. Empty means "manages nobody". */
+const manageableRoles = (actor = {}) =>
+    MANAGEABLE_BY[adminRepository.normalizeRole(actor.role || actor.adminType || '')] || [];
+
+const sameRegion = (a, b) =>
+    String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+/**
+ * The actor's patch, resolved the way every geofenced read resolves it.
+ *
+ * Through `resolveAdminScope` rather than off the token, for the reason that
+ * function documents at length: the location claims are missing from tokens
+ * minted on some sign-in paths, and an admin whose scope came back empty would
+ * otherwise be treated as unrestricted — the exact inversion of the rule.
+ */
+const actorScope = async (actor = {}) => {
+    const role = adminRepository.normalizeRole(actor.role || actor.adminType || '');
+    if (role === 'super_admin') return { role, state: '', district: '', block: '' };
+
+    const scope = await adminService.resolveAdminScope(actor);
+    return {
+        role,
+        state: scope.stateName || '',
+        district: scope.districtName || '',
+        block: scope.blockName || ''
+    };
+};
+
+/**
+ * The region every listing and every write is forced into.
+ *
+ * Returned as the filter itself rather than as a boolean to check afterwards:
+ * a caller that forgets to apply a returned filter fails open, and failing open
+ * here means a district admin editing another district's staff.
+ */
+const scopeFilter = (scope = {}) => {
+    if (scope.role === 'super_admin') return {};
+    if (scope.role === 'state_admin') return { state: scope.state };
+    if (scope.role === 'district_admin') return { state: scope.state, district: scope.district };
+    // Anything else manages nobody. `null` rather than a filter that matches
+    // nothing: callers can then answer "an empty list" outright instead of
+    // running a query designed never to match, and the intent is readable.
+    return null;
+};
+
+/**
+ * A coverage lookup memoised per region, for one request.
+ *
+ * Coverage answers "is this block staffed", and both the placement of a file and
+ * whether the caller may decide it depend on it. Fetching it per application
+ * would run one lookup per row against the admin collections; a page of fifty
+ * files in one block needs exactly one.
+ *
+ * A failed lookup resolves to `null` and is cached as such: `effectiveTier` then
+ * falls back to the tier the status names, which is the conservative answer — an
+ * unknown is not "nobody is there".
+ */
+const coverageResolver = () => {
+    const cache = new Map();
+
+    return async (app = {}) => {
+        const key = [app.state, app.district, app.block]
+            .map(v => String(v || '').trim().toLowerCase()).join('|');
+
+        if (!cache.has(key)) {
+            cache.set(key, await regionService
+                .coverageFor({ state: app.state, district: app.district, block: app.block })
+                .catch(() => null));
+        }
+        return cache.get(key);
+    };
+};
+
+/**
+ * May this actor act on this admin record?
+ *
+ * Throws rather than returning false, so a caller cannot proceed by ignoring the
+ * answer. `notFound` rather than `forbidden` for a record outside the patch: an
+ * id from another region is not a permission that could ever be granted, and
+ * "exists, but not yours" tells a district admin that a state's staffing exists.
+ */
+const assertManageable = (target = {}, scope = {}) => {
+    if (scope.role === 'super_admin') return;
+
+    const allowed = MANAGEABLE_BY[scope.role] || [];
+    const targetRole = adminRepository.normalizeRole(target.role || '');
+
+    if (!allowed.includes(targetRole)) {
+        throw ApiError.forbidden(`A ${scope.role.replace('_', ' ')} cannot manage a ${targetRole.replace('_', ' ')}`);
+    }
+    if (scope.state && !sameRegion(target.state, scope.state)) throw ApiError.notFound('Admin not found');
+    if (scope.role === 'district_admin' && !sameRegion(target.district, scope.district)) {
+        throw ApiError.notFound('Admin not found');
+    }
+};
+
 const ROLE_LABELS = adminRepository.ROLE_LABELS;
 
 const TIER_LABELS = {
@@ -350,7 +473,19 @@ class SuperAdminService {
      * God view over the applications collection: no geofence, filtered only by
      * what the super admin asked for.
      */
-    async getApplications(filters = {}) {
+    async getApplications(filters = {}, actor = {}) {
+        /*
+         * The actor's patch overrides whatever was asked for.
+         *
+         * A super admin passes no scope and this is a no-op — which is why their
+         * screen behaves exactly as it did. A district admin asking for another
+         * district gets their own: forced rather than rejected, so a stale
+         * bookmark narrows to something they may see instead of erroring.
+         */
+        const scope = await actorScope(actor);
+        if (scope.role === 'state_admin') filters = { ...filters, state: scope.state };
+        if (scope.role === 'district_admin') filters = { ...filters, state: scope.state, district: scope.district };
+
         const { status, state, district, block, q, level } = filters;
         const page = Math.max(1, parseInt(filters.page, 10) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(filters.limit, 10) || 25));
@@ -395,12 +530,52 @@ class SuperAdminService {
             return normalized.toLowerCase() === wanted;
         };
 
+        /*
+         * A file stays visible at every level whose region it belongs to.
+         *
+         * It is the STAGE that changes, not the membership of the list — which
+         * is what `classifyForLevel` has always expressed and what the bucket
+         * table in CLAUDE.md prescribes: the same application is `pending` to
+         * the tier that owes a decision, `approved` to the tier that has already
+         * given one, and `upstream` to a tier still waiting on an earlier one.
+         *
+         * An earlier version of this dropped a file from a level once it moved
+         * past that level. It fixed the visible symptom — buttons offered for a
+         * decision already made — and broke something worse: approving a file
+         * made it vanish from the list the admin was looking at, with no
+         * confirmation anywhere that it had been approved. "What happened in my
+         * block" stopped being answerable.
+         *
+         * The buttons are governed by `canAct` below, which is the question that
+         * was actually being asked.
+         */
+        // One lookup per distinct region, shared by the decidability pass below:
+        // a page of fifty files in one block is one lookup, not fifty.
+        const coverageOf = coverageResolver();
+
         const filtered = (documents || []).filter(matchesStatus);
+
         const start = (page - 1) * limit;
-        const applicants = await toApplicants(filtered.slice(start, start + limit), requestedLevel);
+        const page1 = filtered.slice(start, start + limit);
+        const applicants = await toApplicants(page1, requestedLevel);
+
+        /*
+         * Whether THIS admin can decide THIS file, answered by the server.
+         *
+         * The client cannot work it out: the answer depends on the caller's
+         * role, on which tier the file currently sits at, AND on whether the
+         * tiers beneath it are staffed at all — a `Pending-Block` file in a
+         * block with no admin is the district's to decide, and one in a staffed
+         * block is not. Deriving that in three dashboards would be three chances
+         * to offer a button the API then refuses.
+         *
+         * Computed with the same helpers the write path uses, so a row that says
+         * it can be approved can be approved.
+         */
+        const decorated = await this.decorateDecidability(page1, applicants, scope.role, coverageOf, level);
 
         return {
-            applicants,
+            applicants: decorated,
             pagination: {
                 page,
                 limit,
@@ -423,9 +598,51 @@ class SuperAdminService {
         return adminRepository.findAll();
     }
 
-    async listAdmins(filters = {}) {
+    async listAdmins(filters = {}, actor = {}) {
         const { role, q } = filters;
+
+        /*
+         * The actor's patch first, and it is not negotiable.
+         *
+         * Applied before the caller's own filters rather than merged with them:
+         * a district admin passing `?state=Kerala` must be able to narrow their
+         * view inside their district, never to widen it. A `null` scope is an
+         * actor who manages nobody — answered with an empty list rather than
+         * with everything, which is what an unguarded query would return.
+         */
+        const scope = await actorScope(actor);
+        const forced = scopeFilter(scope);
+        const allowedRoles = MANAGEABLE_BY[scope.role] || [];
+
+        if (!forced) {
+            return {
+                admins: [],
+                counts: { all: 0, block_admin: 0, district_admin: 0, state_admin: 0 },
+                // `total` too: the clients read it, and an undefined count
+                // renders as "undefined admins" rather than as "none".
+                total: 0,
+                scope: { role: scope.role, state: scope.state, district: scope.district, manageableRoles: [] }
+            };
+        }
+
         let admins = await this.allAdminRows();
+
+        /*
+         * Only the tiers beneath this actor — and ONLY for the tiers that have
+         * something above them.
+         *
+         * The super admin's list is left exactly as it was: every row this
+         * repository returns, filtered by nothing. Applying the role filter to
+         * them too was a quiet regression — it dropped any row whose role is not
+         * one of the three manageable ones from a screen that had always shown
+         * the whole roster.
+         */
+        if (scope.role !== 'super_admin') {
+            admins = admins.filter(a => allowedRoles.includes(a.role));
+        }
+
+        if (forced.state) admins = admins.filter(a => sameRegion(a.state, forced.state));
+        if (forced.district) admins = admins.filter(a => sameRegion(a.district, forced.district));
 
         if (filters.state) {
             const needle = String(filters.state).trim().toLowerCase();
@@ -484,7 +701,24 @@ class SuperAdminService {
             region: [admin.block, admin.district, admin.state].filter(Boolean).join(', ')
         }));
 
-        return { admins: annotated, counts, total: annotated.length };
+        return {
+            admins: annotated,
+            counts,
+            total: annotated.length,
+            /*
+             * What this actor may do, told to the client rather than inferred
+             * there. The same page serves three tiers, and it must not offer a
+             * district admin a "state admin" option in the role dropdown that
+             * the server would then refuse — a form that can be filled in and
+             * not submitted is worse than one that never offered the field.
+             */
+            scope: {
+                role: scope.role,
+                state: scope.state,
+                district: scope.district,
+                manageableRoles: allowedRoles
+            }
+        };
     }
 
     /**
@@ -495,10 +729,100 @@ class SuperAdminService {
      * applications but a staffed admin still appears — otherwise the directory
      * would hide exactly the regions worth chasing.
      */
-    async getDirectory(filters = {}) {
-        const level = ['state', 'district', 'block'].includes(String(filters.level || '').toLowerCase())
-            ? String(filters.level).toLowerCase()
-            : 'state';
+    /**
+     * Mark each applicant with whether this admin may decide it, and if not, who must.
+     *
+     * THE RULES, in the order they are asked:
+     *
+     *   1. A file with no pending decision (approved, or rejected) is nobody's
+     *      to act on. It still appears — monitoring is half the point of the
+     *      drill-down — but with no buttons.
+     *   2. A SUPER admin may act on anything still pending. `reviewApplication`
+     *      picks whichever tier the file sits at and advances it one step, so
+     *      approving a `Pending-Block` file moves it to `Pending-District`
+     *      exactly as the block admin's own approval would.
+     *   3. Any other tier may act when the file is theirs — either because it
+     *      sits at their tier, or because every tier beneath them is unstaffed
+     *      and `effectiveTier` has escalated it to them.
+     *
+     * Coverage is fetched once per distinct region rather than per applicant: a
+     * page of fifty files in one block would otherwise run fifty identical
+     * lookups against the admin collections.
+     */
+    async decorateDecidability(documents = [], applicants = [], role = '', coverageOf = coverageResolver(), level = '') {
+        const TIER_LABEL = { block: 'Block', district: 'District', state: 'State', super: 'Super' };
+        const actingTier = { block_admin: 'block', district_admin: 'district', state_admin: 'state' }[role] || null;
+        const isSuper = role === 'super_admin';
+        const browsing = ['block', 'district', 'state'].includes(String(level || '').toLowerCase())
+            ? String(level).toLowerCase()
+            : null;
+
+        return Promise.all(applicants.map(async (applicant, i) => {
+            const doc = documents[i] || {};
+            const owner = tierRouting.owningTier(doc);
+
+            // Approved or rejected outright: no tier owes anything.
+            if (!owner) return { ...applicant, canAct: false, waitingOn: '' };
+
+            const coverage = await coverageOf(doc);
+            const effective = tierRouting.effectiveTier(doc, coverage);
+            const label = TIER_LABEL[effective] || TIER_LABEL[owner] || '';
+
+            /*
+             * A decision is offered at the tier that owes it, and nowhere else.
+             *
+             * This is the rule that keeps a super admin's screen honest. They may
+             * act on any pending file — `reviewApplication` picks the tier for
+             * them — but a row in the DISTRICT list that the district has already
+             * approved is not a district decision any more, and offering Approve
+             * beside a green "Approved" badge is the screen arguing with itself.
+             * The file is still theirs to decide: from the State list, where it
+             * now sits and where it is shown as pending.
+             *
+             * When no level is being browsed — a flat list, not a drill-down —
+             * the super admin keeps the old blanket permission.
+             */
+            if (browsing && effective !== browsing) {
+                return { ...applicant, canAct: false, waitingOn: label };
+            }
+
+            if (isSuper) return { ...applicant, canAct: true, waitingOn: '' };
+            if (!actingTier) return { ...applicant, canAct: false, waitingOn: label };
+
+            const canAct = effective === actingTier;
+
+            return {
+                ...applicant,
+                canAct,
+                // Named so the row can say why it is read-only rather than just
+                // omitting the buttons and leaving it unexplained.
+                waitingOn: canAct ? '' : label
+            };
+        }));
+    }
+
+    async getDirectory(filters = {}, actor = {}) {
+        const scope = await actorScope(actor);
+
+        /*
+         * A tier may only drill DOWN.
+         *
+         * A district admin asking for `level=state` would otherwise be handed a
+         * row per state — every one outside their patch, with counts drawn from
+         * applications they cannot open. The level is clamped to what sits
+         * beneath them and the parent region is forced, so the two together can
+         * only ever describe their own ground. Unchanged for a super admin: all
+         * three levels stay available and nothing is forced.
+         */
+        const asked = String(filters.level || '').toLowerCase();
+        const allowedLevels = scope.role === 'district_admin' ? ['block']
+            : scope.role === 'state_admin' ? ['district', 'block']
+                : ['state', 'district', 'block'];
+
+        const level = allowedLevels.includes(asked) ? asked : allowedLevels[0];
+
+        if (scope.role === 'state_admin') filters = { ...filters, state: scope.state };
+        if (scope.role === 'district_admin') filters = { ...filters, state: scope.state, district: scope.district };
 
         const parentState = String(filters.state || '').trim();
         const parentDistrict = String(filters.district || '').trim();
@@ -566,8 +890,23 @@ class SuperAdminService {
             rowFor(name, { state: admin.state, district: admin.district }).admins += 1;
         });
 
+        /*
+         * Staffed, or holding work. Not "staffed" alone.
+         *
+         * This filter was `r.admins > 0`, which hid the single most important
+         * row on the screen: a block with applications and NO admin. Those files
+         * are the ones that escalate — `effectiveTier` hands them to the district
+         * precisely because nobody below is there to take them — so the region
+         * that most needs opening was the one region the drill-down would not
+         * show. The comment above the seeding says the directory exists so that
+         * "the regions worth chasing" are visible; this is the other half of it.
+         *
+         * Regions with neither an admin nor an application are still dropped:
+         * every name in the reference list would otherwise appear, and 6,966
+         * empty blocks is not a work queue.
+         */
         const regions = [...rows.values()]
-            .filter(r => r.admins > 0)
+            .filter(r => r.admins > 0 || r.applications > 0)
             .sort((a, b) =>
                 (b.pending - a.pending) || String(a.name).localeCompare(String(b.name)));
 
@@ -622,6 +961,26 @@ class SuperAdminService {
         if (!MANAGEABLE_ROLES.includes(role)) {
             throw ApiError.badRequest(`Role must be one of: ${MANAGEABLE_ROLES.join(', ')}`);
         }
+
+        /*
+         * The escalation check, and the one that matters most in this file.
+         *
+         * Without it a district admin could POST `role: 'state_admin'` and mint
+         * an account with authority over their own — the API is reachable with a
+         * token and curl, so a role dropdown that only offers block admin proves
+         * nothing. The region is then FORCED to the actor's own patch rather
+         * than validated against it: validation rejects a bad value, forcing
+         * makes a bad value impossible to express.
+         */
+        const scope = await actorScope(actor);
+        const allowed = MANAGEABLE_BY[scope.role] || [];
+
+        if (!allowed.includes(role)) {
+            throw ApiError.forbidden(`A ${scope.role.replace('_', ' ')} cannot create a ${role.replace('_', ' ')}`);
+        }
+        if (scope.role === 'state_admin') payload = { ...payload, state: scope.state };
+        if (scope.role === 'district_admin') payload = { ...payload, state: scope.state, district: scope.district };
+
         if (!fullName) throw ApiError.badRequest('Full name is required');
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw ApiError.badRequest('A valid email is required');
         if (password.length < 8) throw ApiError.badRequest('Password must be at least 8 characters');
@@ -650,6 +1009,18 @@ class SuperAdminService {
             active: true,
             createdAt: now,
             updatedAt: now,
+            /*
+             * Still `super_admin_ui` whichever tier created it.
+             *
+             * This stamp is the discriminator that separates real staffing from
+             * the pre-seeded scaffold — see the admin-first region architecture
+             * note in CLAUDE.md. Coverage, the directory and the applicant
+             * dropdowns all test it, and inventing a second value here would
+             * make an account created by a district admin invisible to every one
+             * of them: a block staffed through this screen would not open for
+             * registration. WHO created it is recorded in the audit trail, which
+             * is where that question belongs.
+             */
             createdVia: 'super_admin_ui'
         });
 
@@ -798,6 +1169,12 @@ class SuperAdminService {
             throw ApiError.forbidden('Super admin accounts cannot be edited from the app');
         }
 
+        // Beneath this actor, and inside their patch. Checked against the STORED
+        // record rather than the payload: a district admin must not be able to
+        // edit a block admin in another district, whatever they send.
+        const scope = await actorScope(actor);
+        assertManageable(existing, scope);
+
         const role = payload.role !== undefined
             ? String(payload.role || '').toLowerCase()
             : existing.role;
@@ -925,9 +1302,14 @@ class SuperAdminService {
      * applications are about to change hands and which tier inherits them,
      * before they press the button rather than after.
      */
-    async previewAdminRemoval(adminId) {
+    async previewAdminRemoval(adminId, actor = {}) {
         const admin = await adminRepository.findById(adminId);
         if (!admin) throw ApiError.notFound('Admin not found');
+
+        // The preview reports one region's queue and staffing, so it is gated
+        // exactly as the delete it precedes: reading it for another district is
+        // reading that district's workload.
+        assertManageable(admin, await actorScope(actor));
 
         const impact = await this.orphanImpact(admin);
         const children = await this.countChildren(admin);
@@ -994,6 +1376,9 @@ class SuperAdminService {
         const found = await adminRepository.findById(adminId);
         if (!found) throw ApiError.notFound('Admin not found');
 
+        // Same rule as the edit path, on the same stored record.
+        assertManageable(found, await actorScope(actor));
+
         if (found.role === 'super_admin') {
             throw ApiError.forbidden('Super admin accounts cannot be deleted from the app');
         }
@@ -1055,10 +1440,21 @@ class SuperAdminService {
      * adding a second admin to an existing district does not depend on typing
      * the name identically by hand, which would split one region into two.
      */
-    async suggestRegions(filters = {}) {
+    async suggestRegions(filters = {}, actor = {}) {
+        /*
+         * Suggestions inside the actor's patch only.
+         *
+         * A district admin naming a new block should be offered the blocks of
+         * their own district; offering them every block in India is both noise
+         * and a small leak of another region's structure. Forced rather than
+         * defaulted, for the same reason as `createAdmin`: the parameters arrive
+         * from a query string.
+         */
+        const scope = await actorScope(actor);
+
         return adminRegions.suggestRegions({
-            state: filters.state,
-            district: filters.district
+            state: scope.role === 'super_admin' ? filters.state : scope.state,
+            district: scope.role === 'district_admin' ? scope.district : filters.district
         });
     }
 }

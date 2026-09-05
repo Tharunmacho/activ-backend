@@ -95,7 +95,23 @@ const getGallery = asyncHandler(async(req, res) => {
     const isAdmin = req.user && req.user.role === 'super_admin';
     const includeHidden = isAdmin && String(req.query.includeHidden || '') === 'true';
 
-    res.json(ApiResponse.success(await cmsService.listGallery({ includeHidden })));
+    // `?home=true` is the landing page's strip: only what an editor flagged for
+    // it, newest first, without the long fields no card on that page reads.
+    const homeOnly = String(req.query.home || '') === 'true';
+    const limit = Number(req.query.limit) || 0;
+
+    res.json(ApiResponse.success(await cmsService.listGallery({ includeHidden, homeOnly, limit })));
+});
+
+/**
+ * One gallery item, for the page a poster links to.
+ *
+ * Public, because that page is public. A hidden item answers 404 to everyone
+ * but an admin, exactly as it is absent from the public list.
+ */
+const getGalleryItem = asyncHandler(async(req, res) => {
+    const isAdmin = req.user && req.user.role === 'super_admin';
+    res.json(ApiResponse.success(await cmsService.getGalleryItem(req.params.id, { includeHidden: !!isAdmin })));
 });
 
 const addGalleryItem = asyncHandler(async(req, res) => {
@@ -170,6 +186,17 @@ const getEvents = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await cmsService.listEvents({ includeDrafts })));
 });
 
+/**
+ * One event, for its own public page.
+ *
+ * Public, because that page is public. A draft or a members-only event is a
+ * 404 to everyone but a super admin — exactly as it is absent from the list.
+ */
+const getEvent = asyncHandler(async(req, res) => {
+    const includeDrafts = !!(req.user && req.user.role === 'super_admin');
+    res.json(ApiResponse.success(await cmsService.listEvent(req.params.id, { includeDrafts })));
+});
+
 const createEvent = asyncHandler(async(req, res) => {
     const payload = { ...req.body };
     if (req.file && req.file.filename) payload.imageUrl = `/uploads/${req.file.filename}`;
@@ -202,9 +229,9 @@ module.exports = {
     getGallerySettings, updateGallerySettings,
     getHome, updateHome, uploadMedia,
     getAbout, updateAbout,
-    getGallery, addGalleryItem, updateGalleryItem, deleteGalleryItem,
+    getGallery, getGalleryItem, addGalleryItem, updateGalleryItem, deleteGalleryItem,
     getContactInfo, updateContactInfo,
     createContactMessage, listContactMessages, setMessageStatus, deleteContactMessage,
-    getEvents, createEvent, updateEvent, deleteEvent,
+    getEvents, getEvent, createEvent, updateEvent, deleteEvent,
     getOverview,
 };

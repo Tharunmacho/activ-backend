@@ -2,7 +2,9 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const PaymentOrder = require('./paymentorder.model');
 const MemberDetails = require('../members/memberdetails.model');
-const { getPlan } = require('./membershipPlans');
+// The price authority, and it is the database. The frozen table this used to
+// read is now only a seed and a fallback — see `membershipplan.service`.
+const membershipPlanService = require('../members/membershipplan.service');
 const { isPaidStatus } = require('../common/memberContext');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
@@ -89,7 +91,23 @@ class PaymentOrderService {
             throw ApiError.unauthorized('No member on this token');
         }
 
-        const plan = getPlan(planId);
+        /*
+         * THE PRICE COMES FROM THE DATABASE, which is where the Super Admin
+         * edits it.
+         *
+         * This used to read a frozen table in `payment/membershipPlans.js`, so
+         * the fee was a deploy away from being changeable. Resolving it here
+         * means the amount ADVERTISED and the amount CHARGED are the same
+         * lookup — a version of this that kept its own copy would let the
+         * membership screen show ₹5,000 while the card was debited ₹2,000, and
+         * nothing would report it.
+         *
+         * Still server-side, and still by key: the client sends `planId` and
+         * never an amount, so nothing a client sends can change what is taken.
+         * The service falls back to the built-in table when the collection has
+         * no such key, so an unseeded database cannot take checkout down.
+         */
+        const plan = await membershipPlanService.getPlanForPayment(planId);
         if (!plan) {
             throw ApiError.badRequest(`Unknown plan '${planId}'`);
         }

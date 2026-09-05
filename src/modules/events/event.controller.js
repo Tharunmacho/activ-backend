@@ -58,13 +58,56 @@ const deleteEvent = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data, 'Event deleted'));
 });
 
+/**
+ * Who this targeting would actually reach. Super admin only — see the route.
+ *
+ * A GET with the target list in the query string so the editor can call it on
+ * every change without a body: it is a preview, not a write.
+ */
+const reach = asyncHandler(async(req, res) => {
+    const data = await eventService.reach({
+        targets: req.query.targets,
+        audience: req.query.audience
+    });
+    res.json(ApiResponse.success(data));
+});
+
 const register = asyncHandler(async(req, res) => {
     const context = await resolveMemberContext(req);
     const data = await eventService.register(req.params.id, context, req.body || {});
-    res.status(data.alreadyRegistered ? 200 : 201).json(
-        ApiResponse.success(data, data.alreadyRegistered ? 'You are already registered' :
-            data.status === 'waitlist' ? 'Added to the waiting list' : 'Registered')
-    );
+
+    /*
+     * The message has to say what actually happened, and there are now four
+     * outcomes rather than three. "Registered" on a seat that is still awaiting
+     * payment is the one wording that could cost a member their place: they
+     * would close the tab believing they were done.
+     */
+    const awaitingPayment = data.payment && data.payment.status === 'pending';
+
+    const message = data.alreadyRegistered
+        ? 'You are already registered'
+        : awaitingPayment
+            ? 'Seat held — complete the payment to confirm it'
+            : data.status === 'waitlist'
+                ? 'Added to the waiting list'
+                : 'Registered';
+
+    res.status(data.alreadyRegistered ? 200 : 201).json(ApiResponse.success(data, message));
+});
+
+/**
+ * Settle the fee on a held seat.
+ *
+ * The dummy gateway's completion step. Its own route because paying is its own
+ * action — see `EventService.payRegistration`.
+ */
+const payRegistration = asyncHandler(async(req, res) => {
+    const context = await resolveMemberContext(req);
+    const data = await eventService.payRegistration(req.params.id, context, req.body || {});
+    res.json(ApiResponse.success(
+        data,
+        data.alreadyPaid ? 'This seat is already paid for' : 'Payment received — your seat is confirmed'
+    ));
 });
 
 const cancelRegistration = asyncHandler(async(req, res) => {
@@ -85,7 +128,9 @@ module.exports = {
     updateEvent,
     setStatus,
     deleteEvent,
+    reach,
     register,
+    payRegistration,
     cancelRegistration,
     listRegistrations,
     myRegistrations

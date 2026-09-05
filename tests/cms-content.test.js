@@ -123,6 +123,165 @@ const testSanitiser = () => {
 
 // ============================================================ unit: cleanup
 
+// ================================================== unit: onboarding visibility
+
+/**
+ * The rule deciding which events reach the public site, and — the point of
+ * these — that its two shapes agree.
+ *
+ * `onboardingClause` is handed to Mongo and `isOnboardingContent` is evaluated
+ * in memory, and they gate the same content on two different endpoints: the
+ * events grid and the single-event page. A disagreement between them is not a
+ * cosmetic bug, it is an event the grid withholds and a URL that serves it, so
+ * every case below is asserted against BOTH and the clause is evaluated by a
+ * small matcher rather than eyeballed.
+ */
+const testOnboardingVisibility = () => {
+    section('Onboarding event visibility (unit)');
+
+    const {
+        onboardingClause, isOnboardingContent, isUntargeted
+    } = require('../src/modules/events/onboardingVisibility');
+
+    /**
+     * Enough of a Mongo query evaluator for the operators this clause uses.
+     *
+     * Written rather than asserted against a live database because the whole
+     * value of the check is that it runs anywhere, every time — a rule about
+     * what becomes public should not be verified only when someone remembers to
+     * start mongod. `$or`, `$and`, `$size`, `$exists` and equality are the
+     * complete set the clause is built from; anything else throws rather than
+     * quietly returning a pass.
+     */
+    const matches = (clause, doc) => {
+        if (clause.$or) return clause.$or.some(sub => matches(sub, doc));
+        if (clause.$and) return clause.$and.every(sub => matches(sub, doc));
+
+        return Object.entries(clause).every(([field, expected]) => {
+            const actual = doc[field];
+
+            if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+                if (expected.$size !== undefined) {
+                    return Array.isArray(actual) && actual.length === expected.$size;
+                }
+                if (expected.$exists !== undefined) {
+                    return (actual !== undefined) === expected.$exists;
+                }
+                if (expected.$or) return matches(expected, doc);
+                throw new Error(`unsupported operator in test matcher: ${JSON.stringify(expected)}`);
+            }
+
+            if (expected === null) return actual === null;
+            return actual === expected;
+        });
+    };
+
+    const clause = onboardingClause();
+
+    /** Both shapes, on one document, and they must say the same thing. */
+    const agree = (label, doc, expected) => {
+        const viaClause = matches(clause, doc);
+        const viaPredicate = isOnboardingContent(doc);
+
+        check(`${label} — listed: ${expected}`, viaClause === expected && viaPredicate === expected,
+            `grid ${viaClause}, detail page ${viaPredicate}`);
+
+        // Stated separately from the expectation above so a drift between the
+        // two shapes is reported as a drift, not as one of them being wrong.
+        check(`${label} — grid and detail page agree`, viaClause === viaPredicate);
+    };
+
+    // ---- the default path: what the CMS posts
+    agree('a CMS event aimed at everyone',
+        { channel: 'public', targets: [], state: '', district: '', block: '' }, true);
+
+    /*
+     * An unmarked row is NOT published, and this is the case that made the two
+     * shapes disagree when they were written separately.
+     *
+     * `{ channel: 'public' }` does not match a document with no `channel` key,
+     * so the grid withheld it — the fail-closed answer the rule intends. The
+     * in-memory predicate read the schema's default into the gap and admitted
+     * it, which meant the grid hid a row that `/events/:id` served to anyone
+     * with the link. No production row is in this state (Mongoose stamps the
+     * default; `scripts/backfill-event-channel.js` stamped the rest), which is
+     * exactly why nothing but a test was going to find it.
+     */
+    agree('an event carrying no channel at all', {}, false);
+
+    // ---- the association's own programme
+    agree('a super admin event with no opt-in',
+        { channel: 'members', targets: [], state: '', district: '', block: '' }, false);
+
+    agree('a super admin event aimed at a block, no opt-in',
+        {
+            channel: 'members',
+            targets: [{ state: 'Tamil Nadu', district: 'Sivaganga', block: 'Kalayarkoil' }],
+            state: 'Tamil Nadu', district: 'Sivaganga', block: 'Kalayarkoil'
+        }, false);
+
+    // ---- the opt-in, which is the whole feature
+    agree('the same event, opted in',
+        {
+            channel: 'members',
+            showOnOnboarding: true,
+            targets: [{ state: 'Tamil Nadu', district: 'Sivaganga', block: 'Kalayarkoil' }],
+            state: 'Tamil Nadu', district: 'Sivaganga', block: 'Kalayarkoil'
+        }, true);
+
+    agree('an opt-in aimed at several regions keeps every one of them',
+        {
+            channel: 'members',
+            showOnOnboarding: true,
+            targets: [
+                { state: 'Tamil Nadu', district: 'Ariyalur', block: 'Andimadam' },
+                { state: 'Kerala', district: '', block: '' }
+            ],
+            state: 'Tamil Nadu', district: 'Ariyalur', block: 'Andimadam'
+        }, true);
+
+    // ---- the case the mirror alone gets wrong
+    agree('a CMS event whose mirror is empty but whose target list is not',
+        {
+            channel: 'public',
+            targets: [{ state: 'Tamil Nadu', district: '', block: '' }],
+            state: '', district: '', block: ''
+        }, false);
+
+    agree('a CMS event whose list is empty but whose mirror is not',
+        { channel: 'public', targets: [], state: 'Tamil Nadu', district: '', block: '' }, false);
+
+    // ---- failing closed
+    agree('an unrecognised channel is not published',
+        { channel: 'newsletter', targets: [] }, false);
+
+    check('`showOnOnboarding` must be the boolean, not any truthy value',
+        isOnboardingContent({ channel: 'members', showOnOnboarding: 'yes' }) === false);
+
+    // ---- "everyone in the association", stored beside the regions
+    agree('a CMS event set to everyone, with regions still remembered',
+        {
+            channel: 'public',
+            reachEveryone: true,
+            targets: [{ state: 'Tamil Nadu', district: 'Ariyalur', block: '' }],
+            state: 'Tamil Nadu', district: 'Ariyalur', block: ''
+        }, true);
+
+    check('`reachEveryone` makes a document untargeted even with a region list',
+        isUntargeted({ reachEveryone: true, targets: [{ state: 'Kerala' }] }) === true);
+
+    check('...and must be the boolean, not any truthy value',
+        isUntargeted({ reachEveryone: 'yes', targets: [{ state: 'Kerala' }] }) === false);
+
+    // ---- the helper the rest of it is built on
+    check('a document with no region fields at all counts as untargeted',
+        isUntargeted({}) === true);
+    check('whitespace is not a region',
+        isUntargeted({ state: '   ', targets: [] }) === true);
+    check('a target list makes a document targeted even with empty mirrors',
+        isUntargeted({ targets: [{ state: 'Kerala' }] }) === false);
+};
+
 const testMediaHelpers = () => {
     section('Media cleanup (unit)');
 
@@ -422,6 +581,7 @@ const main = async() => {
     console.log('='.repeat(70));
 
     testSanitiser();
+    testOnboardingVisibility();
     testMediaHelpers();
 
     const reachable = (await call('GET', '/cms/site')).status === 200;
