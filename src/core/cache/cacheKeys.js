@@ -27,6 +27,34 @@ const CACHE_KEYS = {
      */
     ADMIN_DASHBOARD: (tier, region) => `admin:dashboard:${tier}:${String(region || '').toLowerCase()}`,
 
+    /**
+     * ======================================================================
+     * THESE TWO LIVE UNDER `admin:dashboard:` ON PURPOSE
+     * ======================================================================
+     *
+     * `delPattern('admin:dashboard:*')` is what every approve and reject calls
+     * (see `invalidateReviewCaches`), and the memory cache implements it as
+     * `key.includes('admin:dashboard:')`. Anything under that prefix is
+     * therefore cleared by a decision for free.
+     *
+     * Naming them `admin:directory:*` instead would have compiled, cached and
+     * quietly served an admin the region counts from before their own approval
+     * — the exact staleness the dashboard TTL was given an invalidation to
+     * avoid. If either of these is ever renamed out of this prefix, it needs
+     * its own line in `invalidateReviewCaches`.
+     *
+     * The directory is keyed by the ACTOR'S FORCED SCOPE as well as the level:
+     * `getDirectory` narrows a tier admin to their own patch before it queries,
+     * so two tiers asking for `level=block` are asking different questions and
+     * must not share an answer.
+     */
+    ADMIN_DIRECTORY: (role, level, state, district) =>
+        `admin:dashboard:directory:${role}:${level}:${String(state || '').toLowerCase()}`
+        + `:${String(district || '').toLowerCase()}`,
+
+    /** The super admin's platform-wide counters. One answer for everybody. */
+    ADMIN_OVERVIEW: 'admin:dashboard:overview',
+
     // Notifications
     NOTIFICATIONS: (userId) => `notifications:${userId}`,
 

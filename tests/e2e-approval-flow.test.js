@@ -1,6 +1,12 @@
 /**
- * End-to-end test of the geofenced 3-tier approval workflow against a running
+ * End-to-end test of the geofenced PARALLEL approval workflow against a running
  * server and a real MongoDB.
+ *
+ * An application is submitted to the Block, District and State admin of the
+ * applicant's own region at the same time, and the first of them to decide
+ * decides it for all three. What this suite asserts is therefore the pair:
+ * every tier that covers the applicant CAN see and act on the file, and no
+ * other region's admin can see it at all.
  *
  *   BASE_URL=http://localhost:5055 node tests/e2e-approval-flow.test.js
  *
@@ -164,7 +170,7 @@ const bucketIds = (payload, bucket) =>
             state: REGION.state,
             district: REGION.district,
             block: REGION.block,
-            status: 'Pending-Block',
+            status: 'Pending',
             reviewedBy: {},
             data: {
                 personalDetails: {
@@ -207,7 +213,7 @@ const bucketIds = (payload, bucket) =>
         });
         created.applications.push(appRes.insertedId);
         const appId = appRes.insertedId.toString();
-        console.log(`  seeded application ${appId} at Pending-Block`);
+        console.log(`  seeded application ${appId} as Pending`);
 
         const tokens = {
             block: await login(emails.block),
@@ -233,8 +239,18 @@ const bucketIds = (payload, bucket) =>
         });
 
         // ---------------------------------------------------------------
-        section('Stage 1: application starts in the Block queue only');
+        section('One submission reaches all three tiers at once');
         // ---------------------------------------------------------------
+        /*
+         * The assertion this replaces was the opposite one.
+         *
+         * It checked that the district and state queues were EMPTY until the
+         * block had approved — the defining property of the sequential
+         * workflow. The association asked for the three tiers to review in
+         * parallel instead, so the same three queues are now checked for the
+         * presence of the file rather than its absence, and the geofence
+         * section below is what carries the isolation guarantee.
+         */
         let blockDash = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
         let districtDash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
         let stateDash = (await request('GET', '/admin/state/dashboard', { token: tokens.state })).body?.data;
@@ -243,17 +259,18 @@ const bucketIds = (payload, bucket) =>
             assert.ok(bucketIds(blockDash, 'pending').includes(appId), 'not in block pending');
         });
 
-        await test('District pending queue is EMPTY before block approval', () => {
-            assert.ok(!bucketIds(districtDash, 'pending').includes(appId),
-                'application reached the district queue before the block approved it');
+        await test('appears in District pending with no block approval', () => {
+            assert.ok(bucketIds(districtDash, 'pending').includes(appId),
+                'the district admin cannot see an applicant from their own district');
         });
 
-        await test('State pending queue is EMPTY before block approval', () => {
-            assert.ok(!bucketIds(stateDash, 'pending').includes(appId));
+        await test('appears in State pending with no block or district approval', () => {
+            assert.ok(bucketIds(stateDash, 'pending').includes(appId),
+                'the state admin cannot see an applicant from their own state');
         });
 
         // ---------------------------------------------------------------
-        section('Geofence isolation');
+        section('Geofence isolation — the only thing narrowing who sees a file');
         // ---------------------------------------------------------------
         await test('an admin from another block sees none of this block\'s applications', async() => {
             const other = (await request('GET', '/admin/block/dashboard', { token: tokens.otherBlock })).body?.data;
@@ -271,29 +288,22 @@ const bucketIds = (payload, bucket) =>
 
         await test('the refused approve did not change the status', async() => {
             const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
-            assert.strictEqual(doc.status, 'Pending-Block');
+            assert.strictEqual(doc.status, 'Pending');
         });
 
         // ---------------------------------------------------------------
-        section('Out-of-order transitions are refused');
+        section('Role gates on the named endpoints');
         // ---------------------------------------------------------------
-        await test('district cannot approve before the block has', async() => {
-            const res = await request('POST', `/applications/${appId}/district-review`, {
-                token: tokens.district,
-                body: { action: 'approve' }
-            });
-            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
-        });
-
-        await test('state cannot approve before the district has', async() => {
-            const res = await request('POST', `/applications/${appId}/state-review`, {
-                token: tokens.state,
-                body: { action: 'approve' }
-            });
-            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
-        });
-
-        await test('a block admin cannot call the district endpoint at all (role gate)', async() => {
+        /*
+         * What is still refused, and what no longer is.
+         *
+         * "District cannot approve before the block has" was the out-of-order
+         * rule, and it is gone with the order. The ROLE gate is not: the three
+         * named endpoints still belong to their own tier, so a block admin
+         * calling `/district-review` is still a 403. That is what stops an
+         * approval being recorded under a tier that did not make it.
+         */
+        await test('a block admin cannot call the district endpoint (role gate)', async() => {
             const res = await request('POST', `/applications/${appId}/district-review`, {
                 token: tokens.block,
                 body: { action: 'approve' }
@@ -301,92 +311,109 @@ const bucketIds = (payload, bucket) =>
             assert.strictEqual(res.status, 403, `expected 403, got ${res.status}`);
         });
 
-        // ---------------------------------------------------------------
-        section('Stage 1 -> 2: Block approves');
-        // ---------------------------------------------------------------
-        await test('block approve returns 200 and forwards to district', async() => {
-            const res = await request('POST', `/applications/${appId}/block-review`, {
-                token: tokens.block,
+        await test('the district CAN record its verdict with no block approval in front of it', async() => {
+            const res = await request('POST', `/applications/${appId}/district-review`, {
+                token: tokens.district,
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
-            assert.strictEqual(res.body?.data?.status, 'Pending-District');
+            // An ENDORSEMENT. The applicant is not a member: only the State's
+            // approval writes the outcome.
+            assert.strictEqual(res.body?.data?.status, 'Pending',
+                "a district approval must not report the application as Approved");
+            assert.strictEqual(res.body?.data?.decidesOutcome, false);
         });
 
-        await test('blockApprovedAt was persisted', async() => {
+        // ---------------------------------------------------------------
+        section('Each tier keeps its own verdict');
+        // ---------------------------------------------------------------
+        await test("the district's verdict carries the block, and stops there", async() => {
             const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
-            assert.strictEqual(doc.status, 'Pending-District');
-            assert.ok(doc.blockApprovedAt instanceof Date, 'blockApprovedAt not stored as a Date');
+            assert.strictEqual(doc.status, 'Pending', 'an endorsement must not write the outcome');
+
+            assert.strictEqual(doc.reviews?.district?.decision, 'approved');
+            assert.strictEqual(doc.reviews?.district?.adminType, 'DistrictAdmin');
+            assert.notStrictEqual(doc.reviews?.district?.auto, true, "the district's own decision is not 'auto'");
+            assert.ok(doc.reviews?.district?.decidedAt instanceof Date, 'decidedAt not stored as a Date');
+
+            // Carried, and HONESTLY carried: the block's slot names the admin
+            // who really signed and is flagged as not the block's own act.
+            assert.strictEqual(doc.reviews?.block?.decision, 'approved');
+            assert.strictEqual(doc.reviews?.block?.adminType, 'DistrictAdmin');
+            assert.strictEqual(doc.reviews?.block?.auto, true);
+
+            // Nothing is carried upwards.
+            assert.ok(!doc.reviews?.state?.decidedAt, 'the state is above the district and must not be touched');
+            assert.ok(!doc.approvedBy?.adminType, 'approvedBy belongs to the outcome, which has not been written');
+        });
+
+        await test('no member profile exists yet — the State has not approved', async() => {
+            const memberDetails = await db.collection(COL.details).findOne({ userId: applicantUserId });
+            assert.ok(!memberDetails,
+                'a district endorsement created a member profile; only the State may enrol');
         });
 
         blockDash = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
         districtDash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
         stateDash = (await request('GET', '/admin/state/dashboard', { token: tokens.state })).body?.data;
 
-        await test('now in District pending', () => {
-            assert.ok(bucketIds(districtDash, 'pending').includes(appId), 'not in district pending');
+        await test('the district approving moves the block with it, but not the state', () => {
+            // The district acted, so the district's own queue shows it approved.
+            assert.ok(bucketIds(districtDash, 'approved').includes(appId), 'not in district approved');
+            assert.ok(!bucketIds(districtDash, 'pending').includes(appId), 'still in district pending');
+
+            // The block is below it and is carried — it must not be left holding
+            // a decision that can no longer change anything.
+            assert.ok(bucketIds(blockDash, 'approved').includes(appId), 'the block was not carried');
+            assert.ok(!bucketIds(blockDash, 'pending').includes(appId), 'the block is still being asked');
+
+            // The state is ABOVE it and keeps its own decision.
+            assert.ok(bucketIds(stateDash, 'pending').includes(appId),
+                "the state's queue lost an applicant it has never reviewed");
         });
 
-        await test('left the Block pending queue and is Block-approved', () => {
-            assert.ok(!bucketIds(blockDash, 'pending').includes(appId), 'still in block pending');
-            assert.ok(bucketIds(blockDash, 'approved').includes(appId), 'not in block approved');
-        });
-
-        await test('NOT double-counted as district-approved while district-pending', () => {
-            assert.ok(!bucketIds(districtDash, 'approved').includes(appId),
-                'appears in both district pending and district approved');
-        });
-
-        await test('State pending queue is still EMPTY', () => {
-            assert.ok(!bucketIds(stateDash, 'pending').includes(appId));
-        });
-
-        // ---------------------------------------------------------------
-        section('Stage 2 -> 3: District approves');
-        // ---------------------------------------------------------------
-        await test('district approve returns 200 and forwards to state', async() => {
+        await test('the district cannot record a second verdict', async() => {
             const res = await request('POST', `/applications/${appId}/district-review`, {
                 token: tokens.district,
                 body: { action: 'approve' }
             });
-            assert.strictEqual(res.status, 200, JSON.stringify(res.body));
-            assert.strictEqual(res.body?.data?.status, 'Pending-State');
+            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
         });
 
-        await test('districtApprovedAt was persisted', async() => {
-            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
-            assert.strictEqual(doc.status, 'Pending-State');
-            assert.ok(doc.districtApprovedAt instanceof Date);
-        });
-
-        districtDash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
-        stateDash = (await request('GET', '/admin/state/dashboard', { token: tokens.state })).body?.data;
-
-        await test('now in State pending', () => {
-            assert.ok(bucketIds(stateDash, 'pending').includes(appId), 'not in state pending');
-        });
-
-        await test('left the District pending queue and is District-approved', () => {
-            assert.ok(!bucketIds(districtDash, 'pending').includes(appId));
-            assert.ok(bucketIds(districtDash, 'approved').includes(appId));
+        await test('the carried block is no longer offered a decision', async() => {
+            // The screen this rule came from: a block admin looking at a live
+            // Approve / Reject pair on a file already settled above them.
+            const res = await request('POST', `/applications/${appId}/block-review`, {
+                token: tokens.block,
+                body: { action: 'approve' }
+            });
+            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
+            assert.ok(/already/i.test(res.body?.message || ''),
+                `expected a message naming what happened, got: ${res.body?.message}`);
         });
 
         // ---------------------------------------------------------------
-        section('Stage 3: State grants final approval and the member is created');
+        section("The State's approval is what enrols the member");
         // ---------------------------------------------------------------
-        await test('state approve returns 200 and reports Approved', async() => {
+        await test('the state approval writes the outcome and creates the member', async() => {
             const res = await request('POST', `/applications/${appId}/state-review`, {
                 token: tokens.state,
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
             assert.strictEqual(res.body?.data?.status, 'Approved');
-        });
+            assert.strictEqual(res.body?.data?.decidesOutcome, true);
 
-        await test('stateApprovedAt was persisted and status is Approved', async() => {
             const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
-            assert.ok(doc.stateApprovedAt instanceof Date);
+            assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin');
+            assert.ok(doc.approvedBy?.approvedAt instanceof Date, 'approvedAt not stored as a Date');
+            assert.ok(doc.stateApprovedAt instanceof Date,
+                'stateApprovedAt is what the member screens read as the approval date');
+            // All three verdicts survived the approval's transaction.
+            assert.strictEqual(doc.reviews?.block?.decision, 'approved');
+            assert.strictEqual(doc.reviews?.district?.decision, 'approved');
+            assert.strictEqual(doc.reviews?.state?.decision, 'approved');
         });
 
         await test('member profile created across all 4 collections', async() => {
@@ -419,20 +446,44 @@ const bucketIds = (payload, bucket) =>
             assert.strictEqual(memberDetails.state, REGION.state);
         });
 
-        await test('terminal state: re-approving is refused', async() => {
+        await test('a tier that has already spoken is told plainly, not asked twice', async() => {
+            const res = await request('POST', `/applications/${appId}/block-review`, {
+                token: tokens.block,
+                body: { action: 'approve' }
+            });
+            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
+            assert.ok(/already/i.test(res.body?.message || ''),
+                `expected a message naming what happened, got: ${res.body?.message}`);
+        });
+
+        await test('terminal outcome: the state admin cannot re-approve', async() => {
+            // Two member profiles for one applicant is the failure this stops,
+            // and the unique email index would make the second unrecoverable.
             const res = await request('POST', `/applications/${appId}/state-review`, {
                 token: tokens.state,
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
+            assert.ok(/already been approved/i.test(res.body?.message || ''),
+                `expected a message naming what happened, got: ${res.body?.message}`);
+        });
+
+        await test('nor can the state REJECT somebody it has already enrolled', async() => {
+            const res = await request('POST', `/applications/${appId}/state-review`, {
+                token: tokens.state,
+                body: { action: 'reject', rejectionReason: 'should be refused' }
+            });
+            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
+
+            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
+            assert.strictEqual(doc.status, 'Approved', 'a refused rejection changed the outcome');
         });
 
         // ---------------------------------------------------------------
-        section('Final approval is atomic');
+        section('Approval is atomic');
         // ---------------------------------------------------------------
-        // Drive an application to Pending-State, then make member creation fail
-        // and assert the application is NOT left stranded in the terminal
-        // 'Approved' state with no member record.
+        // Make member creation fail and assert the application is NOT left
+        // stranded in the terminal 'Approved' state with no member record.
         //
         // The failure is forced with an out-of-enum `turnoverRange`, which makes
         // MemberFinancialInfo.save() throw partway through the profile write.
@@ -451,9 +502,7 @@ const bucketIds = (payload, bucket) =>
             state: REGION.state,
             district: REGION.district,
             block: REGION.block,
-            status: 'Pending-State',
-            blockApprovedAt: new Date(),
-            districtApprovedAt: new Date(),
+            status: 'Pending',
             reviewedBy: {},
             data: {
                 personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state },
@@ -485,8 +534,8 @@ const bucketIds = (payload, bucket) =>
 
         await test('a failed approval leaves the application retryable, not stranded', async() => {
             const doc = await db.collection('applications').findOne({ _id: atomicRes.insertedId });
-            assert.strictEqual(doc.status, 'Pending-State',
-                `expected the application to stay at Pending-State, found '${doc.status}' with no member profile`);
+            assert.strictEqual(doc.status, 'Pending',
+                `expected the application to stay Pending, found '${doc.status}' with no member profile`);
             assert.ok(!doc.stateApprovedAt, 'stateApprovedAt was set despite the failure');
         });
 
@@ -508,7 +557,7 @@ const bucketIds = (payload, bucket) =>
         });
 
         // ---------------------------------------------------------------
-        section('Rejection path halts progression');
+        section('A lower tier objects; only the State closes the file');
         // ---------------------------------------------------------------
         const rejectAppRes = await db.collection('applications').insertOne({
             userId: applicantUserId,
@@ -518,7 +567,7 @@ const bucketIds = (payload, bucket) =>
             state: REGION.state,
             district: REGION.district,
             block: REGION.block,
-            status: 'Pending-Block',
+            status: 'Pending',
             reviewedBy: {},
             data: { personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state } },
             notes: [],
@@ -529,43 +578,69 @@ const bucketIds = (payload, bucket) =>
         created.applications.push(rejectAppRes.insertedId);
         const rejectId = rejectAppRes.insertedId.toString();
 
-        await test('block reject returns 200', async() => {
+        await test("a block objection is recorded and does NOT close the application", async() => {
             const res = await request('POST', `/applications/${rejectId}/block-review`, {
                 token: tokens.block,
                 body: { action: 'reject', rejectionReason: 'E2E rejection reason' }
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
-            assert.strictEqual(res.body?.data?.status, 'Rejected');
-        });
+            assert.strictEqual(res.body?.data?.status, 'Pending',
+                'a block rejection ended the application; only the State decides it');
+            assert.strictEqual(res.body?.data?.decidesOutcome, false);
 
-        await test('rejectedBy.adminType and rejectedAt persisted', async() => {
             const doc = await db.collection('applications').findOne({ _id: rejectAppRes.insertedId });
-            assert.strictEqual(doc.status, 'Rejected');
-            assert.strictEqual(doc.rejectedBy?.adminType, 'BlockAdmin');
-            assert.ok(doc.rejectedBy?.rejectedAt instanceof Date,
-                'rejectedAt missing — it must be nested inside rejectedBy');
-            assert.strictEqual(doc.rejectionReason, 'E2E rejection reason');
+            assert.strictEqual(doc.status, 'Pending');
+            assert.strictEqual(doc.reviews?.block?.decision, 'rejected');
+            assert.strictEqual(doc.reviews?.block?.reason, 'E2E rejection reason');
+            assert.ok(doc.reviews?.block?.decidedAt instanceof Date);
+            assert.ok(!doc.rejectedBy?.adminType,
+                'rejectedBy belongs to the outcome, which a block cannot write');
         });
 
-        await test('a rejected application never reaches the district queue', async() => {
-            const dash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
-            assert.ok(!bucketIds(dash, 'pending').includes(rejectId), 'rejected file reached district pending');
+        await test("the block's objection leaves the other two tiers holding it", async() => {
+            const blockOnly = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
+            assert.ok(bucketIds(blockOnly, 'rejected').includes(rejectId), 'not in block rejected');
+            assert.ok(!bucketIds(blockOnly, 'pending').includes(rejectId), 'still in block pending');
+
+            for (const [tier, route, token] of [
+                ['district', '/admin/district/dashboard', tokens.district],
+                ['state', '/admin/state/dashboard', tokens.state]
+            ]) {
+                const dash = (await request('GET', route, { token })).body?.data;
+                assert.ok(bucketIds(dash, 'pending').includes(rejectId),
+                    `the ${tier} admin lost an applicant they have not reviewed`);
+                assert.ok(!bucketIds(dash, 'rejected').includes(rejectId),
+                    `the ${tier} admin was shown as having rejected something they did not`);
+            }
         });
 
-        await test('block-stage rejection is NOT in the district rejected bucket', async() => {
-            const dash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
-            assert.ok(!bucketIds(dash, 'rejected').includes(rejectId),
-                'district sees a rejection it did not make');
+        await test("the state CAN still approve over a block's objection", async() => {
+            // The objection is on the record for the State to read; it is not a
+            // veto. This is what "endorsement" means and it has to be tested,
+            // because a veto is the obvious thing to assume and would strand
+            // every applicant a block admin had doubts about.
+            const res = await request('POST', `/applications/${rejectId}/approve`, { token: tokens.state });
+            assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+            assert.strictEqual(res.body?.data?.status, 'Approved');
+
+            const doc = await db.collection('applications').findOne({ _id: rejectAppRes.insertedId });
+            assert.strictEqual(doc.status, 'Approved');
+            // Both answers survive: the block said no, the state said yes.
+            assert.strictEqual(doc.reviews?.block?.decision, 'rejected');
+            assert.strictEqual(doc.reviews?.state?.decision, 'approved');
         });
 
-        await test('block-stage rejection IS in the block rejected bucket', async() => {
-            const dash = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
-            assert.ok(bucketIds(dash, 'rejected').includes(rejectId));
-        });
-
-        await test('a rejected application cannot be approved afterwards', async() => {
-            const res = await request('POST', `/applications/${rejectId}/block-review`, {
-                token: tokens.block,
+        await test("the outcome is closed to the State once the State has spoken", async() => {
+            for (const [route, token] of [
+                [`/applications/${rejectId}/state-review`, tokens.state],
+                [`/applications/${rejectId}/approve`, tokens.state]
+            ]) {
+                const res = await request('POST', route, { token, body: { action: 'approve' } });
+                assert.strictEqual(res.status, 400, `expected 400 from ${route}, got ${res.status}`);
+            }
+            // ...and the district is carried by it, so it is not asked either.
+            const res = await request('POST', `/applications/${rejectId}/district-review`, {
+                token: tokens.district,
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
@@ -582,7 +657,7 @@ const bucketIds = (payload, bucket) =>
             state: REGION.state,
             district: REGION.district,
             block: REGION.block,
-            status: 'Pending-Block',
+            status: 'Pending',
             reviewedBy: {},
             data: { personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state } },
             notes: [],
@@ -593,10 +668,16 @@ const bucketIds = (payload, bucket) =>
         created.applications.push(aliasRes.insertedId);
         const aliasId = aliasRes.insertedId.toString();
 
-        await test('POST /:id/approve routes a block admin to the block tier', async() => {
+        await test('POST /:id/approve signs the decision as the caller\'s own tier', async() => {
             const res = await request('POST', `/applications/${aliasId}/approve`, { token: tokens.block });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
-            assert.strictEqual(res.body?.data?.status, 'Pending-District');
+            // A block admin, so an endorsement — the alias does not promote the
+            // caller into the deciding seat.
+            assert.strictEqual(res.body?.data?.status, 'Pending');
+
+            const doc = await db.collection('applications').findOne({ _id: aliasRes.insertedId });
+            assert.strictEqual(doc.reviews?.block?.decision, 'approved');
+            assert.strictEqual(doc.reviews?.block?.adminType, 'BlockAdmin');
         });
 
         await test('POST /:id/approve by the same block admin is now refused', async() => {
@@ -605,8 +686,17 @@ const bucketIds = (payload, bucket) =>
         });
 
         // ---------------------------------------------------------------
-        section('Legacy status rows remain actionable');
+        section('Legacy status rows remain actionable — no migration');
         // ---------------------------------------------------------------
+        /*
+         * `Pending-District` is the case that matters here.
+         *
+         * It is a row the OLD workflow left mid-relay: the block had approved
+         * it and it was waiting on the district. Nothing rewrote those rows, so
+         * every tier must read one as plainly pending and any tier must be able
+         * to clear it — including the block admin, whose approval it has
+         * already had once.
+         */
         const legacyRes = await db.collection('applications').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Legacy Applicant',
@@ -615,7 +705,8 @@ const bucketIds = (payload, bucket) =>
             state: REGION.state,
             district: REGION.district,
             block: REGION.block,
-            status: 'pending_block_approval', // legacy spelling found in live data
+            status: 'pending_district_approval', // legacy spelling found in live data
+            blockApprovedAt: new Date(),
             reviewedBy: {},
             data: { personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state } },
             notes: [],
@@ -626,19 +717,184 @@ const bucketIds = (payload, bucket) =>
         created.applications.push(legacyRes.insertedId);
         const legacyId = legacyRes.insertedId.toString();
 
-        await test("legacy 'pending_block_approval' shows in the Block pending queue", async() => {
-            const dash = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
-            assert.ok(bucketIds(dash, 'pending').includes(legacyId), 'legacy row missing from block pending');
+        await test('a legacy mid-relay row keeps the approval it really collected', async() => {
+            /*
+             * `blockApprovedAt` is on this row, and both previous workflows
+             * wrote it only when the BLOCK itself acted — so the block's step
+             * really happened and its queue must not ask again. The two tiers
+             * the relay never reached still owe their verdicts.
+             */
+            const blockDash2 = (await request('GET', '/admin/block/dashboard', { token: tokens.block })).body?.data;
+            assert.ok(bucketIds(blockDash2, 'approved').includes(legacyId),
+                "the block's real approval was thrown away");
+
+            for (const [tier, route, token] of [
+                ['district', '/admin/district/dashboard', tokens.district],
+                ['state', '/admin/state/dashboard', tokens.state]
+            ]) {
+                const dash = (await request('GET', route, { token })).body?.data;
+                assert.ok(bucketIds(dash, 'pending').includes(legacyId),
+                    `legacy row missing from ${tier} pending`);
+            }
         });
 
-        await test('legacy row can be approved and is written back canonically', async() => {
-            const res = await request('POST', `/applications/${legacyId}/block-review`, {
-                token: tokens.block,
+        await test('a legacy row accepts an endorsement without a migration', async() => {
+            /*
+             * THE REGRESSION THIS GUARDS.
+             *
+             * `pending_district_approval` is not in the schema's enum and never
+             * was. Nothing noticed while every write also set `status` to a
+             * valid value in the same breath — but an endorsement deliberately
+             * does not touch the status, so saving one validated the legacy
+             * spelling for the first time and Mongoose refused the document:
+             * a real applicant no admin could endorse.
+             *
+             * `pre('validate')` folds the spelling to its canonical form on the
+             * way to disk, which is what every reader has always seen anyway.
+             */
+            // The DISTRICT, which is the tier this row was actually waiting on.
+            const res = await request('POST', `/applications/${legacyId}/district-review`, {
+                token: tokens.district,
+                body: { action: 'approve' }
+            });
+            assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+
+            const doc = await db.collection('applications').findOne({ _id: legacyRes.insertedId });
+            assert.strictEqual(doc.status, 'Pending',
+                'the legacy spelling was not folded to the canonical one');
+            assert.strictEqual(doc.reviews?.district?.decision, 'approved');
+            // And the block's own step was written into its slot on the way,
+            // rather than left to be re-derived or lost by the next write.
+            assert.strictEqual(doc.reviews?.block?.decision, 'approved',
+                "the block's legacy approval was not preserved");
+        });
+
+        await test('a legacy row is enrolled by the state, as any other', async() => {
+            const res = await request('POST', `/applications/${legacyId}/state-review`, {
+                token: tokens.state,
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
             const doc = await db.collection('applications').findOne({ _id: legacyRes.insertedId });
-            assert.strictEqual(doc.status, 'Pending-District');
+            assert.strictEqual(doc.status, 'Approved');
+        });
+
+        // ---------------------------------------------------------------
+        section('A row a LOWER tier approved under the old build');
+        // ---------------------------------------------------------------
+        /*
+         * The shape found in live data: `Approved`, with `approvedBy` naming a
+         * District admin. The previous build let any tier write the outcome.
+         * Under this one a District approval never enrols anybody, so the
+         * State's seat has to still be open on it — that is the whole of what
+         * the association asked for.
+         */
+        const oldRes = await db.collection('applications').insertOne({
+            userId: applicantUserId,
+            fullName: 'E2E Old-Rule Applicant',
+            email: `${RUN}.oldrule@e2e.invalid`,
+            phone: '9000000005',
+            state: REGION.state,
+            district: REGION.district,
+            block: REGION.block,
+            status: 'Approved',
+            stateApprovedAt: new Date(),
+            districtApprovedAt: new Date(),
+            approvedBy: { adminType: 'DistrictAdmin', approvedAt: new Date() },
+            reviewedBy: {},
+            data: { personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state } },
+            notes: [],
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            __e2e: RUN
+        });
+        created.applications.push(oldRes.insertedId);
+        const oldId = oldRes.insertedId.toString();
+
+        await test("the State still owes a verdict on a District-approved row", async() => {
+            const dash = (await request('GET', '/admin/state/dashboard', { token: tokens.state })).body?.data;
+            assert.ok(bucketIds(dash, 'pending').includes(oldId),
+                'the State was shown as having approved a row a District approved');
+            assert.ok(!bucketIds(dash, 'approved').includes(oldId),
+                "the State's queue claimed a decision the State never made");
+
+            // The district, which did decide, reads its own answer back.
+            const dDash = (await request('GET', '/admin/district/dashboard', { token: tokens.district })).body?.data;
+            assert.ok(bucketIds(dDash, 'approved').includes(oldId), 'not in district approved');
+        });
+
+        await test('the State ratifying it does not duplicate the member profile', async() => {
+            const before = await db.collection(COL.details).countDocuments({ userId: applicantUserId });
+
+            const res = await request('POST', `/applications/${oldId}/state-review`, {
+                token: tokens.state,
+                body: { action: 'approve' }
+            });
+            assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+
+            const after = await db.collection(COL.details).countDocuments({ userId: applicantUserId });
+            assert.strictEqual(after, before,
+                'the State approval created a second member profile; the unique email '
+                + 'index would make that permanent');
+
+            const doc = await db.collection('applications').findOne({ _id: oldRes.insertedId });
+            assert.strictEqual(doc.status, 'Approved');
+            assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin', 'the ratification was not recorded');
+            assert.strictEqual(doc.reviews?.state?.decision, 'approved');
+        });
+
+        await test("a later write never erases an earlier tier's attribution", async() => {
+            /*
+             * THE DATA LOSS THIS GUARDS, which happened to a live applicant once.
+             *
+             * `approvedBy` holds ONE decision. On a row a District admin had
+             * approved, the State later approving overwrote it — and the only
+             * record that the District had approved was gone. Nothing but
+             * `reviewedBy.districtAdmin` and `districtApprovedAt` survived to
+             * rebuild it from.
+             *
+             * `materialiseLegacyVerdicts` now pins every verdict into its own
+             * slot before any new write touches `approvedBy`.
+             */
+            const doc = await db.collection('applications').findOne({ _id: oldRes.insertedId });
+            assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin',
+                'the outcome should now be signed by the State');
+            assert.strictEqual(doc.reviews?.district?.decision, 'approved',
+                "the District's approval was erased by the State's");
+            assert.strictEqual(doc.reviews?.district?.adminType, 'DistrictAdmin');
+            assert.ok(doc.reviews?.district?.decidedAt, "the District's timestamp was lost");
+        });
+
+        await test('a rejection that would orphan a member profile is refused', async() => {
+            const orphanRes = await db.collection('applications').insertOne({
+                userId: applicantUserId,
+                fullName: 'E2E Orphan Applicant',
+                email: `${RUN}.orphan@e2e.invalid`,
+                phone: '9000000006',
+                state: REGION.state,
+                district: REGION.district,
+                block: REGION.block,
+                status: 'Approved',
+                approvedBy: { adminType: 'BlockAdmin', approvedAt: new Date() },
+                reviewedBy: {},
+                data: { personalDetails: { block: REGION.block, district: REGION.district, state: REGION.state } },
+                notes: [],
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                __e2e: RUN
+            });
+            created.applications.push(orphanRes.insertedId);
+
+            const res = await request('POST', `/applications/${orphanRes.insertedId}/state-review`, {
+                token: tokens.state,
+                body: { action: 'reject', rejectionReason: 'should be refused' }
+            });
+            assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
+            assert.ok(/already has a member profile/i.test(res.body?.message || ''),
+                `expected the message to explain why, got: ${res.body?.message}`);
+
+            const doc = await db.collection('applications').findOne({ _id: orphanRes.insertedId });
+            assert.strictEqual(doc.status, 'Approved', 'a refused rejection changed the status');
         });
 
         // ---------------------------------------------------------------

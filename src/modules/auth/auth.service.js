@@ -12,7 +12,9 @@ const bcrypt = require('../common/passwordHash');
 const logger = require('../../config/logger');
 const adminRepository = require('../admin/admin.repository');
 const regionService = require('../regions/region.service');
+const { internationalFromPhone, validateMobile } = require('../common/phoneNumber');
 const mailer = require('../../core/utils/mailer');
+const notificationService = require('../notifications/notification.service');
 
 /**
  * What a blocked member is told at sign-in.
@@ -141,31 +143,76 @@ class AuthService {
         // gets stored. An applicant whose block name differs only in casing would
         // otherwise sit outside their own admin's geofence regex and never appear
         // in anyone's queue.
-        const coverage = await regionService.validateRegion({
-            state: userData.state,
-            district: userData.district,
-            block: userData.block
-        });
+        /*
+         * A MEMBER OUTSIDE INDIA has no region to validate. Decided from the
+         * phone number (`internationalFromPhone`), never from the request: the
+         * region tree is India's, their application routes to the Super Admin,
+         * and any state/district/block a client sends for them is ignored.
+         * What they give instead is the place they are in.
+         */
+        const abroad = internationalFromPhone(userData.phoneNumber);
+        const place = String(userData.place || userData.city || '').trim().slice(0, 200);
 
-        if (!coverage.ok) {
-            throw ApiError.badRequest(coverage.reason);
+        let region = { state: '', district: '', block: '' };
+        if (abroad.international) {
+            if (!place) throw ApiError.badRequest('Please enter the place you are in — your city and country.');
+        } else {
+            const coverage = await regionService.validateRegion({
+                state: userData.state,
+                district: userData.district,
+                block: userData.block
+            });
+
+            if (!coverage.ok) {
+                throw ApiError.badRequest(coverage.reason);
+            }
+
+            region = coverage.region || {
+                state: userData.state,
+                district: userData.district,
+                block: userData.block
+            };
         }
 
-        const region = coverage.region || {
-            state: userData.state,
-            district: userData.district,
-            block: userData.block
-        };
-
         // Create member in "web users" collection (NO password here)
+        /*
+         * Both numbers are stored NORMALISED, as the bare ten national digits.
+         *
+         * The validator has already refused anything unusable, so this only
+         * strips the `+91`, the spaces and the trunk zero that a person types.
+         * Storing what was typed instead would put `+91 98765 43210` and
+         * `9876543210` in the collection as two different strings for one
+         * member — which is what makes a later lookup by phone number miss, and
+         * what `botbeeWebhook.findMemberByPhone` currently has to compensate for
+         * by querying four spellings of every number.
+         *
+         * `whatsappNumber` falls back to the phone number when the caller sent
+         * none. Every client that has not been updated yet still registers
+         * members, and an empty WhatsApp column on those rows would silently
+         * exclude them from every WhatsApp notification the platform sends.
+         */
+        const phone = validateMobile(userData.phoneNumber);
+        const whatsapp = validateMobile(userData.whatsappNumber);
+
         const memberDetails = new MemberDetails({
             fullName: userData.fullName,
             email,
-            phoneNumber: userData.phoneNumber,
+            /*
+             * `stored`, not `national`. For an Indian number the two are the
+             * same bare ten digits, so nothing about existing rows changes; for
+             * a foreign one `national` would drop the country code and leave a
+             * number that cannot be dialled or messaged, with nothing on the
+             * record to say which country it came from.
+             */
+            phoneNumber: phone.ok ? phone.stored : userData.phoneNumber,
+            whatsappNumber: whatsapp.ok ? whatsapp.stored : (phone.ok ? phone.stored : ''),
             state: region.state,
             district: region.district,
             block: region.block,
-            city: userData.city || '',
+            city: abroad.international ? place : (userData.city || ''),
+            isInternational: abroad.international,
+            country: abroad.country,
+            place: abroad.international ? place : '',
             role: 'member',
             isActive: true,
             profileCompleted: false,
@@ -209,6 +256,29 @@ class AuthService {
             }
             throw err;
         }
+
+        /*
+         * Welcome the new account — bell, email and WhatsApp.
+         *
+         * AFTER both writes have succeeded and deliberately not awaited. The
+         * registration is complete at this point and the response is what the
+         * applicant is waiting on; three network calls between the save and the
+         * redirect would be latency spent on a message they can read a second
+         * later. `dispatchInBackground` cannot throw, so a mail host that is
+         * down cannot turn a created account into a failed registration — the
+         * rollback above would not even fire, and the applicant would be told to
+         * register again for an address that now exists.
+         */
+        notificationService.dispatchInBackground('ACCOUNT_REGISTERED', {
+            id: memberDetails._id,
+            name: memberDetails.fullName,
+            email: memberDetails.email,
+            phone: memberDetails.phoneNumber,
+            whatsapp: memberDetails.whatsappNumber,
+            state: memberDetails.state,
+            district: memberDetails.district,
+            block: memberDetails.block
+        });
 
         // Generate tokens
         const tokens = this.generateTokens({ _id: memberDetails._id, email: memberDetails.email, role: 'member' });
@@ -269,7 +339,37 @@ class AuthService {
         return String(profile?.email || '').toLowerCase();
     }
 
-    async login(identifier, password) {
+    /**
+     * ======================================================================
+     * WHICH SIGN-IN SCREEN THIS IS, AND WHO IT ACCEPTS
+     * ======================================================================
+     *
+     * `portal` is `'admin'` for /admin/login and `'member'` for /login. The
+     * endpoint is the same for both — one lookup across the member and admin
+     * collections — so this is the only place that can refuse the wrong one,
+     * and it refuses BEFORE any token is returned: a member who tries the
+     * admin screen gets no session at all, not a session that is cleared
+     * afterwards by the browser.
+     *
+     * Absent, it accepts either. Older clients (the mobile app) send no
+     * portal and must keep working.
+     */
+    assertPortal(portal, role) {
+        const wanted = String(portal || '').toLowerCase();
+        if (!wanted) return;
+
+        const isAdmin = !!role && role !== 'member';
+        if (wanted === 'admin' && !isAdmin) {
+            throw ApiError.unauthorized(
+                'This sign-in is for ACTIV administrators. Members sign in on the member login page.',
+            );
+        }
+        if (wanted === 'member' && isAdmin) {
+            throw ApiError.unauthorized('Admins sign in on the admin login page.');
+        }
+    }
+
+    async login(identifier, password, { portal = '' } = {}) {
         // `identifier` is an email, a Member ID or a mobile number; see
         // resolveLoginEmail. Admins sign in by email only.
         const normalizedEmail = await this.resolveLoginEmail(identifier);
@@ -311,6 +411,8 @@ class AuthService {
 
             if (memberDetails) {
                 const userRole = normalizeRole(memberDetails.role);
+                /* The member screen only — see `assertPortal`. */
+                this.assertPortal(portal, userRole);
                 // Location claims must ride in the token: the geofenced admin
                 // dashboards read them off req.user to scope every query.
                 const tokens = this.generateTokens({
@@ -415,6 +517,8 @@ class AuthService {
             }
 
             const adminRole = adminRow.role || normalizeRole(adminUser.role || adminUser.adminType);
+            /* The admin screen only — see `assertPortal`. */
+            this.assertPortal(portal, adminRole);
             const tokens = this.generateTokens({
                 _id: adminUser._id,
                 email: adminRow.email,

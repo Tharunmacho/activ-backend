@@ -5,7 +5,8 @@ const MemberDetails = require('../members/memberdetails.model');
 // The price authority, and it is the database. The frozen table this used to
 // read is now only a seed and a fallback — see `membershipplan.service`.
 const membershipPlanService = require('../members/membershipplan.service');
-const { isPaidStatus } = require('../common/memberContext');
+const { isPaidStatus, invalidateMemberContext } = require('../common/memberContext');
+const notificationService = require('../notifications/notification.service');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 
@@ -38,6 +39,31 @@ const logger = require('../../config/logger');
  */
 
 const ORDER_TTL_MINUTES = 30;
+
+/**
+ * How long an unpaid order is left alone before the member is nudged about it.
+ *
+ * NOT ZERO, AND THE REASON IS THE WEBSITE'S OWN FLOW. `payForMembership` in
+ * `website/src/services/paymentApi.ts` calls order → authorise → complete in one
+ * click, so a payment that succeeds is finished about a second after the order
+ * exists. Dispatching PAYMENT_REQUIRED at order creation therefore delivered
+ * "your ACTIV membership payment of ₹10,000 is still pending" and, seconds
+ * later, "your membership and benefits are now completely active" — two
+ * messages that contradict each other, in that order, to somebody who has just
+ * paid. A member who reads the first one and acts on it tries to pay twice.
+ *
+ * So the nudge is scheduled rather than sent, and `notifyPaymentPending`
+ * re-reads the order before sending: if the payment landed in the meantime
+ * there is nothing pending and nothing is sent. With a real gateway the member
+ * is still on the checkout page at this point, which is exactly when a payment
+ * link in their WhatsApp is useful.
+ *
+ * `PAYMENT_PENDING_NOTICE_DELAY_MS=0` restores the immediate send for a
+ * deployment whose checkout genuinely cannot complete inside the window.
+ */
+const PENDING_NOTICE_DELAY_MS = process.env.PAYMENT_PENDING_NOTICE_DELAY_MS !== undefined
+    ? Math.max(0, parseInt(process.env.PAYMENT_PENDING_NOTICE_DELAY_MS, 10) || 0)
+    : 120000;
 
 /** Mock authorisation is opt-in, and never available in production. */
 const isMockMode = () =>
@@ -156,16 +182,97 @@ class PaymentOrderService {
         // The secret never leaves the server, and neither does the signature at
         // this stage — the client gets only what a real checkout would need.
         return {
-            orderId: order.orderId,
-            amount: order.amount,
-            currency: order.currency,
-            planId: order.planId,
-            planName: order.planName,
-            membershipType: order.membershipType,
-            provider: order.provider,
-            expiresAt: order.expiresAt,
-            mockMode: isMockMode()
+            receipt: {
+                orderId: order.orderId,
+                amount: order.amount,
+                currency: order.currency,
+                planId: order.planId,
+                planName: order.planName,
+                membershipType: order.membershipType,
+                provider: order.provider,
+                expiresAt: order.expiresAt,
+                mockMode: isMockMode()
+            },
+            member
         };
+    }
+
+    /**
+     * Queue the "your payment is still pending" nudge for this order.
+     *
+     * Returns immediately and cannot fail the request that created the order —
+     * a reminder is worth nothing next to the order itself. The timer is
+     * `unref`'d so it never holds the process open at shutdown, and it lives in
+     * memory: a restart inside the window drops the nudge rather than sending a
+     * stale one, which is the right way round for a message whose whole claim is
+     * about what is true *now*.
+     */
+    schedulePendingPaymentNotice(orderId) {
+        if (!orderId) return;
+
+        if (!PENDING_NOTICE_DELAY_MS) {
+            this.notifyPaymentPending(orderId);
+            return;
+        }
+
+        const timer = setTimeout(() => { this.notifyPaymentPending(orderId); }, PENDING_NOTICE_DELAY_MS);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+
+    /**
+     * Send the nudge, but only if there is still something to pay.
+     *
+     * THE ORDER IS RE-READ, NOT REMEMBERED. Everything this message asserts —
+     * that a payment is outstanding, and its amount — can be false by the time
+     * it is sent, and the values captured when the order was created cannot tell
+     * anyone that. Reading the row is what makes the message true at the moment
+     * it leaves.
+     *
+     * The membership is checked as well as the order. A member can pay through
+     * the other path (`payment.service`'s Instamojo webhook) or be activated by
+     * an admin recording a renewal, and neither of those touches this order —
+     * it simply expires. Nudging them is then telling somebody who has paid that
+     * they have not.
+     */
+    async notifyPaymentPending(orderId) {
+        try {
+            const order = await PaymentOrder.findOne({ orderId: String(orderId) }).lean();
+            if (!order) return;
+
+            // 'paid', 'failed', 'cancelled' — all of them mean nothing is owed
+            // on this order any more.
+            if (order.status !== 'created') return;
+            if (order.expiresAt && new Date(order.expiresAt).getTime() < Date.now()) return;
+
+            const member = await MemberDetails.findById(order.memberId).lean().catch(() => null);
+            if (!member) return;
+            if (isPaidStatus(member.membershipStatus)) return;
+
+            notificationService.dispatchInBackground('PAYMENT_REQUIRED', {
+                id: member._id,
+                name: member.fullName,
+                email: member.email,
+                phone: member.phoneNumber,
+                whatsapp: member.whatsappNumber,
+                state: member.state,
+                district: member.district,
+                block: member.block
+            }, {
+                reference: order.orderId,
+                /*
+                 * From the ORDER, which stores rupees. `membershipPlans` stores
+                 * `amountPaise` and this does not — reading the paise field here
+                 * yields undefined and the member is told their payment of
+                 * nothing is pending, with nothing reporting an error.
+                 */
+                amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
+                data: { orderId: order.orderId, planId: order.planId }
+            });
+        } catch (error) {
+            logger.warn('Pending-payment notice not sent', {
+                orderId: String(orderId || ''), error: error && error.message
+            });
+        }
     }
 
     /**
@@ -327,6 +434,14 @@ class PaymentOrderService {
             await PaymentOrder.updateOne({ _id: claimed._id }, { status: 'failed' }).catch(() => null);
             throw ApiError.notFound('Member profile not found');
         }
+
+        /*
+         * The member context caches `isPaid` for fifteen seconds, and this is
+         * the moment it becomes wrong. The TTL is the backstop; being told is
+         * the mechanism — a member who has just paid and is still shown the
+         * unpaid association is the one staleness that cache must not produce.
+         */
+        invalidateMemberContext(member._id);
 
         logger.info('Membership activated by verified payment', {
             orderId: claimed.orderId,

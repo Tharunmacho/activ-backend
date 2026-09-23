@@ -4,10 +4,13 @@ const { stockState } = require('../../models/Product');
 const StockMovement = require('./stockmovement.model');
 const { recordView } = require('../common/engagement.model');
 const Company = require('./company.model');
+/* The trust list is a member's own collection; Analytics only ever asks it
+   HOW MANY, never who. */
+const TrustedCompany = require('./trustedcompany.model');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const ApiError = require('../../core/utils/ApiError');
 const { persistInlineImage } = require('../../core/utils/inlineImage');
-const { regionOwnerIds } = require('../common/regionOwners');
+const { listedOwnerIds } = require('../common/regionOwners');
 
 /**
  * @desc    Create a new product
@@ -65,13 +68,36 @@ const createProduct = asyncHandler(async (req, res) => {
     finalImageUrl = `/uploads/${req.file.filename}`;
   }
 
+  /*
+   * What this company said it makes, for the product that does not say.
+   *
+   * `company.productCategories` is the NIC classification picked on the company
+   * profile — the answer the product form used to ask for a second time, in a
+   * coarser vocabulary. The first entry is the company's headline trade, which
+   * is the right default for an item it has not classified itself.
+   */
+  const companyCategory =
+    (Array.isArray(company.productCategories) && company.productCategories[0]
+      ? String(company.productCategories[0].description || '').trim()
+      : '') || '';
+
   // Create product
   const product = await Product.create({
     userId,
     companyId: company._id,
     name: finalName,
     description: description ? description.trim() : '',
-    category: category || 'Product',
+    /*
+     * The company's own answer, not a placeholder.
+     *
+     * The product form no longer asks for a category, because the company
+     * already classified itself against NIC when it registered. Falling back to
+     * the literal 'Product' would file every item under a word that says
+     * nothing; falling back to what the company said it makes keeps the field
+     * meaningful and keeps search working. 'Product' remains the last resort
+     * for a company that has not picked any category either.
+     */
+    category: category || companyCategory || 'Product',
     price: parseFloat(price) || 0,
     stock: parseInt(stock) || 0,
     minStock: Math.max(0, parseInt(req.body.minStock) || 0),
@@ -156,19 +182,22 @@ const discoverProducts = asyncHandler(async (req, res) => {
   }
 
   /*
-   * Region, resolved through the OWNER — products carry none of their own.
+   * PAID OWNERS ONLY, AND NEVER THE VIEWER — the same rule as the company
+   * Discover (`listedOwnerIds`), with the region folded into the same lookup.
+   * Products carry no region of their own, so the region has to be resolved
+   * through the owner's member record anyway.
    *
-   * A product row has a `userId` and a `companyId` and no idea where either of
-   * them is; the region tree the whole platform is filtered on lives on the
-   * member record. So a region filter has to become a set of owner ids first.
-   *
-   * `regionOwnerIds` returns `null` for "no region asked for", which is
-   * different from `[]` — the empty array is a real answer meaning "nobody is
-   * registered there", and collapsing the two would turn an unpopulated block
-   * into a network-wide listing.
+   * One exception: the caller's OWN company. The mobile Discover screen loads
+   * the switched company's catalogue through this endpoint
+   * (`?companyId=<their own>`), and hiding a member's products from
+   * themselves would empty that screen.
    */
-  const owners = await regionOwnerIds(req.query);
-  if (owners !== null) {
+  const ownCompany = companyId && mongoose.Types.ObjectId.isValid(String(companyId))
+    ? await Company.exists({ _id: companyId, userId: req.user?.userId }).catch(() => null)
+    : null;
+
+  if (!ownCompany) {
+    const owners = await listedOwnerIds(req.query, { excludeId: req.user?.userId });
     if (!owners.length) {
       return res.json({ success: true, data: [], count: 0 });
     }
@@ -349,16 +378,52 @@ const getProductStats = asyncHandler(async (req, res) => {
    * are absent on older rows read as false, which matches what
    * `countDocuments({ isActive: true })` did.
    */
-  const [counts] = await Product.aggregate([
-    { $match: filter },
-    {
-      $group: {
-        _id: null,
-        total: { $sum: 1 },
-        featured: { $sum: { $cond: [{ $eq: ['$isFeatured', true] }, 1, 0] } },
-        active: { $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] } }
+  /*
+   * VIEWS COME BACK TOO, and per product.
+   *
+   * `views` has been incremented on every outside open of a product since that
+   * endpoint was written, and nothing has ever read it — the Analytics screen
+   * showed a zero from a key this handler did not send, under a panel promising
+   * graphs that no request could have filled. Both are answered here, in the
+   * same single round trip the counts already use.
+   */
+  /*
+   * HOW MANY COMPANIES KEEP THIS ONE ON THEIR TRUST LIST.
+   *
+   * The other figure the association asked this screen for, beside the
+   * views. It is a fact about the COMPANY rather than about its products,
+   * but it belongs in the same response: it is the same screen, and a
+   * second round trip for one number is a second thing that can fail
+   * separately and leave the page half-filled.
+   *
+   * Counted, never listed. Who trusts you is that member's own business
+   * and is not this endpoint's to hand out.
+   */
+  const trustedByCount = companyId
+    ? await TrustedCompany.countDocuments({ companyId }).catch(() => 0)
+    : 0;
+
+  const [[counts], topViewed] = await Promise.all([
+    Product.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          featured: { $sum: { $cond: [{ $eq: ['$isFeatured', true] }, 1, 0] } },
+          active: { $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] } },
+          views: { $sum: { $ifNull: ['$views', 0] } }
+        }
       }
-    }
+    ]),
+    /* The chart's rows. Eight is what fits a bar chart legibly; a catalogue of
+       four hundred products is not a chart, it is a table. */
+    Product.find(filter)
+      .sort({ views: -1, createdAt: -1 })
+      .limit(8)
+      .select('name views')
+      .lean()
+      .catch(() => []),
   ]);
 
   res.json({
@@ -367,7 +432,13 @@ const getProductStats = asyncHandler(async (req, res) => {
       // An empty catalog produces no group at all, not a group of zeros.
       total: counts?.total || 0,
       featured: counts?.featured || 0,
-      active: counts?.active || 0
+      active: counts?.active || 0,
+      views: counts?.views || 0,
+      trustedBy: trustedByCount,
+      topViewed: (topViewed || []).map((row) => ({
+        name: row.name || 'Untitled product',
+        views: Number(row.views || 0),
+      })),
     }
   });
 });

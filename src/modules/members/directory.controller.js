@@ -43,7 +43,7 @@ const searchDirectory = asyncHandler(async(req, res) => {
      */
     const viewer = await resolveMemberContext(req);
 
-    const data = await directoryService.search(pickFilters(query), query.page, query.limit);
+    const data = await directoryService.search(pickFilters(query), query.page, query.limit, { excludeId: viewer.id });
 
     res.json(ApiResponse.success({
         ...data,

@@ -11,9 +11,11 @@ const register = asyncHandler(async(req, res) => {
 });
 
 const login = asyncHandler(async(req, res) => {
-    const { email, password } = req.body;
+    const { email, password, portal } = req.body;
 
-    const result = await authService.login(email, password);
+    /* `portal` names the sign-in screen: 'admin' for /admin/login, 'member'
+       for /login. The service refuses the wrong one — see `assertPortal`. */
+    const result = await authService.login(email, password, { portal });
 
     res.json(
         ApiResponse.success(result, 'Login successful')

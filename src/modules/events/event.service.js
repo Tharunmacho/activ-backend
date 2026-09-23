@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Event = require('./event.model');
 const EventRegistration = require('./eventregistration.model');
 const ApiError = require('../../core/utils/ApiError');
+const { priceFor, memberPriceFor } = require('./eventPricing');
 const auditService = require('../audit/audit.service');
 const {
     multiTargetViewerClause, multiTargetsViewer, targetsLabel, regionPattern
@@ -140,6 +141,21 @@ const toEvent = (doc = {}, extras = {}) => ({
     description: doc.description || '',
     startAt: doc.startAt || null,
     endAt: doc.endAt || null,
+    /*
+     * HOW you attend it. See the model's note: a different question from
+     * `category`, which says what kind of event it is.
+     *
+     * `onlineUrl` is deliberately NOT mapped here. `toEvent` feeds the public
+     * site, the member dashboards and the CMS listing alike, so a join link in
+     * it would be a join link on a public page — and the reason an online event
+     * takes bookings at all is that the people who join are the people who
+     * registered. The two readers entitled to it get it from a caller that has
+     * established who they are: `withJoinLink` in `cms.service` for an editor,
+     * and the booking-by-reference payload for whoever booked.
+     */
+    mode: doc.mode === 'online' ? 'online' : 'offline',
+    onlinePlatform: doc.onlinePlatform || '',
+
     venue: doc.venue || '',
     venueAddress: doc.venueAddress || '',
     venueMapUrl: doc.venueMapUrl || '',
@@ -198,6 +214,20 @@ const toEvent = (doc = {}, extras = {}) => ({
      * database would treat it.
      */
     showOnOnboarding: doc.showOnOnboarding === true,
+    /*
+     * On the home page's upcoming strip.
+     *
+     * `!== false` and not `=== true`, unlike the flag above, and the
+     * difference is the default: this one is TRUE unless somebody turned it
+     * off, so an event written before the field existed stays on the home
+     * page exactly as it was.
+     *
+     * It is here rather than only on the CMS mapper because the CMS list
+     * maps through THIS function — `pickEventDetail(toEvent(e))`. Adding it
+     * there alone left the CMS reading `undefined` and answering `true` for
+     * every event, so a switch an editor had just turned off came back on.
+     */
+    showOnHome: doc.showOnHome !== false,
     channel: doc.channel || 'public',
     /*
      * Whether this goes to everyone regardless of `targets`.
@@ -235,8 +265,69 @@ const toEvent = (doc = {}, extras = {}) => ({
     registrationClosesAt: registrationClosesAt(doc),
     capacity: Number(doc.capacity || 0),
     registrationNote: doc.registrationNote || '',
+    /**
+     * WHAT KIND OF EVENT — "Awareness", "Coffee Meet", "Export".
+     *
+     * Never mapped here until now, so the field the schema has always carried
+     * and the CMS has always set simply did not reach any member-facing client:
+     * the website's event card and the mobile app both had the category
+     * available on the server and `undefined` in hand. Nothing reported it,
+     * because an absent key renders as an absent badge.
+     *
+     * Empty string for an event that was never filed under one, which the
+     * clients read as "no badge" rather than as a missing field.
+     */
+    category: doc.category || '',
+
     /** Rupees. 0 is free, and free is the default — see the model's note. */
     registrationFee: Number(doc.registrationFee || 0),
+    /*
+     * The member rate, as stored: a number, or `null` for "no member rate".
+     *
+     * Sent back RAW rather than resolved, because this mapper serves the
+     * editor as well as the reader and the editor has to see back the field it
+     * just typed. `null` must survive the round trip as `null` — coalescing it
+     * to 0 here would show the editor a free member seat on every event that
+     * has no member rate at all, and saving that form would then make it true.
+     *
+     * Anything DECIDING a price reads `eventPricing.priceFor` instead. The two
+     * convenience figures below are that same call, for the common case of a
+     * card that wants to print "Members ₹600" without a viewer in hand.
+     */
+    memberFee: (doc.memberFee === null || doc.memberFee === undefined) ? null : Number(doc.memberFee),
+    memberPrice: memberPriceFor(doc),
+    hasMemberRate: priceFor(doc, null).hasMemberRate,
+
+    /**
+     * WHAT THIS VIEWER WILL BE CHARGED. Resolved HERE, on the server.
+     *
+     * `registrationFee` is the common price and `memberPrice` is the member
+     * rate; neither is the answer on its own, because which one applies depends
+     * on the reader's live membership. A client that decided it for itself
+     * would be a second copy of the rule — and the two would disagree, which on
+     * a price is the disagreement that costs money.
+     *
+     * `event.service.register` charges `priceFor(event, context).amount`. This
+     * is the SAME call with the SAME context, so the figure a member is shown
+     * on the event page is the figure the register step takes. That is the
+     * membership-pricing rule this codebase already states about
+     * `getPlanForPayment`, applied to events.
+     *
+     * `extras.context` is absent on the admin write paths (create/update return
+     * the saved row to its author, not to a member), and `priceFor(doc, null)`
+     * is right there: an author is quoted the common price.
+     */
+    ...(() => {
+        const p = priceFor(doc, extras.context || null);
+        return {
+            /** The number to print beside a Register button, and to charge. */
+            yourPrice: p.amount,
+            /** Whether that number IS the member rate — i.e. this viewer saves. */
+            memberRateApplies: p.memberRateApplied,
+            /** Rupees this viewer keeps per seat. `0` when the rate does not apply. */
+            yourSaving: p.memberRateApplied ? p.memberSaving : 0,
+        };
+    })(),
     /*
      * The form this event asks. The member screen renders whatever is here and
      * holds no list of its own — a client that knows the fields is a client
@@ -313,6 +404,20 @@ const sanitize = (payload = {}) => {
     text('venue');
     text('venueAddress');
     text('venueMapUrl');
+    text('onlinePlatform');
+    text('onlineUrl');
+
+    /*
+     * Normalised to the two the schema allows, and anything unrecognised falls
+     * to `offline`.
+     *
+     * That is the safe direction: an event wrongly marked offline shows its
+     * venue and loses a link the editor can re-enter, while one wrongly marked
+     * online hides the address people need to turn up at.
+     */
+    if (payload.mode !== undefined) {
+        out.mode = String(payload.mode || '').trim().toLowerCase() === 'online' ? 'online' : 'offline';
+    }
     text('state');
     text('district');
     text('block');
@@ -411,6 +516,25 @@ const sanitize = (payload = {}) => {
         out.registrationFields = sanitizeRegistrationFields(parseMaybeJson(payload.registrationFields));
     }
 
+    /**
+     * WHAT KIND OF EVENT — and it was being dropped.
+     *
+     * `sanitize` never listed `category`, so a POST or PUT to `/events`
+     * carrying one answered 201 with the field stored empty: Mongoose strict
+     * mode discards a path the update object does not name, and nothing
+     * reports it. The CMS write path has always accepted it
+     * (`cms.service.js`), which is why events created from the admin screen
+     * kept theirs and anything written through this API lost it — including
+     * the mobile app.
+     *
+     * Free text on purpose, matching the schema: the managed list is a
+     * suggestion, and an event may carry a label the chips have not caught up
+     * with. `Events → Categories` shows those as "not listed".
+     */
+    if (payload.category !== undefined) {
+        out.category = String(payload.category || '').trim().slice(0, 60);
+    }
+
     if (payload.registrationFee !== undefined) {
         const fee = Number(payload.registrationFee);
         if (!Number.isFinite(fee) || fee < 0) {
@@ -420,6 +544,34 @@ const sanitize = (payload = {}) => {
         // organiser's total all have to agree, and they cannot if one of them
         // is carrying a fraction of a paisa from a float.
         out.registrationFee = Math.round(fee);
+    }
+
+    /*
+     * The member rate. `null` clears it; a number sets it.
+     *
+     * An EMPTY STRING CLEARS IT TOO, and that is the case this branch exists
+     * for. The form's member-price box is empty whenever the organiser has not
+     * set a rate, and an empty text input posts `''`. Run through the same
+     * `Number()` the fee above uses, `''` becomes 0 — a free seat for every
+     * member of the association, written by an editor who typed nothing at all
+     * and saw nothing on screen to say so.
+     *
+     * So `''` and `null` are read as "no member rate" and only a real number
+     * sets one. Zero remains a legitimate value: it is what the editor types to
+     * make an event free for members, and it survives because it arrives as
+     * `0`, not as `''`.
+     */
+    if (payload.memberFee !== undefined) {
+        const raw = payload.memberFee;
+        if (raw === null || raw === '' || raw === 'null') {
+            out.memberFee = null;
+        } else {
+            const member = Number(raw);
+            if (!Number.isFinite(member) || member < 0) {
+                throw ApiError.badRequest('memberFee cannot be negative');
+            }
+            out.memberFee = Math.round(member);
+        }
     }
 
     /*
@@ -734,13 +886,27 @@ class EventService {
             .catch(() => []);
 
         const events = documents || [];
-        const counts = await this.countRegistrations(events.map((doc) => doc._id));
-        const mine = await this.myRegistrationsFor(events.map((doc) => doc._id), context.id);
+
+        /*
+         * TOGETHER, not one after the other.
+         *
+         * Neither reads the other's result — both take the same list of event
+         * ids — and against this cluster a round trip costs 400–500ms, so two
+         * awaits in a row were a second of wall clock for nothing. This
+         * endpoint was logged at 1,954ms for a page that renders four cards.
+         */
+        const ids = events.map((doc) => doc._id);
+        const [counts, mine] = await Promise.all([
+            this.countRegistrations(ids),
+            this.myRegistrationsFor(ids, context.id),
+        ]);
 
         return {
             events: events.map((doc) => toEvent(doc, {
                 registeredCount: counts[String(doc._id)] || 0,
-                myRegistration: mine[String(doc._id)] || null
+                myRegistration: mine[String(doc._id)] || null,
+                // The viewer, so `yourPrice` is theirs and not a default.
+                context
             })),
             total: events.length
         };
@@ -782,7 +948,8 @@ class EventService {
 
         return toEvent(doc, {
             registeredCount: counts[String(doc._id)] || 0,
-            myRegistration: mine[String(doc._id)] || null
+            myRegistration: mine[String(doc._id)] || null,
+            context
         });
     }
 
@@ -1080,7 +1247,18 @@ class EventService {
          * does not exist yet is the one outcome nobody would defend, so the fee
          * is owed only once a real seat is held.
          */
-        const fee = Math.max(0, Math.round(Number(event.registrationFee || 0)));
+        /*
+         * `priceFor`, not `registrationFee` — the ONE lookup, shared with the
+         * public booking flow and with the page that quoted this member a
+         * figure a moment ago.
+         *
+         * This path is the one where the member rate matters most: everybody
+         * reaching it is signed in, so `context.isPaid` is the difference
+         * between a member seeing their membership pay for itself and seeing
+         * the same price a stranger pays.
+         */
+        const pricing = priceFor(event, context);
+        const fee = pricing.amount;
         const chargeable = fee > 0 && !full;
 
         /*
@@ -1118,6 +1296,46 @@ class EventService {
             }
         };
 
+        /*
+         * Confirm the seat — bell, email and WhatsApp.
+         *
+         * Called for the revived row and the newly created one alike, because
+         * re-registering after a cancellation is the same event to the member:
+         * they have a seat and want the confirmation that says so. Only the
+         * duplicate-race branch below skips it, and that one is answering a
+         * member who already holds the seat and was already told.
+         *
+         * Never awaited and cannot throw. A seat that is saved must not report
+         * failure because a mail host timed out — the member would tap Register
+         * again against a unique index that now refuses them.
+         */
+        const confirmSeat = (row) => {
+            const notificationService = require('../notifications/notification.service');
+
+            notificationService.dispatchInBackground('EVENT_REGISTERED', {
+                id: context.id,
+                name: seat.memberName,
+                email: seat.email,
+                phone: seat.phone || context.phoneNumber,
+                state: seat.state,
+                district: seat.district,
+                block: seat.block
+            }, {
+                eventTitle: event.title || 'ACTIV event',
+                whenLabel: event.startAt
+                    ? new Date(event.startAt).toLocaleString('en-IN', {
+                        day: 'numeric', month: 'long', year: 'numeric',
+                        hour: 'numeric', minute: '2-digit'
+                    })
+                    // An undated event is a real state on this platform and
+                    // "Date to be confirmed" is what every other surface prints
+                    // for it. An omitted line reads as a rendering fault.
+                    : 'Date to be confirmed',
+                venue: event.venue || event.location || '',
+                data: { eventId: String(event._id || ''), registrationId: String((row && row._id) || '') }
+            });
+        };
+
         // Re-registering reuses the cancelled row: the unique index below means
         // an insert would fail anyway, and the member is the same person.
         if (existing) {
@@ -1126,11 +1344,13 @@ class EventService {
                 { $set: seat },
                 { new: true }
             ).lean();
+            confirmSeat(revived);
             return toRegistration(revived);
         }
 
         try {
             const created = await EventRegistration.create(seat);
+            confirmSeat(created);
             return toRegistration(created.toObject());
         } catch (error) {
             // Two taps on a slow connection race past the check above; the

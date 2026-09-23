@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { ALL_TURNOVER_RANGES } = require('./businessOptions');
 
 // MemberFinancialInfo Schema - matches memberfinancialinfos collection
 const memberFinancialInfoSchema = new mongoose.Schema({
@@ -28,10 +29,22 @@ const memberFinancialInfoSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    /*
+     * The new crore slabs AND the six lakh-based ranges this field started
+     * with. Both, because the second list is what existing rows hold and an
+     * enum that refuses a stored value fails every later save of that document.
+     * Only the new slabs are offered on screen. See `businessOptions.js`.
+     */
     turnoverRange: {
         type: String,
-        enum: ['Below 1 Lakh', '1-5 Lakhs', '5-10 Lakhs', '10-50 Lakhs', '50 Lakhs - 1 Crore', 'Above 1 Crore'],
+        enum: ALL_TURNOVER_RANGES,
         trim: true
+    },
+    /** The figure typed when the slab chosen is `Other / Manual Entry`. */
+    turnoverOther: {
+        type: String,
+        trim: true,
+        default: ''
     },
     govtSchemeBenefit: {
         type: Boolean,

@@ -1,4 +1,43 @@
 const mongoose = require('mongoose');
+const { normalizeStatus } = require('../common/applicationStatus');
+
+/**
+ * One tier's verdict slot.
+ *
+ * A factory rather than a shared sub-schema instance: three paths pointing at
+ * one schema object share its options, and `_id: false` on a shared instance is
+ * the kind of coupling that makes a later change to one tier silently change
+ * all three.
+ *
+ * `decidedAt` and not `at`, to match `approvedBy.approvedAt` and
+ * `rejectedBy.rejectedAt` — the two fields a reader will compare it against.
+ */
+const reviewSlot = () => ({
+    decision: {
+        type: String,
+        enum: ['pending', 'approved', 'rejected'],
+        default: 'pending'
+    },
+    adminId: mongoose.Schema.Types.ObjectId,
+    adminType: {
+        type: String,
+        enum: ['BlockAdmin', 'DistrictAdmin', 'StateAdmin', 'SuperAdmin']
+    },
+    decidedAt: Date,
+    /** Why it was rejected. Empty on an approval. */
+    reason: { type: String, trim: true },
+    /**
+     * TRUE when this tier did not act itself — a HIGHER tier's approval carried
+     * it. See the cascade note in `application.service.decide()`.
+     *
+     * Recorded rather than left implicit because "the Block Admin approved
+     * this" and "the State Admin approved this, so the Block's step is
+     * satisfied" are different facts, and an audit that cannot tell them apart
+     * is an audit that says a block admin reviewed a file they never opened.
+     * `adminType` still names who actually signed.
+     */
+    auto: { type: Boolean, default: false }
+});
 
 // Application Schema with 3-tier approval workflow
 const applicationSchema = new mongoose.Schema({
@@ -26,22 +65,39 @@ const applicationSchema = new mongoose.Schema({
     },
     state: {
         type: String,
-        required: true,
+        required: function requiredUnlessInternational() { return this.isInternational !== true; },
         trim: true,
         index: true
     },
     district: {
         type: String,
-        required: true,
+        required: function requiredUnlessInternational() { return this.isInternational !== true; },
         trim: true,
         index: true
     },
     block: {
         type: String,
-        required: true,
+        required: function requiredUnlessInternational() { return this.isInternational !== true; },
         trim: true,
         index: true
     },
+    /*
+     * MEMBERS OUTSIDE INDIA.
+     *
+     * Set on the server, from the phone number — a valid number with a
+     * country code other than +91 — and never from anything the client
+     * claims. Such a member has no state, district or block: the region
+     * tree is India's, and asking a member in Dubai to pick a Tamil Nadu
+     * block would file them in a queue that is not theirs. They give a
+     * free-text `place` instead, which the certificate and the dashboard
+     * print, and their application has no region, so no tier admin's
+     * geofence matches it and it goes straight to the Super Admin.
+     */
+    isInternational: { type: Boolean, default: false, index: true },
+    /** The country, named from the phone number's code — "United Arab Emirates". */
+    country: { type: String, trim: true, default: '' },
+    /** Where they are, as they wrote it — "Dubai, UAE". */
+    place: { type: String, trim: true, default: '' },
     /*
      * What kind of membership this is.
      *
@@ -70,10 +126,20 @@ const applicationSchema = new mongoose.Schema({
         trim: true
     },
 
+    /**
+     * `Pending` until somebody decides, then `Approved` or `Rejected`.
+     *
+     * The three tier-named pending values are still in the enum because rows
+     * carrying them are still in the collection — Mongoose validates on save,
+     * so dropping them would make every legacy document unsaveable the first
+     * time anything touched it. Nothing writes them any more. `normalizeStatus`
+     * folds all four to `Pending` on the way out, so no reader has to know the
+     * difference. See `common/applicationStatus.js`.
+     */
     status: {
         type: String,
-        enum: ['PENDING', 'Pending-Block', 'Pending-District', 'Pending-State', 'Approved', 'Rejected'],
-        default: 'PENDING',
+        enum: ['Pending', 'PENDING', 'Pending-Block', 'Pending-District', 'Pending-State', 'Approved', 'Rejected'],
+        default: 'Pending',
         index: true
     },
     // Admin assignments
@@ -121,13 +187,53 @@ const applicationSchema = new mongoose.Schema({
         type: String,
         trim: true
     },
+    /**
+     * WHO APPROVED IT, which is now a real question.
+     *
+     * Under the sequential workflow the answer was "all three, in order", and
+     * the three `*ApprovedAt` timestamps above said so. One approval ends the
+     * review now, so exactly one tier signs off and the other two never do —
+     * the timestamps alone can no longer name them. `SuperAdmin` is in the enum
+     * because a super admin acts as themselves rather than in a tier's place.
+     */
+    approvedBy: {
+        adminId: mongoose.Schema.Types.ObjectId,
+        adminType: {
+            type: String,
+            enum: ['BlockAdmin', 'DistrictAdmin', 'StateAdmin', 'SuperAdmin']
+        },
+        approvedAt: Date
+    },
     rejectedBy: {
         adminId: mongoose.Schema.Types.ObjectId,
         adminType: {
             type: String,
-            enum: ['BlockAdmin', 'DistrictAdmin', 'StateAdmin']
+            enum: ['BlockAdmin', 'DistrictAdmin', 'StateAdmin', 'SuperAdmin']
         },
         rejectedAt: Date
+    },
+    /**
+     * ONE VERDICT PER TIER — see `common/tierReviews.js` for the whole rule.
+     *
+     * The Block, District and State admin of the applicant's region each record
+     * their own answer here. `status` above is still the APPLICATION's outcome
+     * and is written only by the State (or the Super Admin filling that seat);
+     * the block and district slots are endorsements, and signing one changes
+     * nothing about whether the applicant is a member.
+     *
+     * Absent on every row written before this existed, which is why every read
+     * goes through `tierReviews.tierVerdict()` — it falls back to `approvedBy` /
+     * `rejectedBy` for the one tier that actually signed a legacy decision, and
+     * leaves the other two genuinely undecided. Never read `reviews.x.decision`
+     * directly: a legacy row answers `undefined` for the tier that approved it.
+     *
+     * No migration is needed or wanted. Backfilling these slots would have to
+     * invent verdicts for two tiers that never gave one.
+     */
+    reviews: {
+        block: reviewSlot(),
+        district: reviewSlot(),
+        state: reviewSlot()
     },
     // Application data
     data: {
@@ -175,6 +281,34 @@ applicationSchema.pre('validate', function(next) {
     if (!this.fullName) this.fullName = 'Unknown Applicant';
     if (!this.email) this.email = 'unknown@example.com';
     if (!this.phone) this.phone = '0000000000';
+
+    /*
+     * FOLD A LEGACY STATUS SPELLING TO THE CANONICAL ONE, ON THE WAY TO DISK.
+     *
+     * Live rows carry spellings the enum above has never listed —
+     * `pending_district_approval`, `pending_block`, bare `approved` — written by
+     * builds that predate it. Reads were always safe, because every read goes
+     * through `normalizeStatus`. Writes were safe too, but only by accident:
+     * the one path that saved such a row set `status` to a valid value in the
+     * same breath, so the invalid spelling never reached the validator.
+     *
+     * That accident ended when a Block or District verdict became something you
+     * could record WITHOUT changing the status. Saving the endorsement then
+     * validated the status it had not touched, and Mongoose refused the whole
+     * document: `pending_district_approval is not a valid enum value`. A real
+     * applicant in the live collection became one no admin could endorse.
+     *
+     * Folding here rather than widening the enum, because the goal is for those
+     * spellings to stop existing. `normalizeStatus` is the same function every
+     * reader already uses, so this changes what is STORED to match what every
+     * reader has always SEEN — and only for a document something was already
+     * writing to.
+     */
+    if (this.status) {
+        const canonical = normalizeStatus(this.status);
+        if (canonical && canonical !== this.status) this.status = canonical;
+    }
+
     next();
 });
 

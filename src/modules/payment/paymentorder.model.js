@@ -34,10 +34,10 @@ const paymentOrderSchema = new mongoose.Schema({
         index: true
     },
 
-    /** The MemberDetails `_id` the order was created for. */
+    /** The MemberDetails `_id` the order was created for (if membership). */
     memberId: {
         type: mongoose.Schema.Types.ObjectId,
-        required: true,
+        required: false,
         index: true
     },
     email: {
@@ -47,10 +47,10 @@ const paymentOrderSchema = new mongoose.Schema({
         trim: true
     },
 
-    /** The plan key, resolved server-side against the price table. */
+    /** The plan key, resolved server-side against the price table (if membership). */
     planId: {
         type: String,
-        required: true,
+        required: false,
         trim: true
     },
     planName: {
@@ -73,6 +73,26 @@ const paymentOrderSchema = new mongoose.Schema({
     currency: {
         type: String,
         default: 'INR'
+    },
+
+    /** 'membership' or 'event_booking' */
+    orderType: {
+        type: String,
+        enum: ['membership', 'event_booking'],
+        default: 'membership',
+        required: true
+    },
+
+    /** Event ID if orderType is 'event_booking' */
+    eventId: {
+        type: String,
+        trim: true
+    },
+
+    /** Booking Reference if orderType is 'event_booking' */
+    bookingRef: {
+        type: String,
+        trim: true
     },
 
     /** 'annual' | 'lifetime', derived from the plan. */

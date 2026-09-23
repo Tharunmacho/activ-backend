@@ -4,8 +4,9 @@ const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
-const { normalizeStatus } = require('../common/applicationStatus');
+const { normalizeStatus, PENDING_STORED_STATUSES } = require('../common/applicationStatus');
 const tierRouting = require('../common/tierRouting');
+const tierReviews = require('../common/tierReviews');
 const regionService = require('../regions/region.service');
 const adminRepository = require('./admin.repository');
 const cacheClient = require('../../core/cache/cacheClient');
@@ -32,15 +33,6 @@ const DASHBOARD_TTL_SECONDS = 120;
 /** How long an admin's own profile record is reused. Cleared on edit. */
 const ADMIN_PROFILE_TTL_SECONDS = 300;
 
-// Applications still awaiting the Block Admin's decision.
-const BLOCK_PENDING_STATUSES = ['PENDING', 'Pending-Block'];
-
-// Statuses that mean the block has already signed off and the file moved downstream.
-const PAST_BLOCK_STATUSES = ['Pending-District', 'Pending-State', 'Approved'];
-
-// Statuses that mean the district has already signed off.
-const PAST_DISTRICT_STATUSES = ['Pending-State', 'Approved'];
-
 // Upper bound on how many applications a single dashboard payload carries.
 const APPLICANT_FETCH_LIMIT = 300;
 
@@ -55,96 +47,99 @@ const firstOf = (...values) => {
 };
 
 /**
- * Which tier's point of view a dashboard is rendered from.
- * Each tier sees a *different* stage for the same application: a file sitting at
- * 'Pending-District' is "approved" to the block admin but "pending" to the district admin.
+ * Which tier's dashboard is being rendered.
+ *
+ * It no longer changes what an application MEANS. Each tier used to see a
+ * different stage for the same file — one sitting at 'Pending-District' was
+ * "approved" to the block admin and "pending" to the district admin — because
+ * the review was a relay and each tier owned one leg of it.
+ *
+ * All three tiers now hold the same file at the same time and see the same
+ * three answers: pending, approved, rejected. The level survives because the
+ * payload still says which dashboard it was built for, and because the region
+ * rollups differ (a district admin sees blocks, a state admin sees districts).
  */
 const LEVELS = { BLOCK: 'block', DISTRICT: 'district', STATE: 'state' };
+
+/**
+ * A dashboard level IS a review tier — they are the same three words and the
+ * same three seats. Mapped through a table rather than used interchangeably so
+ * that a fourth level (there has been talk of a zone) cannot silently become a
+ * fourth verdict slot that nothing writes.
+ */
+const LEVEL_TIER = {
+    [LEVELS.BLOCK]: 'block',
+    [LEVELS.DISTRICT]: 'district',
+    [LEVELS.STATE]: 'state'
+};
 
 const rejectedByType = (application) => String(application.rejectedBy?.adminType || '');
 
 /**
- * Bucket an application from one tier's perspective. Exact status matching only —
- * substring matching on 'pending' would put 'Pending-District' in the block's
- * pending queue, which is precisely the leak this workflow must not have.
+ * ==========================================================================
+ * THE BUCKET AN APPLICATION IS IN - FOR THIS TIER, AND ONLY THIS TIER
+ * ==========================================================================
+ *
+ * Three buckets, and THE LEVEL DECIDES THE ANSWER. Each tier holds its own
+ * verdict (`common/tierReviews.js`), so "Approved" in the District's queue
+ * means the District approved — never that somebody else did.
+ *
+ * This briefly ignored the level entirely, on the reasoning that all three
+ * tiers held one shared verdict. The reported symptom was precise: the State
+ * admin approved an applicant, and the District admin's Hub showed the row as
+ * Approved with no buttons on it. The District had decided nothing, and their
+ * own screen said otherwise.
+ *
+ * WHAT THE LEVEL DOES NOT CHANGE is whether the applicant is a MEMBER. That is
+ * `application.status`, written by the State alone, and everything that asks
+ * "is this person in the association" — the Members directory, the payment
+ * gate, the mobile app — reads that and not this. A block admin's approval
+ * moves a card between two of their own buckets and grants nothing.
+ *
+ * WHAT THIS REPLACED, and why none of it is coming back:
+ *
+ *   - `upstream` - "still with a tier below you". There is no tier below you
+ *     any more; nobody is waiting on anybody.
+ *   - `closed` - "rejected by a different tier, so not your rejection". All
+ *     three tiers held the file, so a rejection by any of them IS this tier's
+ *     rejection to see. `approvedByText` still names who actually signed it.
+ *   - the per-tier `Pending-District` / `Pending-State` matching, and the
+ *     `blockApprovedAt` / `districtApprovedAt` checks behind it, which existed
+ *     only to work out how far along a relay a file had got.
+ *   - the orphan-fallback promotion, which pulled a file into a tier's pending
+ *     bucket when the tier beneath it was unstaffed. Every tier already has it.
+ *
+ * `coverage` is still accepted and deliberately ignored, so the call sites that
+ * thread staffing through do not all have to change at once. Who may act no
+ * longer depends on who is staffed.
  *
  * The status is normalized first: live rows carry legacy spellings such as
- * 'pending_district_approval' and bare lowercase 'approved'.
+ * 'pending_district_approval' and bare lowercase 'approved', and
+ * `normalizeStatus` folds every undecided one to 'Pending'.
  */
-const classifyForLevel = (application, level, coverage = null) => {
-    const status = normalizeStatus(application.status);
-    const isRejected = status === 'Rejected';
+const classifyForLevel = (application, level, _coverage = null) => {
+    const tier = LEVEL_TIER[level] || LEVELS.BLOCK;
+    const verdict = tierReviews.tierVerdict(application, tier);
 
-    // Orphan fallback. When the tier that formally owes a decision has no active
-    // admin left, the file bubbles to the first tier above that does — so a
-    // resigned block admin's fifty pending applications appear in the district
-    // admin's action queue instead of sitting in a queue nobody can open.
-    //
-    // Only ever *promotes* a file into an action bucket; it never removes one
-    // from the tier that legitimately owns it, and `coverage === null` (unknown
-    // staffing) leaves classification exactly as it was.
-    if (!isRejected && coverage) {
-        const owner = tierRouting.owningTier(application);
-        const effective = tierRouting.effectiveTier(application, coverage);
-        if (owner && effective && effective !== owner && effective === level) {
-            return 'pending';
-        }
-    }
-
-    if (level === LEVELS.DISTRICT) {
-        // A rejection only belongs to the district's "rejected" bucket if the
-        // district is who rejected it; block-stage rejections never reached them.
-        if (isRejected) {
-            return rejectedByType(application) === 'DistrictAdmin' ? 'rejected' : 'closed';
-        }
-        if (status === 'Pending-District') return 'pending';
-        if (application.districtApprovedAt || PAST_DISTRICT_STATUSES.includes(status)) return 'approved';
-        // Still upstream at the block — visible in `all`, but in no action bucket.
-        return 'upstream';
-    }
-
-    if (level === LEVELS.STATE) {
-        if (isRejected) {
-            return rejectedByType(application) === 'StateAdmin' ? 'rejected' : 'closed';
-        }
-        if (status === 'Pending-State') return 'pending';
-        if (status === 'Approved') return 'approved';
-        return 'upstream';
-    }
-
-    // Block level.
-    if (isRejected) return 'rejected';
-    if (BLOCK_PENDING_STATUSES.includes(status)) return 'pending';
-    if (application.blockApprovedAt || PAST_BLOCK_STATUSES.includes(status)) return 'approved';
+    if (verdict.decision === 'rejected') return 'rejected';
+    if (verdict.decision === 'approved') return 'approved';
     return 'pending';
 };
 
 /**
- * The applications that have actually reached a tier.
+ * What this tier can see.
  *
- * `classifyForLevel` marks two stages a tier can see but never act on:
- * `upstream` — still awaiting a decision from a tier below — and `closed`,
- * rejected by a different tier. Both used to be listed under "All".
+ * It used to remove the two stages a tier could view but not act on - `upstream`
+ * and `closed`. Neither exists any more: a tier's list is its own region's
+ * applications, and every pending one of them is its to decide. So this is the
+ * identity function.
  *
- * That is what put a `Pending-Block` applicant on the district admin's screen.
- * The card carried an "Awaiting Block Admin review" caption and offered no
- * buttons, but a file nobody at the block has approved yet appearing in the
- * district's own list reads as the sequential workflow having been skipped, and
- * it inflated every count above the list with work this tier does not own.
- *
- * A tier now sees exactly what the state machine has handed it: its own
- * pending / approved / rejected files and nothing else. This is a display rule
- * only — the stored status is untouched, so the file stays exactly where it is
- * and reappears at the district the moment the block approves it.
- *
- * Escalated files survive this filter by construction: when the tier below has
- * no active admin, `classifyForLevel` has already promoted them to `pending`,
- * which is not one of the stages removed here. The block tier is unaffected —
- * being first, it produces neither stage.
+ * Kept rather than deleted from its call sites because "what this tier can see"
+ * is still a question worth having one name for, and the next rule that narrows
+ * it should land here instead of being written inline in three dashboards again
+ * - which is how the leak it originally fixed got in.
  */
-const TIER_ONLY_VISIBLE_STAGES = ['upstream', 'closed'];
-const reachedThisTier = (applicants = []) =>
-    applicants.filter(a => !TIER_ONLY_VISIBLE_STAGES.includes(a && a.stage));
+const reachedThisTier = (applicants = []) => applicants.slice();
 
 /**
  * The Members directory a tier admin sees, with a real Active / Inactive split.
@@ -195,34 +190,79 @@ const buildMemberDirectory = (approved = [], rejected = []) => {
 const STAGE_LABELS = {
     pending: 'Pending',
     approved: 'Approved',
-    rejected: 'Rejected',
-    upstream: 'In Progress',
-    closed: 'Closed'
+    rejected: 'Rejected'
 };
 
-/** Human-readable attribution line shown under an applicant card. */
+/**
+ * Who decided this, in one line under the applicant card.
+ *
+ * READ OFF THE DOCUMENT, NOT OFF THE VIEWER'S TIER. It used to name the tier
+ * whose dashboard you were standing on - correct under a relay, where an
+ * approved file had necessarily been approved by every tier up to yours. One
+ * approval ends the review now, so a file in the state admin's list may well
+ * have been approved by the block admin, and printing "Approved by State Admin"
+ * on their screen would put the decision under the wrong person's name.
+ *
+ * `approvedBy.adminType` is the field that carries it. Rows approved before it
+ * existed fall back to the tier timestamps, which under the old workflow did
+ * record the truth.
+ */
+const ADMIN_TYPE_TIER = {
+    BlockAdmin: 'block',
+    DistrictAdmin: 'district',
+    StateAdmin: 'state',
+    SuperAdmin: 'super'
+};
+
+const deciderTier = (application, which) => {
+    const stamped = ADMIN_TYPE_TIER[String(application?.[which]?.adminType || '')];
+    if (stamped) return stamped;
+    // Legacy rows: the last tier that stamped a timestamp is who signed it.
+    if (application?.stateApprovedAt) return 'state';
+    if (application?.districtApprovedAt) return 'district';
+    if (application?.blockApprovedAt) return 'block';
+    return '';
+};
+
 const buildAttribution = (application, stage, level, scope = {}) => {
-    if (stage === 'approved') {
-        if (level === LEVELS.BLOCK) return `Approved by ${scope.blockName || 'Block'} Admin`;
-        if (level === LEVELS.DISTRICT) return `Approved by ${scope.districtName || 'District'} Admin`;
-        return `Approved by ${scope.stateName || 'State'} Admin`;
+    const name = {
+        block: `${scope.blockName || 'Block'} Admin`,
+        district: `${scope.districtName || 'District'} Admin`,
+        state: `${scope.stateName || 'State'} Admin`,
+        super: 'ACTIV Head Office'
+    };
+
+    /*
+     * THE TIER READING THE CARD IS THE TIER THAT DECIDED IT.
+     *
+     * `stage` is now this tier's own verdict, so the attribution is this tier's
+     * own name — there is no case where the District's card reads "approved"
+     * because somebody else approved. It is still spelled out rather than left
+     * implicit, because the same line is read on the Super Admin's Hub where
+     * the cards of all three tiers sit next to each other.
+     *
+     * `adminType` on the slot is what carries it, and it is not always the
+     * tier's own: a Super Admin filling the State's seat signs as `SuperAdmin`,
+     * and printing "Approved by State Admin" over that would put the decision
+     * under the name of somebody who was not there.
+     */
+    if (stage === 'approved' || stage === 'rejected') {
+        const verdict = tierReviews.tierVerdict(application, LEVEL_TIER[level] || LEVELS.BLOCK);
+        const signer = ADMIN_TYPE_TIER[String(verdict.adminType || '')] || LEVEL_TIER[level];
+        const verb = stage === 'approved' ? 'Approved' : 'Rejected';
+        return `${verb} by ${name[signer] || name[LEVEL_TIER[level]] || name.state}`;
     }
 
-    if (stage === 'rejected' || stage === 'closed') {
-        const by = rejectedByType(application);
-        if (by === 'BlockAdmin') return `Rejected by ${scope.blockName || 'Block'} Admin`;
-        if (by === 'DistrictAdmin') return `Rejected by ${scope.districtName || 'District'} Admin`;
-        if (by === 'StateAdmin') return `Rejected by ${scope.stateName || 'State'} Admin`;
-        return 'Rejected';
-    }
-
-    if (stage === 'upstream') {
-        const status = normalizeStatus(application.status);
-        if (status === 'Pending-District') return 'Awaiting District Admin review';
-        if (status === 'Pending-State') return 'Awaiting State Admin review';
-        return 'Awaiting Block Admin review';
-    }
-
+    /*
+     * Pending: NOTHING.
+     *
+     * This briefly read "With the Block, District and State Admin". It was
+     * true — all three hold a pending file — but on the card it sat exactly
+     * where "Approved by …" sits on a decided one, so an admin reading their
+     * own queue was told, on every undecided row, the one thing the Approve and
+     * Reject buttons underneath already say. A line that repeats the controls
+     * beneath it is noise in the place a reader looks for the verdict.
+     */
     return '';
 };
 
@@ -240,12 +280,21 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
     const stage = classifyForLevel(application, level, coverage);
     const id = application._id.toString();
 
-    // Provenance for a file that reached this tier by escalation rather than by
-    // the normal sequence. The card renders it so an admin is never asked to
-    // decide on another tier's application without being told why it is theirs.
-    const owningTier = tierRouting.owningTier(application);
-    const effectiveTier = tierRouting.effectiveTier(application, coverage);
-    const orphaned = !!coverage && tierRouting.isOrphaned(application, coverage);
+    /*
+     * Who holds this file, and whether anybody is actually there.
+     *
+     * `owningTier` / `effectiveTier` / `orphaned` used to describe an escalation:
+     * a file whose own tier was unstaffed had bubbled up to this one, and the
+     * card had to say so or an admin was being asked to decide somebody else's
+     * application with no explanation. Nothing escalates now - all three tiers
+     * hold every pending file from the moment it is submitted.
+     *
+     * The fields are still emitted because both clients read them. `orphaned`
+     * now means the one thing still worth flagging: NOBODY at any tier covers
+     * this region, so only the Super Admin can clear it.
+     */
+    const reviewers = tierRouting.reviewingTiers(application);
+    const orphaned = tierRouting.isUnattended(coverage);
     const doingBusiness = business.doingBusiness === true || data.doingBusiness === true || !!business.organizationName || !!data.organizationName;
 
     // Real values only. Every field below resolves from the application, the
@@ -321,6 +370,11 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         district: firstOf(application.district, personal.district, member.district),
         state: firstOf(application.state, personal.state, member.state),
         city: firstOf(personal.city, member.city),
+        /* A member outside India: no region, a place instead. The card prints
+           "Outside India · Dubai, UAE" where the region would be. */
+        isInternational: application.isInternational === true || member.isInternational === true,
+        country: firstOf(application.country, member.country),
+        place: firstOf(application.place, member.place),
         // Normalized so the client can compare against the canonical enum;
         // `rawStatus` preserves whatever legacy spelling the document holds.
         status: normalizeStatus(application.status),
@@ -329,12 +383,50 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
         level,
         statusLabel: STAGE_LABELS[stage] || 'Pending',
         approvedByText,
-        // Escalation flags. `orphaned` is false whenever coverage is unknown, so
-        // a caller that does not resolve staffing sees the plain workflow.
+        // `orphaned` is false whenever coverage is unknown - an unknown is not
+        // "nobody is there", and a staffed region reported as abandoned is
+        // worse than saying nothing.
         orphaned,
-        owningTier: owningTier || '',
-        effectiveTier: effectiveTier || '',
-        fallbackReason: orphaned ? tierRouting.fallbackReason(application, coverage) : '',
+        // Every tier that can decide this file. All three while it is pending,
+        // none once it is not.
+        reviewingTiers: reviewers,
+        owningTier: reviewers[0] || '',
+        effectiveTier: reviewers[0] || '',
+        fallbackReason: orphaned
+            ? 'No Block, District or State Admin covers this region yet - only the Super Admin can clear it'
+            : '',
+        /**
+         * WHAT THE OTHER TWO TIERS HAVE RECORDED.
+         *
+         * The card shows this tier's own verdict as its badge; this is the
+         * context underneath it — "State approved", "Block objected". Without
+         * it, a District admin looking at a pending row has no way to tell an
+         * applicant nobody has looked at from one the State has already made a
+         * member, and those call for different attention.
+         *
+         * Every tier's slot is sent, not just the decided ones, because the
+         * clients render their own wording and a missing key and an undecided
+         * tier are different things to a reader of this payload.
+         */
+        tierReviews: tierReviews.tierVerdicts(application),
+        /** The decided ones, widest first, ready to print. */
+        otherTierReviews: tierReviews.otherTierVerdicts(application, LEVEL_TIER[level] || LEVELS.BLOCK),
+        endorsementLine: tierReviews.endorsementLine(application, LEVEL_TIER[level] || LEVELS.BLOCK),
+        /**
+         * Whether THIS tier still has a verdict to give — the only thing that
+         * decides if the Approve / Reject buttons are drawn. Never derived in a
+         * client from the status: a file the State approved is still open to
+         * the District, and a status of 'Approved' says nothing about that.
+         */
+        canAct: tierReviews.canTierAct(application, LEVEL_TIER[level] || LEVELS.BLOCK),
+        /**
+         * Whether this tier's verdict would grant the membership, or only be
+         * recorded. Lets the confirm dialog say which it is instead of implying
+         * every Approve creates a member.
+         */
+        decidesOutcome: tierReviews.decidesOutcome(LEVEL_TIER[level] || LEVELS.BLOCK),
+        /** The APPLICATION's outcome, which is the State's verdict alone. */
+        outcome: normalizeStatus(application.status),
         submittedAt: application.createdAt || null,
         // Every tier timestamp is exposed so the client can render the full
         // approval trail without a second round-trip.
@@ -474,9 +566,20 @@ const emptyDashboard = (scope = {}, level = '') => ({
         districtName: scope.districtName || '',
         stateName: scope.stateName || '',
         totalMembers: 0,
-        pending: 0,
-        approved: 0,
-        rejected: 0
+        /*
+         * The same key names the real dashboards use.
+         *
+         * These were `pending` / `approved` / `rejected` while every live
+         * dashboard emits `pendingApplications` / `approvedApplications` /
+         * `rejectedApplications`, so a client reading the real shape found
+         * `undefined` on the unresolved one and rendered "undefined" or fell
+         * through to a default. An empty dashboard should be four zeros, not a
+         * different object.
+         */
+        totalApplications: 0,
+        pendingApplications: 0,
+        approvedApplications: 0,
+        rejectedApplications: 0
     },
     applicants: { pending: [], approved: [], rejected: [], all: [] },
     scopeUnresolved: true,
@@ -659,37 +762,93 @@ class AdminService {
         // Geofenced query: strictly retrieve applications assigned to THIS block.
         const blockFilter = buildGeoFilter('block', blockName);
 
-        const { totalMembers, applications, applicants } = await loadApplicants(
+        const { totalMembers, applicants } = await loadApplicants(
             blockFilter,
             { block: blockName },
             LEVELS.BLOCK,
             scope
         );
 
-        // Block Admin buckets:
-        // - pending:  awaiting this block's decision ('Pending-Block' or 'PENDING')
-        // - approved: this block signed off (now at district/state, or fully approved)
-        // - rejected: rejected at any tier
+        // Block Admin buckets - the same three every tier sees:
+        // - pending:  submitted, nobody has decided. This block, its district
+        //             and its state can all act on it; whoever is first ends it.
+        // - approved: approved, by whichever of the three got there.
+        // - rejected: rejected, likewise.
         const pending = applicants.filter(a => a.stage === 'pending');
         const approved = applicants.filter(a => a.stage === 'approved');
         const rejected = applicants.filter(a => a.stage === 'rejected');
 
-        const recentActivities = applications.slice(0, 10).map(app => {
-            const dateStr = app.createdAt ? new Date(app.createdAt).toLocaleDateString() : 'Recently';
-            return {
-                id: app._id.toString(),
-                type: 'application',
-                message: `Applicant: ${app.fullName || app.email || 'Member'} (${app.status || 'Pending-Block'})`,
-                timestamp: dateStr
-            };
-        });
+        /*
+         * =================================================================
+         * THE THREE BUCKETS ABOVE ARE THIS TIER'S VERDICT.
+         * THE TWO BELOW ARE WHETHER THE PERSON IS A MEMBER.
+         * =================================================================
+         *
+         * They stopped being the same question the moment each tier got its own
+         * verdict. `stage` is "what did WE decide"; `outcome` is the
+         * application's status, which only the State writes. A block admin who
+         * has endorsed four applicants has four rows in their Approved queue
+         * and, until the State acts, no new members at all.
+         *
+         * The Members directory MUST be built from `outcome`. Built from
+         * `approved`, a block admin's endorsement would enrol somebody into the
+         * region's member list — with a member code and an Active badge — who
+         * has not been granted a membership by anyone entitled to grant one,
+         * and who cannot pay because the payment gate reads the status.
+         */
+        const enrolled = applicants.filter(a => a.outcome === 'Approved');
+        const declined = applicants.filter(a => a.outcome === 'Rejected');
 
+        /*
+         * `recentActivities` USED TO BE BUILT HERE, and by no other tier.
+         *
+         * Nothing read it. Both dashboards render their Recent Activity from
+         * `applicants.all` — the rows that already carry the computed stage —
+         * and this built a parallel list of pre-formatted strings from the raw
+         * documents, complete with a locale-formatted date the client could not
+         * re-format and a status printed without `normalizeStatus`, so a legacy
+         * row said "(pending_block_approval)" on screen.
+         *
+         * Removing it is what makes the block dashboard the same shape as the
+         * district and state ones: the same `stats` keys bar the region names
+         * each tier owns, the same buckets, the same applicant rows.
+         */
         return {
             stats: {
-                totalMembers: approved.length > 0 ? approved.length : applicants.length,
+                /*
+                 * TWO DIFFERENT QUESTIONS, TWO FIELDS.
+                 *
+                 * `totalMembers` was `approved.length > 0 ? approved.length :
+                 * applicants.length` — an expression that answers a DIFFERENT
+                 * QUESTION depending on the data. With one approved applicant
+                 * and one pending it reported 1, the same figure as the
+                 * Approved tile beside it; with nothing approved it reported 2,
+                 * the total. The number silently changed what it meant, and the
+                 * only way to know which it meant was to already know the
+                 * answer.
+                 *
+                 * `totalMembers` is the member records in this region, which
+                 * `loadApplicants` has always counted and this threw away.
+                 * `totalApplications` is every applicant here, and it is what
+                 * the three buckets below add up to — so the four figures on
+                 * the dashboard are now a total and its parts.
+                 */
+                totalMembers,
+                /*
+                 * THIS TIER'S OWN REVIEW WORKLOAD — what its three tabs hold.
+                 * `pendingApplications` is "waiting on YOU", so it drops when
+                 * you act and not when another tier does.
+                 */
                 pendingApplications: pending.length,
                 approvedApplications: approved.length,
                 rejectedApplications: rejected.length,
+                /*
+                 * The APPLICATIONS' outcomes, a different count and one the
+                 * dashboard needs separately — without it a tier cannot say
+                 * "4 still to review, 2 of them already members".
+                 */
+                enrolledMembers: enrolled.length,
+                declinedApplications: declined.length,
                 totalApplications: applicants.length,
                 activeBusinesses: applicants.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
@@ -697,16 +856,13 @@ class AdminService {
                 districtName,
                 stateName
             },
-            members: buildMemberDirectory(approved, rejected),
+            members: buildMemberDirectory(enrolled, declined),
             applicants: {
                 pending,
                 approved,
                 rejected,
                 all: applicants
-            },
-            recentActivities: recentActivities.length > 0 ? recentActivities : [
-                { id: '1', type: 'application', message: `No applications found for block: ${blockName}`, timestamp: 'Just now' }
-            ]
+            }
         };
     }
 
@@ -728,17 +884,39 @@ class AdminService {
             scope
         );
 
-        // District Admin buckets:
-        // - pending:  ONLY files the block has already approved ('Pending-District')
-        // - approved: this district signed off ('districtApprovedAt', 'Pending-State' or 'Approved')
-        // - rejected: rejected *by a district admin* — block-stage rejections were
-        //             never this tier's to act on, so they stay out of the queue
+        // District Admin buckets. Identical to the block's, over the district's
+        // own applicants: a file does not have to clear the block to arrive
+        // here, and a rejection by any of the three tiers is a rejection this
+        // one can see - all three were holding the file when it happened.
         const pending = applicants.filter(a => a.stage === 'pending');
         const approved = applicants.filter(a => a.stage === 'approved');
         const rejected = applicants.filter(a => a.stage === 'rejected');
 
+        /*
+         * =================================================================
+         * THE THREE BUCKETS ABOVE ARE THIS TIER'S VERDICT.
+         * THE TWO BELOW ARE WHETHER THE PERSON IS A MEMBER.
+         * =================================================================
+         *
+         * They stopped being the same question the moment each tier got its own
+         * verdict. `stage` is "what did WE decide"; `outcome` is the
+         * application's status, which only the State writes. A block admin who
+         * has endorsed four applicants has four rows in their Approved queue
+         * and, until the State acts, no new members at all.
+         *
+         * The Members directory MUST be built from `outcome`. Built from
+         * `approved`, a block admin's endorsement would enrol somebody into the
+         * region's member list — with a member code and an Active badge — who
+         * has not been granted a membership by anyone entitled to grant one,
+         * and who cannot pay because the payment gate reads the status.
+         */
+        const enrolled = applicants.filter(a => a.outcome === 'Approved');
+        const declined = applicants.filter(a => a.outcome === 'Rejected');
+
         // Everything else on this screen counts what the district can see, so it
         // agrees with the list rather than reporting a larger total beside it.
+        // Nothing is withheld any more, so this is every applicant in the
+        // district - see `reachedThisTier`.
         const visible = reachedThisTier(applicants);
 
         // One row per block feeding this district, derived from the real data
@@ -754,18 +932,32 @@ class AdminService {
 
         return {
             stats: {
-                totalMembers: approved.length > 0 ? approved.length : visible.length,
+                // See the block dashboard: the member count and the applicant
+                // count are two questions, and one field cannot answer both.
+                totalMembers,
                 totalBlocks: blockRollup.size,
+                /*
+                 * THIS TIER'S OWN REVIEW WORKLOAD — what its three tabs hold.
+                 * `pendingApplications` is "waiting on YOU", so it drops when
+                 * you act and not when another tier does.
+                 */
                 pendingApplications: pending.length,
                 approvedApplications: approved.length,
                 rejectedApplications: rejected.length,
+                /*
+                 * The APPLICATIONS' outcomes, a different count and one the
+                 * dashboard needs separately — without it a tier cannot say
+                 * "4 still to review, 2 of them already members".
+                 */
+                enrolledMembers: enrolled.length,
+                declinedApplications: declined.length,
                 totalApplications: visible.length,
                 activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
                 districtName,
                 stateName
             },
-            members: buildMemberDirectory(approved, rejected),
+            members: buildMemberDirectory(enrolled, declined),
             applicants: {
                 pending,
                 approved,
@@ -796,16 +988,36 @@ class AdminService {
             scope
         );
 
-        // State Admin buckets:
-        // - pending:  ONLY files the district has already approved ('Pending-State')
-        // - approved: final approval granted ('Approved')
-        // - rejected: rejected *by a state admin*
+        // State Admin buckets. Identical again, over the whole state. The state
+        // admin no longer waits on the district: they see every applicant in
+        // their state from submission and can approve any of them.
         const pending = applicants.filter(a => a.stage === 'pending');
         const approved = applicants.filter(a => a.stage === 'approved');
         const rejected = applicants.filter(a => a.stage === 'rejected');
 
+        /*
+         * =================================================================
+         * THE THREE BUCKETS ABOVE ARE THIS TIER'S VERDICT.
+         * THE TWO BELOW ARE WHETHER THE PERSON IS A MEMBER.
+         * =================================================================
+         *
+         * They stopped being the same question the moment each tier got its own
+         * verdict. `stage` is "what did WE decide"; `outcome` is the
+         * application's status, which only the State writes. A block admin who
+         * has endorsed four applicants has four rows in their Approved queue
+         * and, until the State acts, no new members at all.
+         *
+         * The Members directory MUST be built from `outcome`. Built from
+         * `approved`, a block admin's endorsement would enrol somebody into the
+         * region's member list — with a member code and an Active badge — who
+         * has not been granted a membership by anyone entitled to grant one,
+         * and who cannot pay because the payment gate reads the status.
+         */
+        const enrolled = applicants.filter(a => a.outcome === 'Approved');
+        const declined = applicants.filter(a => a.outcome === 'Rejected');
+
         // See the district dashboard: the rollups and totals below count what
-        // has reached the state, so they agree with the list they sit above.
+        // the state can see, so they agree with the list they sit above.
         const visible = reachedThisTier(applicants);
 
         const districtRollup = new Map();
@@ -837,18 +1049,31 @@ class AdminService {
 
         return {
             stats: {
-                totalMembers: approved.length > 0 ? approved.length : visible.length,
+                // See the block dashboard.
+                totalMembers,
                 totalDistricts: districts.length,
                 totalBlocks: new Set(visible.map(a => a.block).filter(Boolean)).size,
+                /*
+                 * THIS TIER'S OWN REVIEW WORKLOAD — what its three tabs hold.
+                 * `pendingApplications` is "waiting on YOU", so it drops when
+                 * you act and not when another tier does.
+                 */
                 pendingApplications: pending.length,
                 approvedApplications: approved.length,
                 rejectedApplications: rejected.length,
+                /*
+                 * The APPLICATIONS' outcomes, a different count and one the
+                 * dashboard needs separately — without it a tier cannot say
+                 * "4 still to review, 2 of them already members".
+                 */
+                enrolledMembers: enrolled.length,
+                declinedApplications: declined.length,
                 totalApplications: visible.length,
                 activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
                 stateName
             },
-            members: buildMemberDirectory(approved, rejected),
+            members: buildMemberDirectory(enrolled, declined),
             applicants: {
                 pending,
                 approved,
@@ -865,7 +1090,11 @@ class AdminService {
         const [totalUsers, totalMembers, pendingApplications, approvedMembers] = await Promise.all([
             User.countDocuments().catch(() => 0),
             Member.countDocuments().catch(() => 0),
-            Application.countDocuments({ status: { $regex: /^Pending/i } }).catch(() => 0),
+            // Matched against what is ON DISK. The regex happens to catch the
+            // legacy tier-named spellings too, but `PENDING_STORED_STATUSES` is
+            // the list that is maintained alongside the enum and is what every
+            // other query uses.
+            Application.countDocuments({ status: { $in: PENDING_STORED_STATUSES } }).catch(() => 0),
             Member.countDocuments().catch(() => 0)
         ]);
 
@@ -1137,10 +1366,39 @@ class AdminService {
      * `memberId` for financial. They differ, and a wrong guess deletes nothing
      * while still reporting success.
      */
+    /**
+     * Block, unblock or delete a member.
+     *
+     * =====================================================================
+     * STATE AND SUPER ONLY
+     * =====================================================================
+     *
+     * Every tier used to have all three. The association asked for blocking to
+     * sit higher up, and deleting went with it for the obvious reason: delete
+     * is the more destructive of the two — it cascades through the application,
+     * the login, the member record and the three additional forms, and cannot
+     * be undone — so a tier trusted with neither cannot sensibly be trusted
+     * with the worse one.
+     *
+     * CHECKED HERE, not only in the route table and not only in the screens.
+     * Hiding a button hides a capability; the request it would have made still
+     * works. The route is narrowed too, but this is the check that travels with
+     * the behaviour, so a second caller cannot reach it by another path.
+     *
+     * A block admin keeps everything reading: the member list, and the full
+     * application behind each row.
+     */
     async memberAction(id, action, user = {}) {
         const allowed = ['activate', 'suspend', 'delete'];
         if (!allowed.includes(action)) {
             throw ApiError.badRequest("Unknown action '" + action + "'. Use " + allowed.join(', '));
+        }
+
+        const MAY_ACT = ['state_admin', 'super_admin'];
+        if (!MAY_ACT.includes(String(user.role || ''))) {
+            throw ApiError.forbidden(
+                'Blocking and deleting a member is done by the State Admin or the Super Admin.'
+            );
         }
 
         const target = await this.resolveMemberTarget(id);

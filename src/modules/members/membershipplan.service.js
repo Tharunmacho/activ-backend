@@ -338,6 +338,41 @@ class MembershipPlanService {
         };
     }
 
+    /**
+     * WHICH PLAN A PAYMENT OF THIS MANY RUPEES WAS FOR.
+     *
+     * The gateway's webhook carries a payment id, a buyer and an amount, and no
+     * plan reference — so the amount is the only signal there is about what was
+     * bought. What the amount must NOT do is get interpreted by a rule of thumb.
+     *
+     * It was: "≥ ₹2,500 is lifetime, ≥ ₹500 is annual". Those numbers were the
+     * prices once. The Super Admin's live plans are ₹1,000, ₹5,000, ₹10,000 and
+     * ₹20,000 and EVERY ONE OF THEM IS ANNUAL, so that rule recorded three of
+     * the four as lifetime memberships with no expiry — sold for a year, granted
+     * for ever, and nothing anywhere reporting it.
+     *
+     * So the amount is matched against the prices that actually exist, and the
+     * plan says what kind of membership it is. Exactly one match or nothing:
+     * two plans at the same price is a genuinely ambiguous payment, and guessing
+     * between them is the behaviour being removed.
+     */
+    async resolveByAmount(amountInRupees) {
+        const amount = Math.round(Number(amountInRupees) || 0);
+        if (!(amount > 0)) return null;
+
+        const active = await this.listActive().catch(() => []);
+        const matches = [];
+
+        for (const plan of active) {
+            /* Through `getPlanForPayment`, so this and the charge agree about
+               what a plan costs — see the note on that method. */
+            const priced = await this.getPlanForPayment(plan.key).catch(() => null);
+            if (priced && Number(priced.amount) === amount) matches.push(priced);
+        }
+
+        return matches.length === 1 ? matches[0] : null;
+    }
+
     /** Create or update one plan from the Super Admin's form. */
     async savePlan(key, payload = {}, { create = false } = {}) {
         const id = str(key || payload.key).toLowerCase();

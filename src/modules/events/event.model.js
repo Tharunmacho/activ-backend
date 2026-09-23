@@ -81,6 +81,61 @@ const eventSchema = new mongoose.Schema({
     endAt: {
         type: Date
     },
+    /**
+     * =====================================================================
+     * HOW YOU ATTEND IT — a different question from what kind it is
+     * =====================================================================
+     *
+     * `category` says WHAT an event is: "Workshops", "Conferences",
+     * "Networking". `mode` says HOW you attend: in a room, or on a link. They
+     * are independent — there are online workshops and offline workshops — and
+     * collapsing them is what put "ZOOM" and "Webinars" in the category list
+     * beside "Tea party" and "Exhibitions". An editor with no field for "this
+     * one is online" reached for the only list on the form, and the taxonomy
+     * grew a platform name as a kind of event.
+     *
+     * TWO VALUES, NOT THREE. "Hybrid" was considered and left out: it is not a
+     * third kind of attending, it is both of the other two at once, and a
+     * reader asking "is there a venue" would get "yes, and also a link" from a
+     * value that says neither. If the association runs one, the honest shape is
+     * an offline event that also carries a join link — which this already
+     * permits, because the two field groups below are independent of the flag.
+     *
+     * DEFAULT `offline`, and that is the whole back catalogue's answer: every
+     * event written before this field existed has a venue and no link.
+     * Defaulting to `online` would silently relabel all of them and strip the
+     * venue from their pages.
+     */
+    mode: {
+        type: String,
+        enum: ['offline', 'online'],
+        default: 'offline',
+        index: true
+    },
+
+    /**
+     * Which service it runs on — "Zoom", "Google Meet", "Microsoft Teams".
+     *
+     * Free text, for the same reason `category` is: the list of video services
+     * an association uses is not something to redeploy a schema over. Shown to
+     * everybody; it tells a reader what they will need installed.
+     */
+    onlinePlatform: { type: String, trim: true, default: '' },
+
+    /**
+     * THE JOIN LINK, AND IT IS NOT PUBLIC.
+     *
+     * A link on a public page is a seat given away. The whole point of taking a
+     * booking for an online event is that the people who join are the people
+     * who registered, so this is withheld from every public mapper and reaches
+     * exactly two readers: a content admin editing the event, and somebody
+     * holding a confirmed booking for it.
+     *
+     * Stored on the event rather than copied onto each booking so that changing
+     * a link that has leaked changes it for everyone at once.
+     */
+    onlineUrl: { type: String, trim: true, default: '' },
+
     venue: {
         type: String,
         trim: true,
@@ -309,6 +364,40 @@ const eventSchema = new mongoose.Schema({
         index: true
     },
 
+    /**
+     * ======================================================================
+     * RIDES THE HOME PAGE'S UPCOMING-EVENTS STRIP
+     * ======================================================================
+     *
+     * A THIRD question, and the three are genuinely different surfaces:
+     *
+     *   status              is it written yet
+     *   showOnOnboarding    may the public read it at all
+     *   showOnHome          is it one of the few on the landing page
+     *
+     * The strip shows three events out of however many are published. Until
+     * now which three was decided by the sort — soonest first — and the
+     * person maintaining the site had no say in it. That is the wrong
+     * default for the most-read band on the site: the next event by date is
+     * often a small district meeting, and the one the association wants a
+     * first-time visitor to see is the conclave in six weeks.
+     *
+     * TRUE by default, and that matters. A new event goes on the home page
+     * with no second step, which is the behaviour that exists today and the
+     * one an editor expects; the flag is how they take one OFF. Defaulting
+     * it false would empty the strip on deploy and make every event a
+     * two-step publish.
+     *
+     * The same rule and the same spelling as `showOnHome` on a gallery item,
+     * deliberately — two flags meaning "this one rides the landing page"
+     * should not be two different words.
+     */
+    showOnHome: {
+        type: Boolean,
+        default: true,
+        index: true
+    },
+
     // ---- the detail an event page needs (EVT-001)
     agenda: { type: [agendaItemSchema], default: [] },
     speakers: { type: [speakerSchema], default: [] },
@@ -352,6 +441,40 @@ const eventSchema = new mongoose.Schema({
      * already paid.
      */
     registrationFee: { type: Number, min: 0, default: 0 },
+
+    /**
+     * WHAT A MEMBER PAYS INSTEAD — the membership discount, as a price.
+     *
+     * `registrationFee` is the common price: it is what a visitor off the
+     * onboarding site pays, and what a signed-in member with no active
+     * membership pays. This is the rate reserved for members who HAVE paid
+     * their membership, and it is the reason a member's subscription visibly
+     * earns them something on a screen a non-member is also looking at.
+     *
+     * STORED AS THE MEMBER'S PRICE, NOT AS A SAVING. "Discount: 1000" against
+     * "Price: 1000" reads two ways — a free seat for members, or no discount at
+     * all — and the two readings differ by the entire ticket price. A price has
+     * exactly one reading, so the editor types the number that will be charged
+     * and the screens compute the saving from the pair. The form still calls it
+     * the member price and prints "Members save ₹400 (40% off)" beneath it, so
+     * nobody has to hold this distinction in their head.
+     *
+     * `null`, NOT `0`, IS THE DEFAULT AND IT MEANS "NO MEMBER RATE".
+     *
+     * Zero cannot stand in for "unset" here the way it does for
+     * `registrationFee`. Zero is a real and useful answer — a ₹1,000 conference
+     * that members attend free is the strongest version of this offer — so a
+     * scheme where 0 meant "charge them the full price" would make the best
+     * offer the association can make unexpressible. Every event already in the
+     * collection comes back `null` and charges one price to everybody, exactly
+     * as it does today.
+     *
+     * A value ABOVE `registrationFee` is not rejected by the schema and is not
+     * meaningful; `memberPriceFor()` in the service takes the lower of the two,
+     * so a fat-fingered member rate can never charge a member MORE than the
+     * public price.
+     */
+    memberFee: { type: Number, min: 0, default: null },
 
     /**
      * The registration form, as the super admin designed it (EVT-004).

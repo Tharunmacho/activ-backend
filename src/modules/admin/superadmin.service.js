@@ -3,13 +3,16 @@ const bcrypt = require('../common/passwordHash');
 const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
 const ApiError = require('../../core/utils/ApiError');
-const { normalizeStatus } = require('../common/applicationStatus');
+const { normalizeStatus, isPending, PENDING_STORED_STATUSES } = require('../common/applicationStatus');
 const adminService = require('./admin.service');
 const auditService = require('../audit/audit.service');
 const adminRepository = require('./admin.repository');
+const cacheClient = require('../../core/cache/cacheClient');
+const { CACHE_KEYS } = require('../../core/cache/cacheKeys');
 const adminRegions = require('./admin.regions');
 const regionService = require('../regions/region.service');
 const tierRouting = require('../common/tierRouting');
+const tierReviews = require('../common/tierReviews');
 
 const { buildApplicant, escapeRegex, LEVELS, classifyForLevel } = adminService;
 
@@ -116,12 +119,31 @@ const scopeFilter = (scope = {}) => {
 const coverageResolver = () => {
     const cache = new Map();
 
-    return async (app = {}) => {
+    /**
+     * THE PROMISE GOES IN THE MAP, NOT THE RESOLVED VALUE.
+     *
+     * This stored the awaited result: `cache.set(key, await coverageFor(...))`.
+     * Read sequentially that memoises perfectly, and every caller reads it
+     * CONCURRENTLY — `decorateDecidability` runs `Promise.all` over the page, so
+     * all fifty rows reach the `has(key)` test in the same tick, all fifty find
+     * it false, and all fifty start their own lookup. The memo saved nothing on
+     * the one path that uses it.
+     *
+     * Storing the in-flight promise makes the second caller await the first
+     * one's work, which is what a memo is for. Fifty rows in one block are one
+     * lookup again.
+     *
+     * `.catch` is attached where the promise is created, so a rejection is
+     * settled once rather than once per awaiting row — and a failed lookup
+     * caches as `null`, which `tierRouting` reads as "staffing unknown" and
+     * treats conservatively.
+     */
+    return (app = {}) => {
         const key = [app.state, app.district, app.block]
             .map(v => String(v || '').trim().toLowerCase()).join('|');
 
         if (!cache.has(key)) {
-            cache.set(key, await regionService
+            cache.set(key, regionService
                 .coverageFor({ state: app.state, district: app.district, block: app.block })
                 .catch(() => null));
         }
@@ -154,50 +176,131 @@ const assertManageable = (target = {}, scope = {}) => {
 
 const ROLE_LABELS = adminRepository.ROLE_LABELS;
 
-const TIER_LABELS = {
-    'Pending-Block': 'Block',
-    'Pending-District': 'District',
-    'Pending-State': 'State'
-};
+/*
+ * There is no "blocked tier" any more.
+ *
+ * This mapped a pending status to the one tier that owed a decision, so a stuck
+ * file could name whoever was sitting on it. A pending file is with all three
+ * tiers of its region at once now, and naming one of them would be picking a
+ * scapegoat rather than reporting a fact. `bottlenecks` says that in words.
+ */
+const HOLDING_ALL_TIERS = 'Block, District and State';
 
 const col = adminRepository.col;
+
+/**
+ * How long a Hub answer is reused. The dashboards' number, deliberately.
+ *
+ * `admin.service.cachedDashboard` settled on 120s for exactly this shape of
+ * work: ten round trips to a remote cluster, an answer that only changes when
+ * somebody decides an application or staffs a region, and both of those events
+ * clearing the key outright. The Hub was the one admin surface left paying the
+ * full cost on every visit — a state admin's Hub fires TWO directory calls on
+ * load and the super admin's three, each a fresh scan of the applications and
+ * the whole admin roster, and the answer is identical every time.
+ */
+const HUB_TTL_SECONDS = 120;
+
+/**
+ * A tier may only drill DOWN.
+ *
+ * A district admin asking for `level=state` would otherwise be handed a row per
+ * state — every one outside their patch, with counts drawn from applications
+ * they cannot open. The level is clamped to what sits beneath them; the parent
+ * region is forced separately in `computeDirectory`, and the two together mean
+ * a request can only ever describe its own ground. A super admin keeps all
+ * three and is forced to nothing.
+ *
+ * Shared by the cache key and the query it keys, because they have to agree:
+ * keying on the level as ASKED would file a district admin's `level=state`
+ * request — which answers with blocks — under "state", and hand those blocks to
+ * the next caller who asked for states.
+ */
+const allowedLevelsFor = (role) =>
+    role === 'district_admin' ? ['block']
+        : role === 'state_admin' ? ['district', 'block']
+            : ['state', 'district', 'block'];
+
+const resolveLevel = (role, asked) => {
+    const allowed = allowedLevelsFor(role);
+    const want = String(asked || '').toLowerCase();
+    return allowed.includes(want) ? want : allowed[0];
+};
+
+/**
+ * Read through the cache, and never let the cache break the request.
+ *
+ * A failing cache must degrade to a slow answer, not to no answer: both halves
+ * are caught, so an unreachable Redis (this deployment falls back to an
+ * in-process map, and that fallback can itself be cold) costs latency and
+ * nothing else.
+ */
+const cached = async(key, ttlSeconds, build) => {
+    const hit = await cacheClient.get(key).catch(() => null);
+    if (hit) return hit;
+
+    const payload = await build();
+    await cacheClient.set(key, payload, ttlSeconds).catch(() => null);
+    return payload;
+};
 
 const rx = (value) => new RegExp(escapeRegex(String(value || '')), 'i');
 const rxExact = (value) => new RegExp(`^${escapeRegex(String(value || ''))}$`, 'i');
 
 /**
- * The tier whose perspective makes a global row read correctly.
+ * Which tier's dashboard a global row should be rendered as.
  *
- * `buildApplicant` always renders from one tier's point of view, and the same
- * application means different things to each. The super admin wants the plain
- * truth — pending means "someone still owes a decision", approved means fully
- * approved — so pick the tier that currently owns the file.
+ * It used to matter: `buildApplicant` rendered from one tier's point of view and
+ * the same application meant different things to each, so this picked the tier
+ * that currently owned the file. All three tiers see the same three buckets
+ * now, so the answer only decides the `level` label on the row. Block is the
+ * applicant's own smallest region and is the honest default.
  */
-const levelForApplication = (application = {}) => {
-    const status = normalizeStatus(application.status);
-    if (status === 'Pending-District') return LEVELS.DISTRICT;
-    if (status === 'Pending-State') return LEVELS.STATE;
-    if (status === 'Approved') return LEVELS.STATE;
-    if (status === 'Rejected') {
-        const by = String(application.rejectedBy?.adminType || '');
-        if (by === 'DistrictAdmin') return LEVELS.DISTRICT;
-        if (by === 'StateAdmin') return LEVELS.STATE;
-        return LEVELS.BLOCK;
-    }
-    return LEVELS.BLOCK;
+const levelForApplication = () => LEVELS.BLOCK;
+
+/**
+ * The review seat an admin ROLE sits in.
+ *
+ * `super_admin` maps to `'super'`, which `tierReviews` resolves to the deciding
+ * seat — the State's. That is deliberate and it is the whole reason a region
+ * with no state admin is not a region where nobody can be enrolled.
+ */
+const ROLE_TIER = {
+    block_admin: 'block',
+    district_admin: 'district',
+    state_admin: 'state',
+    super_admin: 'super'
 };
 
-/** When the clock started running at the tier that currently holds the file. */
-const waitingSince = (application = {}) => {
-    const status = normalizeStatus(application.status);
-    if (status === 'Pending-State') {
-        return application.districtApprovedAt || application.blockApprovedAt || application.createdAt || null;
-    }
-    if (status === 'Pending-District') {
-        return application.blockApprovedAt || application.createdAt || null;
-    }
-    return application.createdAt || null;
+/**
+ * The dashboard level a role reads by DEFAULT, when it has not asked for one.
+ *
+ * `levelForApplication` returned Block for everybody, which was harmless while
+ * all three tiers shared one verdict and is not any more: the level decides
+ * which tier's verdict a row renders as, so a State admin opening the Hub was
+ * shown the BLOCK's answer for every applicant — a pending badge on a file they
+ * had themselves approved.
+ *
+ * `super_admin` lands on `state` rather than `block`, matching the seat they
+ * fill in `ROLE_TIER`. What they see and what they can sign then agree.
+ */
+const ROLE_LEVEL = {
+    block_admin: LEVELS.BLOCK,
+    district_admin: LEVELS.DISTRICT,
+    state_admin: LEVELS.STATE,
+    super_admin: LEVELS.STATE
 };
+
+/**
+ * How long this applicant has been waiting.
+ *
+ * FROM SUBMISSION, always. This used to restart the clock each time the file
+ * cleared a tier, because each tier was answerable only for its own leg of the
+ * relay. Nobody hands the file on any more - it has been in front of all three
+ * admins since the day it arrived - so the only honest measure of the wait is
+ * how long the applicant has been waiting.
+ */
+const waitingSince = (application = {}) => application.createdAt || null;
 
 const daysSince = (date) => {
     if (!date) return 0;
@@ -238,6 +341,12 @@ class SuperAdminService {
      * been stuck at one tier long enough to need a super-admin override.
      */
     async getOverview() {
+        // One answer for every super admin, cleared by any decision — see the
+        // note on `ADMIN_OVERVIEW` in `cacheKeys`.
+        return cached(CACHE_KEYS.ADMIN_OVERVIEW, HUB_TTL_SECONDS, () => this.computeOverview());
+    }
+
+    async computeOverview() {
         const [totalMembers, applications, allAdmins] = await Promise.all([
             Member.countDocuments().catch(() => 0),
             Application.find({})
@@ -249,7 +358,13 @@ class SuperAdminService {
         ]);
 
         const counts = { pending: 0, approved: 0, rejected: 0 };
-        const tierQueue = { block: 0, district: 0, state: 0 };
+        /*
+         * `tierQueue` counted how many files were sitting at each tier - the
+         * shape of the relay. Every pending file is at all three tiers now, so
+         * the three figures would be the same number printed three times.
+         * Emitted as the pending total in each slot so the existing clients do
+         * not read `undefined`, and no longer meaningful as a breakdown.
+         */
         const stuck = [];
         const tierStats = {
             block: { total: 0, pending: 0, approved: 0, rejected: 0 },
@@ -264,41 +379,31 @@ class SuperAdminService {
             else if (status === 'Rejected') counts.rejected += 1;
             else counts.pending += 1;
 
-            if (status === 'Pending-Block') tierQueue.block += 1;
-            else if (status === 'Pending-District') tierQueue.district += 1;
-            else if (status === 'Pending-State') tierQueue.state += 1;
-
-            // Tier-specific relative stats
-            const blockStage = classifyForLevel(app, LEVELS.BLOCK);
-            if (blockStage !== 'upstream') {
-                tierStats.block.total += 1;
-                if (blockStage === 'pending') tierStats.block.pending += 1;
-                else if (blockStage === 'approved') tierStats.block.approved += 1;
-                else if (blockStage === 'rejected' || blockStage === 'closed') tierStats.block.rejected += 1;
-            }
-
-            const districtStage = classifyForLevel(app, LEVELS.DISTRICT);
-            if (districtStage !== 'upstream') {
-                tierStats.district.total += 1;
-                if (districtStage === 'pending') tierStats.district.pending += 1;
-                else if (districtStage === 'approved') tierStats.district.approved += 1;
-                else if (districtStage === 'rejected' || districtStage === 'closed') tierStats.district.rejected += 1;
-            }
-
-            const stateStage = classifyForLevel(app, LEVELS.STATE);
-            if (stateStage !== 'upstream') {
-                tierStats.state.total += 1;
-                if (stateStage === 'pending') tierStats.state.pending += 1;
-                else if (stateStage === 'approved') tierStats.state.approved += 1;
-                else if (stateStage === 'rejected' || stateStage === 'closed') tierStats.state.rejected += 1;
-            }
+            /*
+             * The three tiers see the same file, so they see the same figures.
+             * Kept as three rows because the Hub prints a card per tier and the
+             * cards are about REGIONS - how many applicants sit under each
+             * level of the geography - which is still a real question.
+             */
+            // Each card counts ITS OWN tier's verdict. This was one call with no
+            // level, which classifies by the Block's verdict, so all three
+            // cards printed the Block's answer.
+            ['block', 'district', 'state'].forEach((tier) => {
+                const stage = classifyForLevel(app, tier);
+                tierStats[tier].total += 1;
+                if (stage === 'pending') tierStats[tier].pending += 1;
+                else if (stage === 'approved') tierStats[tier].approved += 1;
+                else if (stage === 'rejected') tierStats[tier].rejected += 1;
+            });
 
             const since = waitingSince(app);
             const stuckDays = daysSince(since);
-            if (stuckDays >= BOTTLENECK_DAYS && (status === 'Pending-Block' || status === 'Pending-District' || status === 'Pending-State')) {
+            if (stuckDays >= BOTTLENECK_DAYS && isPending(status)) {
                 stuck.push({ app, stuckDays, since, status });
             }
         });
+
+        const tierQueue = { block: counts.pending, district: counts.pending, state: counts.pending };
 
         stuck.sort((a, b) => b.stuckDays - a.stuckDays);
         const top = stuck.slice(0, 20);
@@ -308,9 +413,10 @@ class SuperAdminService {
             ...applicant,
             stuckDays: top[index]?.stuckDays || 0,
             waitingSince: top[index]?.since || null,
-            // The tier that currently owes a decision — this is who the super
-            // admin acts in place of when they override.
-            blockedTier: TIER_LABELS[top[index]?.status] || 'Block'
+            // Every tier that could have cleared it and none of them has. The
+            // super admin is not standing in for one of them when they act -
+            // they are doing what all three were equally able to do.
+            blockedTier: HOLDING_ALL_TIERS
         }));
 
         const adminCounts = { 
@@ -352,14 +458,17 @@ class SuperAdminService {
     }
 
     /**
-     * Regions holding pending applications that their own tier can no longer act
-     * on, because nobody covers them.
+     * Regions holding pending applications that NOBODY can act on.
      *
-     * These files are not stuck — orphan fallback has already handed them to the
-     * tier above — but they are the super admin's cue to staff a replacement, and
-     * the only place the platform says out loud that a region went unstaffed.
-     * Sorted by how many applicants are waiting, because that is the order the
-     * vacancies should be filled in.
+     * This used to report a region whose own tier was unstaffed, because under
+     * the relay that file could not move until the tier above absorbed it. A
+     * missing block admin is not a gap any more - the district and state admin
+     * of that region were already holding the same file and either can clear it.
+     *
+     * What is still a gap, and a worse one, is a region with no admin at ANY
+     * tier: its applicants are reachable only by the Super Admin. That is what
+     * this reports now. Sorted by how many applicants are waiting, because that
+     * is the order the vacancies should be filled in.
      */
     async coverageGaps(applications = []) {
         const coverageFor = await regionService.coverageResolver().catch(() => null);
@@ -368,32 +477,28 @@ class SuperAdminService {
         const gaps = new Map();
 
         (applications || []).forEach((app) => {
-            const status = normalizeStatus(app.status);
-            if (status !== 'Pending-Block' && status !== 'Pending-District' && status !== 'Pending-State') return;
+            if (!isPending(app.status)) return;
 
             const region = { state: app.state, district: app.district, block: app.block };
             const coverage = coverageFor(region);
-            if (!tierRouting.isOrphaned(app, coverage)) return;
+            if (!tierRouting.isUnattended(coverage)) return;
 
-            const owner = tierRouting.owningTier(app);
-            const effective = tierRouting.effectiveTier(app, coverage);
+            // Keyed on the applicant's own block, which is the most specific
+            // region the vacancy covers - so one unstaffed block is one row
+            // however many applications are sitting in it.
+            const place = [app.block, app.district, app.state];
+            const missing = tierRouting.unstaffedTiers(coverage);
 
-            // Keyed on the unstaffed tier's own region, so one vacancy is one row
-            // however many applications are sitting behind it.
-            const place = owner === 'block'
-                ? [app.block, app.district, app.state]
-                : owner === 'district'
-                    ? ['', app.district, app.state]
-                    : ['', '', app.state];
-
-            const id = `${owner}|${place.join('|').toLowerCase()}`;
+            const id = `unattended|${place.join('|').toLowerCase()}`;
             if (!gaps.has(id)) {
                 gaps.set(id, {
                     id,
-                    missingTier: owner,
-                    missingTierLabel: tierRouting.TIER_LABELS[owner] || '',
-                    escalatedTo: effective,
-                    escalatedToLabel: tierRouting.TIER_LABELS[effective] || 'Super',
+                    missingTier: missing[0] || 'block',
+                    missingTierLabel: missing
+                        .map(tier => tierRouting.TIER_LABELS[tier])
+                        .join(', ') || 'Block',
+                    escalatedTo: 'super',
+                    escalatedToLabel: 'Super',
                     block: place[0],
                     district: place[1],
                     state: place[2],
@@ -486,6 +591,49 @@ class SuperAdminService {
         if (scope.role === 'state_admin') filters = { ...filters, state: scope.state };
         if (scope.role === 'district_admin') filters = { ...filters, state: scope.state, district: scope.district };
 
+        /*
+         * =================================================================
+         * CACHED FOR THE WAY THE HUB ACTUALLY USES IT, AND NOT OTHERWISE
+         * =================================================================
+         *
+         * The drill-down opens a region, the admin decides something, and the
+         * screen refetches this exact list — the same three or four regions,
+         * over and over, each costing two round trips to a remote cluster.
+         * That is the dashboards' own shape of work, so it gets the dashboards'
+         * own treatment: the same TTL, the same `admin:dashboard:` prefix, and
+         * therefore the same clearing on every approve and reject.
+         *
+         * A SEARCH IS NOT CACHED. `q` is free text a person types a character
+         * at a time; keying on it would mint an entry per keystroke and evict
+         * everything worth keeping to hold answers nobody will ask for twice.
+         * Paging past the first page is left alone for the same reason — it is
+         * a deliberate, one-off move, not the hot path.
+         *
+         * Note the key is built AFTER the scope is forced above, so a district
+         * admin and a super admin asking about the same block are two different
+         * keys.
+         */
+        const searching = !!(filters.q && String(filters.q).trim().length >= 2);
+        const firstPage = Math.max(1, parseInt(filters.page, 10) || 1) === 1;
+
+        if (!searching && firstPage) {
+            const key = 'admin:dashboard:applications:' + [
+                scope.role || 'unknown',
+                filters.level || '',
+                filters.status || 'all',
+                filters.state || '',
+                filters.district || '',
+                filters.block || '',
+                filters.limit || '',
+            ].map(v => String(v).trim().toLowerCase()).join('|');
+
+            return cached(key, HUB_TTL_SECONDS, () => this.computeApplications(filters, scope));
+        }
+
+        return this.computeApplications(filters, scope);
+    }
+
+    async computeApplications(filters = {}, scope = {}) {
         const { status, state, district, block, q, level } = filters;
         const page = Math.max(1, parseInt(filters.page, 10) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(filters.limit, 10) || 25));
@@ -513,41 +661,44 @@ class SuperAdminService {
         const validLevels = { block: LEVELS.BLOCK, district: LEVELS.DISTRICT, state: LEVELS.STATE };
         const requestedLevel = validLevels[String(level || '').toLowerCase()];
 
+        /*
+         * WHICH TIER'S VERDICT THIS PAGE IS SHOWING.
+         *
+         * The level being browsed when one was asked for; otherwise the reader's
+         * own seat. It has to be one value for both the pills and the rows — a
+         * page whose "Pending" filter counts the block's verdicts while the
+         * badges print the state's is a page whose filter appears broken.
+         */
+        const viewLevel = requestedLevel || ROLE_LEVEL[scope.role] || LEVELS.BLOCK;
+
+        /*
+         * The filter pills, which mean THIS TIER'S VERDICT.
+         *
+         * "Pending" is "waiting on the tier this page is showing" — not "nobody
+         * anywhere has decided". The two answers differ on exactly the rows an
+         * admin most needs to find: an applicant the State has already enrolled
+         * is still Pending for a District that has recorded nothing.
+         */
         const wanted = String(status || 'all').toLowerCase();
         const matchesStatus = (app) => {
             if (!wanted || wanted === 'all') return true;
-            
-            if (requestedLevel) {
-                const stage = classifyForLevel(app, requestedLevel);
-                if (wanted === 'rejected') return stage === 'rejected' || stage === 'closed';
-                return stage === wanted;
-            }
-
-            const normalized = normalizeStatus(app.status);
-            if (wanted === 'pending') return normalized !== 'Approved' && normalized !== 'Rejected';
-            if (wanted === 'approved') return normalized === 'Approved';
-            if (wanted === 'rejected') return normalized === 'Rejected';
-            return normalized.toLowerCase() === wanted;
+            return classifyForLevel(app, viewLevel) === wanted;
         };
 
         /*
          * A file stays visible at every level whose region it belongs to.
          *
-         * It is the STAGE that changes, not the membership of the list — which
-         * is what `classifyForLevel` has always expressed and what the bucket
-         * table in CLAUDE.md prescribes: the same application is `pending` to
-         * the tier that owes a decision, `approved` to the tier that has already
-         * given one, and `upstream` to a tier still waiting on an earlier one.
-         *
          * An earlier version of this dropped a file from a level once it moved
-         * past that level. It fixed the visible symptom — buttons offered for a
-         * decision already made — and broke something worse: approving a file
+         * past that level. It fixed the visible symptom - buttons offered for a
+         * decision already made - and broke something worse: approving a file
          * made it vanish from the list the admin was looking at, with no
          * confirmation anywhere that it had been approved. "What happened in my
          * block" stopped being answerable.
          *
-         * The buttons are governed by `canAct` below, which is the question that
-         * was actually being asked.
+         * Nothing moves past a level any more, so the rule is simply the
+         * geofence: an application appears in the list of its own state, its own
+         * district and its own block, and in no other. The buttons are governed
+         * by `canAct` below, which asks only whether it has been decided yet.
          */
         // One lookup per distinct region, shared by the decidability pass below:
         // a page of fifty files in one block is one lookup, not fifty.
@@ -557,7 +708,7 @@ class SuperAdminService {
 
         const start = (page - 1) * limit;
         const page1 = filtered.slice(start, start + limit);
-        const applicants = await toApplicants(page1, requestedLevel);
+        const applicants = await toApplicants(page1, viewLevel);
 
         /*
          * Whether THIS admin can decide THIS file, answered by the server.
@@ -730,73 +881,66 @@ class SuperAdminService {
      * would hide exactly the regions worth chasing.
      */
     /**
-     * Mark each applicant with whether this admin may decide it, and if not, who must.
+     * Mark each applicant with whether this admin may decide it.
      *
-     * THE RULES, in the order they are asked:
+     * THE WHOLE RULE, now that the relay is gone:
      *
-     *   1. A file with no pending decision (approved, or rejected) is nobody's
-     *      to act on. It still appears — monitoring is half the point of the
-     *      drill-down — but with no buttons.
-     *   2. A SUPER admin may act on anything still pending. `reviewApplication`
-     *      picks whichever tier the file sits at and advances it one step, so
-     *      approving a `Pending-Block` file moves it to `Pending-District`
-     *      exactly as the block admin's own approval would.
-     *   3. Any other tier may act when the file is theirs — either because it
-     *      sits at their tier, or because every tier beneath them is unstaffed
-     *      and `effectiveTier` has escalated it to them.
+     *   1. A file that has already been decided - approved or rejected - is
+     *      nobody's to act on. It still appears, because monitoring is half the
+     *      point of the drill-down, but with no buttons.
+     *   2. Anyone else looking at it may decide it. The row reached this caller
+     *      through a geofenced query or a forced scope, so the fact that they
+     *      can see it IS the permission: a block admin only ever sees their own
+     *      block's applicants, a district admin their district's, a state admin
+     *      their state's, and the super admin everyone's.
      *
-     * Coverage is fetched once per distinct region rather than per applicant: a
-     * page of fifty files in one block would otherwise run fifty identical
-     * lookups against the admin collections.
+     * What went with the relay: the check that the file was sitting at the
+     * caller's own tier, the escalation that handed it upward when the tier
+     * below was unstaffed, and the rule that withheld buttons in the drill-down
+     * when you were browsing a level the file had moved past. A file cannot move
+     * past a level any more.
+     *
+     * Coverage is still resolved, once per distinct region, for `waitingOn`:
+     * a region with nobody at any tier is worth naming on the row.
      */
-    async decorateDecidability(documents = [], applicants = [], role = '', coverageOf = coverageResolver(), level = '') {
-        const TIER_LABEL = { block: 'Block', district: 'District', state: 'State', super: 'Super' };
-        const actingTier = { block_admin: 'block', district_admin: 'district', state_admin: 'state' }[role] || null;
-        const isSuper = role === 'super_admin';
-        const browsing = ['block', 'district', 'state'].includes(String(level || '').toLowerCase())
-            ? String(level).toLowerCase()
-            : null;
+    async decorateDecidability(documents = [], applicants = [], role = '', coverageOf = coverageResolver(), _level = '') {
+        /*
+         * THE VIEWER'S OWN SEAT DECIDES THIS — not the level being browsed.
+         *
+         * A Super Admin can page through the Hub at `level=block`, and
+         * `buildApplicant` will have answered `canAct` for the BLOCK seat.
+         * That is the wrong seat for them: a Super Admin fills the STATE's,
+         * because theirs is the approval that grants a membership. Reading the
+         * level here would let them sign the block's slot instead and leave the
+         * applicant un-enrolled with every button greyed out.
+         */
+        const tier = ROLE_TIER[role] || 'super';
 
         return Promise.all(applicants.map(async (applicant, i) => {
             const doc = documents[i] || {};
-            const owner = tierRouting.owningTier(doc);
-
-            // Approved or rejected outright: no tier owes anything.
-            if (!owner) return { ...applicant, canAct: false, waitingOn: '' };
-
-            const coverage = await coverageOf(doc);
-            const effective = tierRouting.effectiveTier(doc, coverage);
-            const label = TIER_LABEL[effective] || TIER_LABEL[owner] || '';
 
             /*
-             * A decision is offered at the tier that owes it, and nowhere else.
-             *
-             * This is the rule that keeps a super admin's screen honest. They may
-             * act on any pending file — `reviewApplication` picks the tier for
-             * them — but a row in the DISTRICT list that the district has already
-             * approved is not a district decision any more, and offering Approve
-             * beside a green "Approved" badge is the screen arguing with itself.
-             * The file is still theirs to decide: from the State list, where it
-             * now sits and where it is shown as pending.
-             *
-             * When no level is being browsed — a flat list, not a drill-down —
-             * the super admin keeps the old blanket permission.
+             * Not `isPending(doc.status)` — that is the APPLICATION's outcome,
+             * and it closed the buttons for every tier the moment any one of
+             * them acted. `canTierAct` asks the only question that governs a
+             * button: has THIS seat been signed. A District admin still owes a
+             * verdict on a file the State has approved.
              */
-            if (browsing && effective !== browsing) {
-                return { ...applicant, canAct: false, waitingOn: label };
+            if (!tierReviews.canTierAct(doc, tier)) {
+                return { ...applicant, canAct: false, waitingOn: '' };
             }
 
-            if (isSuper) return { ...applicant, canAct: true, waitingOn: '' };
-            if (!actingTier) return { ...applicant, canAct: false, waitingOn: label };
-
-            const canAct = effective === actingTier;
+            // Coverage is only worth resolving while the outcome is open — an
+            // enrolled applicant is not waiting on anybody.
+            const coverage = isPending(doc.status) ? await coverageOf(doc).catch(() => null) : null;
 
             return {
                 ...applicant,
-                canAct,
-                // Named so the row can say why it is read-only rather than just
-                // omitting the buttons and leaving it unexplained.
-                waitingOn: canAct ? '' : label
+                canAct: true,
+                // Only said when it is true and useful: this region has nobody
+                // at any tier, so the Super Admin is the only one who will ever
+                // clear it unless somebody is appointed.
+                waitingOn: tierRouting.isUnattended(coverage) ? 'Super' : ''
             };
         }));
     }
@@ -805,21 +949,36 @@ class SuperAdminService {
         const scope = await actorScope(actor);
 
         /*
-         * A tier may only drill DOWN.
-         *
-         * A district admin asking for `level=state` would otherwise be handed a
-         * row per state — every one outside their patch, with counts drawn from
-         * applications they cannot open. The level is clamped to what sits
-         * beneath them and the parent region is forced, so the two together can
-         * only ever describe their own ground. Unchanged for a super admin: all
-         * three levels stay available and nothing is forced.
+         * Keyed AFTER the scope is resolved and BEFORE it is forced below, from
+         * the three things that decide the answer: who is asking, which level,
+         * and which parent region. A district admin and a super admin can both
+         * ask for `level=block`; they are asking different questions and the key
+         * has to say so.
          */
-        const asked = String(filters.level || '').toLowerCase();
-        const allowedLevels = scope.role === 'district_admin' ? ['block']
-            : scope.role === 'state_admin' ? ['district', 'block']
-                : ['state', 'district', 'block'];
+        const key = CACHE_KEYS.ADMIN_DIRECTORY(
+            scope.role || 'unknown',
+            resolveLevel(scope.role, filters.level),
+            scope.role === 'super_admin' ? (filters.state || '') : (scope.state || ''),
+            scope.role === 'district_admin' ? (scope.district || '') : (filters.district || ''),
+        );
 
-        const level = allowedLevels.includes(asked) ? asked : allowedLevels[0];
+        return cached(key, HUB_TTL_SECONDS, () => this.computeDirectory(filters, scope));
+    }
+
+    async computeDirectory(filters = {}, scope = {}) {
+
+        // Clamped by `resolveLevel` — see its note. The region is forced below.
+        const level = resolveLevel(scope.role, filters.level);
+
+        /*
+         * WHOSE VERDICT the counts report — a different question from which
+         * level of the GEOGRAPHY the rows are. A district admin browsing blocks
+         * is asking about their own decisions, the same figures their Dashboard
+         * shows; the super admin's per-tier cards ask about that tier's.
+         */
+        const verdictLevel = scope.role === 'super_admin'
+            ? level
+            : (ROLE_LEVEL[scope.role] || level);
 
         if (scope.role === 'state_admin') filters = { ...filters, state: scope.state };
         if (scope.role === 'district_admin') filters = { ...filters, state: scope.state, district: scope.district };
@@ -834,7 +993,13 @@ class SuperAdminService {
 
         const [documents, admins, stateNames, districtNames, blockNames] = await Promise.all([
             Application.find(mongoFilter)
-            .select('state district block status blockApprovedAt districtApprovedAt rejectedBy createdAt')
+            /*
+             * Everything `tierReviews.tierVerdict` reads. This used to omit
+             * `reviews`, `approvedBy`, `reviewedBy` and `stateApprovedAt`, so a
+             * file the District or State had approved looked undecided here —
+             * the Hub printed "2 pending" beside a Dashboard printing 0.
+             */
+            .select('state district block status reviews approvedBy reviewedBy rejectedBy rejectionReason blockApprovedAt districtApprovedAt stateApprovedAt createdAt')
             .limit(GLOBAL_FETCH_LIMIT)
             .lean()
             .catch(() => []),
@@ -873,15 +1038,15 @@ class SuperAdminService {
 
         (documents || []).forEach(app => {
             const row = rowFor(app[level], { state: app.state, district: app.district });
-            const reqLevel = { block: LEVELS.BLOCK, district: LEVELS.DISTRICT, state: LEVELS.STATE }[level];
-            const stage = classifyForLevel(app, reqLevel);
+            // Every application in the region counts towards its row. There is
+            // no longer a stage that belongs to a tier without belonging to the
+            // region - `upstream` and `closed` are gone.
+            const stage = classifyForLevel(app, verdictLevel);
 
-            if (stage !== 'upstream') {
-                row.applications += 1;
-                if (stage === 'approved') row.approved += 1;
-                else if (stage === 'rejected' || stage === 'closed') row.rejected += 1;
-                else if (stage === 'pending') row.pending += 1;
-            }
+            row.applications += 1;
+            if (stage === 'approved') row.approved += 1;
+            else if (stage === 'rejected') row.rejected += 1;
+            else row.pending += 1;
         });
 
         (admins || []).filter(matchesParent).forEach(admin => {
@@ -894,12 +1059,13 @@ class SuperAdminService {
          * Staffed, or holding work. Not "staffed" alone.
          *
          * This filter was `r.admins > 0`, which hid the single most important
-         * row on the screen: a block with applications and NO admin. Those files
-         * are the ones that escalate — `effectiveTier` hands them to the district
-         * precisely because nobody below is there to take them — so the region
-         * that most needs opening was the one region the drill-down would not
-         * show. The comment above the seeding says the directory exists so that
-         * "the regions worth chasing" are visible; this is the other half of it.
+         * row on the screen: a block with applications and NO admin. Those
+         * applicants are still covered - their district and state admin hold the
+         * same files - but an unstaffed block is exactly the region the Super
+         * Admin should be appointing into, so the region that most needs opening
+         * was the one region the drill-down would not show. The comment above
+         * the seeding says the directory exists so that "the regions worth
+         * chasing" are visible; this is the other half of it.
          *
          * Regions with neither an admin nor an application are still dropped:
          * every name in the reference list would otherwise appear, and 6,966
@@ -1028,6 +1194,16 @@ class SuperAdminService {
         // that tree. A stale cache here means a region that is staffed but not
         // yet selectable.
         regionService.invalidate();
+        /*
+         * And the Hub's own answers.
+         *
+         * `getDirectory` counts admins per region and `getOverview` counts them
+         * per tier, so staffing a region changes both — and neither is on the
+         * approve/reject path that clears this prefix the rest of the time. Left
+         * out, a newly created block admin would not appear in the directory
+         * for up to two minutes, which reads as the account not having saved.
+         */
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         await auditService.record({
             action: 'admin.created',
@@ -1107,17 +1283,19 @@ class SuperAdminService {
             return { affected: 0, escalatesTo: '', escalatesToLabel: '', tier, remainingAdmins: remaining };
         }
 
-        const pendingStatus = {
-            block: ['PENDING', 'Pending-Block'],
-            district: ['Pending-District'],
-            state: ['Pending-State']
-        }[tier];
-
+        /*
+         * Every undecided application in this admin's patch.
+         *
+         * It used to count only the ones sitting AT this admin's tier, because
+         * those were the only ones they could act on. All three tiers hold every
+         * pending file in their region now, so removing this admin takes a pair
+         * of hands off all of them - and the warning should say so.
+         */
         const conditions = [];
         if (admin.state) conditions.push({ state: rxExact(admin.state) });
         if (tier !== 'state' && admin.district) conditions.push({ district: rxExact(admin.district) });
         if (tier === 'block' && admin.block) conditions.push({ block: rxExact(admin.block) });
-        conditions.push({ status: { $in: pendingStatus } });
+        conditions.push({ status: { $in: PENDING_STORED_STATUSES } });
 
         const affected = await Application.countDocuments({ $and: conditions }).catch(() => 0);
 
@@ -1134,13 +1312,21 @@ class SuperAdminService {
             if (other.role === 'state_admin' && key(other.state) === key(admin.state)) coverage.state += 1;
         });
 
-        const startStatus = { block: 'Pending-Block', district: 'Pending-District', state: 'Pending-State' }[tier];
-        const escalatesTo = tierRouting.effectiveTier({ status: startStatus }, coverage);
+        /*
+         * Who is left holding those files.
+         *
+         * Nothing "escalates" - the other two tiers were already on them. What
+         * this answers is whether anybody is left at all: if the region still
+         * has an admin at some tier, name the first one; if it has none, the
+         * Super Admin is the only route in and the field says so.
+         */
+        const remainingTier = tierRouting.TIER_ORDER.find(t => Number(coverage[t] || 0) > 0);
+        const escalatesTo = remainingTier || 'super';
 
         return {
             affected,
             tier,
-            escalatesTo: escalatesTo || '',
+            escalatesTo,
             escalatesToLabel: tierRouting.TIER_LABELS[escalatesTo] || 'Super',
             remainingAdmins: 0
         };
@@ -1249,6 +1435,16 @@ class SuperAdminService {
 
         await adminRepository.updateById(hit, update);
         regionService.invalidate();
+        /*
+         * And the Hub's own answers.
+         *
+         * `getDirectory` counts admins per region and `getOverview` counts them
+         * per tier, so staffing a region changes both — and neither is on the
+         * approve/reject path that clears this prefix the rest of the time. Left
+         * out, a newly created block admin would not appear in the directory
+         * for up to two minutes, which reads as the account not having saved.
+         */
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         const updated = adminRepository.toAdminRow({ ...hit.doc, ...update, _id: hit.objectId }, hit.source);
         updated.source = hit.sourceKey;
@@ -1398,6 +1594,16 @@ class SuperAdminService {
             objectId: new mongoose.Types.ObjectId(adminId)
         });
         regionService.invalidate();
+        /*
+         * And the Hub's own answers.
+         *
+         * `getDirectory` counts admins per region and `getOverview` counts them
+         * per tier, so staffing a region changes both — and neither is on the
+         * approve/reject path that clears this prefix the rest of the time. Left
+         * out, a newly created block admin would not appear in the directory
+         * for up to two minutes, which reads as the account not having saved.
+         */
+        await cacheClient.delPattern(CACHE_KEYS.PATTERNS.ADMIN_DASHBOARD).catch(() => null);
 
         // Written after the delete: the account is gone from every collection,
         // so this entry is now the only remaining record that it existed.

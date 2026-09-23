@@ -45,6 +45,7 @@ const SITE = {
         navLinks: [
             { label: 'Home', href: '/' },
             { label: 'About', href: '/about' },
+            { label: 'Membership', href: '/membership' },
             { label: 'Events', href: '/events' },
             { label: 'Gallery', href: '/gallery' },
             { label: 'Contact Us', href: '/contact' },
@@ -66,6 +67,7 @@ const SITE = {
                 links: [
                     { label: 'Home', href: '/' },
                     { label: 'About', href: '/about' },
+                    { label: 'Membership', href: '/membership' },
                     { label: 'Events', href: '/events' },
                     { label: 'Gallery', href: '/gallery' },
                     { label: 'Contact', href: '/contact' },
@@ -111,11 +113,22 @@ const HOME = {
         headline: 'Empowering SC/ST Entrepreneurs for a',
         headlineHighlight: 'Better Future',
         subheadline: 'Help us provide a strong platform, education, networking, and resources to upcoming businesses. Together, we can build a brighter economic foundation.',
-        ctaLabel: 'Donate Now',
-        ctaHref: '#',
+        // NO BANNER BUTTONS BY DEFAULT.
+        //
+        // These seeded as "Donate Now" (pointing at `#`) and "Learn More".
+        // ACTIV is a membership association, not an appeal — the banner's job
+        // is to say what the association is, and the one thing a visitor is
+        // being asked to do, Login, is already in the header two inches above.
+        // A primary button that navigates nowhere is worse than no button.
+        //
+        // Both remain editable in CMS -> Home -> Banner -> Buttons; a blank
+        // label hides that button, which is what these are. Nothing is
+        // hardcoded away, it is simply not switched on out of the box.
+        ctaLabel: '',
+        ctaHref: '',
         ctaIcon: 'heart',
-        secondaryCtaLabel: 'Learn More',
-        secondaryCtaHref: '/about',
+        secondaryCtaLabel: '',
+        secondaryCtaHref: '',
         secondaryCtaIcon: 'play',
         // The banner also carries the recent gallery posters, each linking to
         // its own page. They are read from the gallery at render time, so there

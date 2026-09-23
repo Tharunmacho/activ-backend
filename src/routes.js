@@ -12,12 +12,15 @@ const adminRoutes = require('./modules/admin/admin.routes');
 const notificationRoutes = require('./modules/notifications/notification.routes');
 const analyticsRoutes = require('./modules/analytics/analytics.routes');
 const eventRoutes = require('./modules/events/event.routes');
+const eventBookingRoutes = require('./modules/events/eventbooking.routes');
 const announcementRoutes = require('./modules/announcements/announcement.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const regionRoutes = require('./modules/regions/region.routes');
 const cmsRoutes = require('./modules/cms/cms.routes');
 const paymentRoutes = require('./modules/payment/payment.routes');
 const webhookRoutes = require('./modules/payment/webhook.routes');
+const botbeeWebhookRoutes = require('./modules/notifications/botbeeWebhook.routes');
+const messageRoutes = require('./modules/messages/message.routes');
 
 const router = express.Router();
 
@@ -54,6 +57,38 @@ router.use('/regions', regionRoutes);
  */
 router.use('/cms', cmsRoutes);
 
+/**
+ * Public event bookings — the "Book Now" flow.
+ *
+ * Mounted here for the third time for the same reason as `/regions` and `/cms`:
+ * a guest books a seat without an account, and `businessRoutes` below applies
+ * `verifyToken` to everything registered after it. Below that line every
+ * booking request answers 401, and the symptom is a Book Now button that does
+ * nothing with no error on the page to say why.
+ *
+ * Distinct from `/events`, which opens with a blanket `verifyToken` and is the
+ * MEMBER's own seat. See the note at the top of `eventbooking.routes.js` for
+ * why the two are separate routers rather than one with exceptions in it.
+ */
+router.use('/event-bookings', eventBookingRoutes);
+
+/**
+ * The BotBee inbound WhatsApp webhook.
+ *
+ * ABOVE `businessRoutes` for exactly the reason `/regions` and `/cms` are:
+ * that router is mounted at '/' and calls `verifyToken` inside itself, which
+ * makes it a catch-all auth gate for everything registered after it. BotBee
+ * holds no ACTIV token and never will, so mounted below this line every inbound
+ * message would be answered 401 — the bot would go silent, BotBee's dashboard
+ * would show failing deliveries, and nothing here would log anything, because
+ * the request would never reach the handler.
+ *
+ * Mounted at the same prefix the member-facing notification routes use, so the
+ * documented URL is one path: /api/v1/notifications/botbee/webhook. The two
+ * routers do not collide — this one owns `/botbee/*` and nothing else.
+ */
+router.use('/notifications/botbee', botbeeWebhookRoutes);
+
 router.use('/members', memberRoutes);
 
 /**
@@ -66,6 +101,33 @@ router.use('/members', memberRoutes);
 router.use('/browse-members', browseRouter);
 router.use('/companies', companyRouter);
 router.use('/membership', membershipRouter);
+// Member-to-member direct messages. Above `businessRoutes` for the same reason
+// the three routers before it are — see the note there.
+router.use('/messages', messageRoutes);
+/**
+ * ==========================================================================
+ * THE GATEWAY'S WEBHOOK, ABOVE THE AUTH GATE — and it has to be above it
+ * ==========================================================================
+ *
+ * This was mounted below `businessRoutes`, which is mounted at '/' and calls
+ * `verifyToken` inside itself, so EVERYTHING registered after it is gated.
+ * Instamojo posts server-to-server and carries no token, so the webhook
+ * answered 401 before the handler ever ran — verified against the running
+ * server with exactly the request Instamojo sends.
+ *
+ * That is not a cosmetic routing detail. The webhook is the ONLY thing on
+ * this flow that activates a membership: the redirect the member comes back
+ * on is in their own address bar and is deliberately trusted for nothing. A
+ * 401 here means every real payment is taken and no membership is granted,
+ * with the money gone and nothing on any screen explaining why.
+ *
+ * It is not "open" for being here. `processPaymentWebhook` refuses anything
+ * whose HMAC-SHA1 does not verify against the account's private salt, which
+ * is the check that actually belongs to this endpoint — a bearer token is a
+ * check Instamojo cannot satisfy.
+ */
+router.use('/webhook', webhookRoutes);
+
 router.use('/', businessRoutes);  // Business profile routes
 router.use('/products', productRoutes);  // Products routes
 router.use('/applications', applicationRoutes);
@@ -85,6 +147,6 @@ router.use('/events', eventRoutes);
 router.use('/announcements', announcementRoutes);
 router.use('/audit', auditRoutes);
 router.use('/payment', paymentRoutes);
-router.use('/webhook', webhookRoutes);
+/* `/webhook` is mounted ABOVE `businessRoutes` — see the note there. */
 
 module.exports = router;

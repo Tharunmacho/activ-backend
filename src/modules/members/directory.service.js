@@ -163,7 +163,7 @@ class DirectoryService {
         };
     }
 
-    async search(filters = {}, page = 1, limit = 20) {
+    async search(filters = {}, page = 1, limit = 20, { excludeId = '' } = {}) {
         const size = Math.min(Math.max(Number(limit) || 20, 1), MAX_PAGE_SIZE);
         const current = Math.max(Number(page) || 1, 1);
         const skip = (current - 1) * size;
@@ -265,6 +265,17 @@ class DirectoryService {
             }
         } else if (text) {
             query.$and = [text];
+        }
+
+        /*
+         * Never the viewer. A member searching the directory is looking for
+         * somebody else; their own card in the results is a row wasted and
+         * reads as a directory that does not know who is asking. Added to
+         * `$and` because `_id` may already carry the sector's `$in`.
+         */
+        const exclude = str(excludeId);
+        if (/^[0-9a-fA-F]{24}$/.test(exclude)) {
+            query.$and = [...(query.$and || []), { _id: { $ne: exclude } }];
         }
 
         const [members, total] = await Promise.all([

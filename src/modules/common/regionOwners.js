@@ -1,5 +1,7 @@
 const MemberDetails = require('../members/memberdetails.model');
+const mongoose = require('mongoose');
 const { regionPattern } = require('./regionMatch');
+const { PAID_STATUSES } = require('./memberContext');
 
 /**
  * Turn a region into the set of members registered in it.
@@ -51,4 +53,46 @@ const regionOwnerIds = async (filters = {}) => {
     return (owners || []).map((row) => String(row._id));
 };
 
-module.exports = { regionOwnerIds };
+/**
+ * The members whose business may be SHOWN to another member — paid, active,
+ * inside the region when one is asked for, and never the viewer.
+ *
+ * Discover used to list every company in the collection and use payment only
+ * to decide the star, so a business account whose owner had never paid sat in
+ * a paying member's Discover grid beside the members who had. Opening a
+ * business account is free; being listed to the network is a membership
+ * benefit, and the Member Directory has always drawn the line there.
+ *
+ * The viewer is left out for the same reason the Directory leaves them out:
+ * their own company is on their own dashboard, and a search that returns
+ * yourself is a search result wasted.
+ *
+ * Unlike `regionOwnerIds` this ALWAYS returns a list — there is no "no filter"
+ * answer, because payment is a filter on every call. `[]` means nobody
+ * qualifies and the caller must return nothing.
+ *
+ * @returns {Promise<string[]>} owner ids as strings
+ */
+const listedOwnerIds = async (filters = {}, { excludeId = '' } = {}) => {
+    const query = {
+        membershipStatus: { $in: PAID_STATUSES },
+        isActive: { $ne: false }
+    };
+
+    ['state', 'district', 'block'].forEach((field) => {
+        const pattern = regionPattern(filters[field]);
+        if (pattern) query[field] = pattern;
+    });
+
+    const exclude = String(excludeId || '');
+    if (mongoose.Types.ObjectId.isValid(exclude)) query._id = { $ne: exclude };
+
+    const owners = await MemberDetails.find(query)
+        .select('_id')
+        .lean()
+        .catch(() => []);
+
+    return (owners || []).map((row) => String(row._id));
+};
+
+module.exports = { regionOwnerIds, listedOwnerIds };

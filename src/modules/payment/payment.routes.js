@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const paymentService = require('./payment.service');
 const orderService = require('./paymentOrder.service');
 const { listPlans } = require('./membershipPlans');
+const membershipPlanService = require('../members/membershipplan.service');
 const notificationService = require('../notifications/notification.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
@@ -12,41 +13,96 @@ const logger = require('../../config/logger');
 const router = express.Router();
 
 /**
+ * Is the server standing in for the gateway, or is a real one connected?
+ *
+ * The SAME rule `paymentOrder.service` uses, and it has to stay the same rule:
+ * the client picks its checkout from this answer, so a client that thought it
+ * was in mock mode while the server was not would call `/mock-authorize` and
+ * be refused with nothing to fall back to.
+ */
+const isMockMode = () =>
+    String(process.env.PAYMENT_MODE || 'mock').toLowerCase() === 'mock' &&
+    String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
+
+/**
+ * GET /api/v1/payment/config
+ *
+ * WHICH CHECKOUT TO USE, ANSWERED BY THE SERVER.
+ *
+ * The website had this hardcoded: `payForMembership` always called
+ * `/payment/mock-authorize`, so the moment a real gateway was switched on the
+ * Pay button would have kept asking for a mock authorisation and getting a
+ * 403 — with no message a member could act on.
+ *
+ * One source of truth instead. `mode` decides which flow the client runs, and
+ * `provider` names the gateway so the button can say who it is sending them
+ * to. Public shape only: no key, no token, no salt.
+ */
+router.get('/config', asyncHandler(async(req, res) => {
+    const mock = isMockMode();
+    res.json(ApiResponse.success({
+        mode: mock ? 'mock' : 'gateway',
+        provider: mock ? 'mock' : 'instamojo',
+        /* So the checkout screen can say "you will be taken to Instamojo"
+           rather than presenting a card form this site does not handle. */
+        hosted: !mock,
+        configured: paymentService.isConfigured()
+    }));
+}));
+
+/**
  * POST /api/v1/payment/create-request
  * Create a new payment request
  * Requires authentication
  */
 router.post('/create-request', verifyToken, asyncHandler(async(req, res) => {
-    const { amount, purpose, membershipType } = req.body;
+    const { amount, purpose, membershipType, orderType = 'membership', eventId, bookingRef } = req.body;
     const user = req.user;
+    
+    // Determine the calculated amount based on the order type
+    let calculatedAmount = 0;
+    let finalPurpose = purpose;
+    let planId = membershipType;
 
-    // Validate amount based on membership type
-    const validAmounts = {
-        starter: 500,
-        intermediate: 1000,
-        advanced: 2000,
-        lifetime: 2500,
-        aspirant: 500
-    };
-
-    if (!validAmounts[membershipType]) {
-        return res.status(400).json(ApiResponse.error('Invalid membership type'));
+    if (orderType === 'event_booking') {
+        if (!bookingRef) {
+            return res.status(400).json(ApiResponse.error('bookingRef is required for event booking'));
+        }
+        const eventBookingService = require('../events/eventbooking.service');
+        const booking = await eventBookingService.getBooking(bookingRef).catch(() => null);
+        if (!booking) {
+            return res.status(400).json(ApiResponse.error('Invalid booking reference'));
+        }
+        calculatedAmount = booking.totalAmount;
+        finalPurpose = purpose || `ACTIV Event Booking - ${bookingRef}`;
+    } else {
+        const plan = await membershipPlanService.getPlanForPayment(membershipType);
+        if (!plan) {
+            return res.status(400).json(ApiResponse.error('Invalid membership type'));
+        }
+        calculatedAmount = Number(plan.amount);
+        finalPurpose = purpose || `ACTIV Membership - ${membershipType}`;
     }
 
-    if (parseFloat(amount) !== validAmounts[membershipType]) {
-        return res.status(400).json(ApiResponse.error('Invalid amount for selected membership type'));
-    }
-
-    /**
-     * Buyer details come from the member's profile, not from the token.
+    /*
+     * THE CLIENT DOES NOT HAVE TO SEND AN AMOUNT, and should not.
      *
-     * The JWT payload is only { userId, email, role, block, district, state } —
-     * it has never carried `fullName` or `phoneNumber`. Reading them off
-     * `req.user` therefore yielded `undefined` every time: the buyer name
-     * silently degraded to the email address and the phone was always empty,
-     * while the request below asks Instamojo to send an SMS. That is a payment
-     * that cannot complete, and nothing in the response said why.
+     * This required one and rejected anything that did not equal the figure
+     * the server had just worked out — which is a safe check but a pointless
+     * field: the only value that can ever pass is the one the server already
+     * knows. It also made the route unusable from a screen that has a plan id
+     * and no price, which is every screen since prices moved into
+     * `membershipplan.service`.
+     *
+     * An amount that IS sent is still checked, so nothing that used to be
+     * refused is now accepted. Sending none is simply trusting the server,
+     * which is the arrangement the rest of the payment path already has.
      */
+    if (amount !== undefined && amount !== null && amount !== ''
+        && parseFloat(amount) !== calculatedAmount) {
+        return res.status(400).json(ApiResponse.error('Invalid amount'));
+    }
+
     const MemberDetails = require('../members/memberdetails.model');
     const profile = await MemberDetails.findOne({
         $or: [
@@ -60,26 +116,76 @@ router.post('/create-request', verifyToken, asyncHandler(async(req, res) => {
     const buyerPhone = (profile && profile.phoneNumber) || '';
 
     if (!buyerPhone) {
-        // Failing here is kinder than letting the gateway reject it: the member
-        // is told exactly what to fix, and no orphaned payment request exists.
         return res.status(400).json(ApiResponse.error(
             'A mobile number is required before paying. Please add one to your profile and try again.'
         ));
     }
 
+    /*
+     * THE ORDER ID IS MINTED BEFORE THE REQUEST, so it can travel in the
+     * return URL.
+     *
+     * The member comes back from Instamojo on a fresh page load with nothing
+     * of ours in memory, and the only identifiers in the URL are Instamojo's
+     * own. Carrying our order id in `redirect_url` is what lets that page ask
+     * "did THIS order get paid" instead of trusting `payment_status=Credit`
+     * out of an address bar the member can edit.
+     *
+     * Instamojo APPENDS its query string to whatever `redirect_url` already
+     * has, so a `?` here is kept and its parameters arrive alongside ours.
+     */
+    const orderId = 'ord_' + require('crypto').randomBytes(16).toString('hex');
+
+    const returnUrl = `${process.env.FRONTEND_URL}/payment-success`
+        + `?orderId=${encodeURIComponent(orderId)}`;
+
     const paymentData = {
-        amount: amount,
-        purpose: purpose || `ACTIV Membership - ${membershipType}`,
+        amount: calculatedAmount,
+        purpose: finalPurpose,
         buyerName,
         email: buyerEmail,
         phone: buyerPhone,
-        redirectUrl: `${process.env.FRONTEND_URL}/payment-success`,
+        redirectUrl: returnUrl,
         webhookUrl: `${process.env.BACKEND_URL}/api/v1/webhook/instamojo`
     };
 
     const result = await paymentService.createPaymentRequest(paymentData);
 
-    res.status(201).json(ApiResponse.created(result, 'Payment request created'));
+    // Create the PaymentOrder to track the Instamojo payment request
+    const PaymentOrder = require('./paymentorder.model');
+    await PaymentOrder.create({
+        orderId,
+        memberId: profile ? profile._id : null,
+        email: buyerEmail,
+        planId: orderType === 'membership' ? planId : undefined,
+        planName: orderType === 'membership' ? planId : undefined,
+        amount: calculatedAmount,
+        membershipType: orderType === 'membership' ? planId : undefined,
+        orderType: orderType,
+        eventId: eventId,
+        bookingRef: bookingRef,
+        provider: 'instamojo',
+        gatewayPaymentId: result.payment_request_id, // Store the Instamojo request ID here
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+    });
+
+    /*
+     * `orderId` and `amount` ride back with the gateway's own fields.
+     *
+     * The caller is about to leave this site for Instamojo's checkout, so the
+     * success page it returns to has nothing in memory. Handing it the order
+     * id now is what lets that page ask "did my payment land" about a
+     * SPECIFIC order rather than guessing from the query string Instamojo
+     * puts in the URL — which the member's browser can edit.
+     *
+     * `amount` is the figure the SERVER charged, so a receipt cannot print
+     * the number the plans screen happened to be showing.
+     */
+    res.status(201).json(ApiResponse.created({
+        ...result,
+        orderId,
+        amount: calculatedAmount
+    }, 'Payment request created'));
 }));
 
 /**
@@ -147,11 +253,25 @@ router.get('/plans', asyncHandler(async(req, res) => {
  * The amount is NOT accepted from the caller — it is looked up from the plan.
  */
 router.post('/order', verifyToken, asyncHandler(async(req, res) => {
-    const order = await orderService.createOrder(req.user, {
+    const { receipt } = await orderService.createOrder(req.user, {
         planId: req.body && req.body.planId,
         applicationId: req.body && req.body.applicationId
     });
-    res.status(201).json(ApiResponse.created(order, 'Payment order created'));
+
+    /*
+     * Queued, not sent — and the difference is the whole point.
+     *
+     * The website completes a payment about a second after opening the order
+     * (`payForMembership` runs order → authorise → complete in one click), so
+     * firing PAYMENT_REQUIRED here delivered "your payment of ₹10,000 is still
+     * pending" immediately followed by "your membership is now completely
+     * active". `schedulePendingPaymentNotice` waits, re-reads the order, and
+     * stays quiet when the payment has landed. See the note on
+     * PENDING_NOTICE_DELAY_MS.
+     */
+    orderService.schedulePendingPaymentNotice(receipt.orderId);
+
+    res.status(201).json(ApiResponse.created(receipt, 'Payment order created'));
 }));
 
 /**
@@ -207,17 +327,61 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
         paymentMethod: body.paymentMethod
     });
 
-    // Non-fatal: a notification failure must never make a completed payment
-    // look like it failed.
-    await notificationService.safeCreate(member._id, {
-        title: 'Membership activated',
-        message: 'Your payment was received and your ACTIV membership is now active.',
-        type: 'success',
-        data: {
-            event: 'membership.activated',
-            membershipType: member.membershipType,
-            orderId: order.orderId
-        }
+    /*
+     * Bell, email and WhatsApp — one call, and it cannot fail this request.
+     *
+     * The money has already moved and the membership is already active by the
+     * time this line runs. `dispatchInBackground` never throws and is not
+     * awaited, so neither an unreachable mail host nor a WhatsApp outage can
+     * turn a completed payment into an error the member sees — which would send
+     * them to pay a second time for a membership they already hold.
+     *
+     * The region comes off the member record so the receipt email is replyable
+     * to their own regional office rather than to a no-reply address.
+     */
+    notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
+        id: member._id,
+        name: member.fullName,
+        email: member.email,
+        phone: member.phoneNumber,
+        whatsapp: member.whatsappNumber,
+        state: member.state,
+        district: member.district,
+        block: member.block
+    }, {
+        /*
+         * THE SAME EXPRESSION THE WEBSITE PRINTS, not the raw field.
+         *
+         * `membershipNumber` is not on the `MemberDetails` schema at all — it is
+         * derived, and `member.controller.js` (twice) and
+         * `memberExtras.controller.js` all derive it the same way. Reading the
+         * bare field here is `undefined` on every member who has ever paid, so
+         * the activation email arrived with an empty "Member ID" line beside a
+         * dashboard showing one. Mongoose drops the unknown path without a word,
+         * which is why nothing ever reported it.
+         */
+        membershipNumber: member.membershipNumber
+            || String(member._id || '').slice(-8).toUpperCase(),
+        membershipType: member.membershipType,
+        /*
+         * `order.amount` is in RUPEES — the order model says so explicitly, and
+         * only the membership PLAN rows store paise. Reading `amountPaise` here
+         * returns undefined and the receipt prints no amount at all, with
+         * nothing reporting an error: the same silent-drop pattern the member
+         * collections are full of. Both names are read so a future rename
+         * cannot reintroduce it, and the paise branch only fires when the rupee
+         * field is genuinely absent.
+         */
+        amountLabel: (() => {
+            const rupees = order.amount !== undefined && order.amount !== null
+                ? Number(order.amount)
+                : Number(order.amountPaise || 0) / 100;
+            return Number.isFinite(rupees) && rupees > 0
+                ? `₹${rupees.toLocaleString('en-IN')}`
+                : '';
+        })(),
+        orderId: order.orderId,
+        data: { membershipType: member.membershipType, orderId: order.orderId }
     });
 
     res.json(ApiResponse.success(member, 'Payment verified and membership activated'));

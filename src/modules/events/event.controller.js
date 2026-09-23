@@ -1,4 +1,6 @@
 const eventService = require('./event.service');
+const bookingService = require('./eventbooking.service');
+const categoryService = require('./eventcategory.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const { resolveMemberContext } = require('../common/memberContext');
@@ -121,6 +123,161 @@ const listRegistrations = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data));
 });
 
+/* ------------------------------------------------------- public bookings */
+
+/**
+ * The organiser's booking list — the counterpart of the guest "Book Now" flow.
+ *
+ * A SECOND LIST BESIDE `listRegistrations`, NOT A REPLACEMENT. A registration
+ * is one member's own seat; a booking is one person paying for several
+ * participants and may have no member behind it at all. They are different
+ * collections for the reasons `eventbooking.model` sets out, and merging them
+ * into one endpoint would mean inventing a row shape that is neither.
+ */
+const listBookings = asyncHandler(async(req, res) => {
+    const data = await bookingService.listBookings(req.params.id, req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+/** One booking in full, for the "View Booking Details" panel. */
+const getBooking = asyncHandler(async(req, res) => {
+    const data = await bookingService.getBooking(req.params.ref);
+    res.json(ApiResponse.success(data));
+});
+
+/**
+ * Record money taken outside the gateway — cash at the door.
+ *
+ * The acting admin's identity is taken from the TOKEN, never from the body. A
+ * `recordedBy` a client can choose is a name anybody can put against anybody
+ * else's takings.
+ */
+const recordBookingPayment = asyncHandler(async(req, res) => {
+    const user = req.user || {};
+    const data = await bookingService.recordOfflinePayment(req.params.ref, {
+        mode: (req.body || {}).mode,
+        recordedBy: user.email || String(user.userId || user.id || '')
+    });
+    res.json(ApiResponse.success(data, 'Payment recorded'));
+});
+
+const cancelBooking = asyncHandler(async(req, res) => {
+    const data = await bookingService.cancelBooking(req.params.ref, {
+        reason: (req.body || {}).reason
+    });
+    res.json(ApiResponse.success(data, 'Booking cancelled'));
+});
+
+/* ==================================================== the organiser's overview */
+
+/**
+ * Every event with its seat figures — the Booking Events landing table.
+ *
+ * A LITERAL PATH, mounted above `/:id`. `/events/bookings/overview` registered
+ * after the parameter route is read as the event id "bookings", fails the
+ * ObjectId check and answers 400 — the trap this router already documents for
+ * `/my-registrations` and `/reach`.
+ */
+const bookingOverview = asyncHandler(async(req, res) => {
+    const data = await bookingService.bookingOverview(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+/** One row per PERSON in the room, rather than per booking. */
+const listAttendees = asyncHandler(async(req, res) => {
+    const data = await bookingService.listAttendees(req.params.id, req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+/**
+ * The bookings of one event as a CSV download.
+ *
+ * Sent as a FILE rather than inside an `ApiResponse` envelope: the browser
+ * follows this link directly and a JSON wrapper would download a file whose
+ * first line is `{"success":true,"data":{"csv":"...`. The two headers are what
+ * make it save rather than render.
+ */
+const exportBookings = asyncHandler(async(req, res) => {
+    const { filename, csv } = await bookingService.exportBookingsCsv(req.params.id);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+});
+
+/* ==================================================== the contact book */
+
+/**
+ * Everyone who has ever booked, across every event.
+ *
+ * NO CREDENTIAL IS READ OR RETURNED by this handler or the service behind it.
+ * It replaces a screen that printed passwords in a column, and the omission is
+ * deliberate rather than an oversight — see the note on `listBookingPeople`.
+ */
+const listBookingPeople = asyncHandler(async(req, res) => {
+    const data = await bookingService.listBookingPeople(req.query || {});
+    res.json(ApiResponse.success(data));
+});
+
+/**
+ * One person's whole booking history.
+ *
+ * The address arrives as a QUERY PARAMETER, not as a path segment. An email
+ * address carries dots and a `@`, and Express reads a trailing `.com` in a path
+ * as part of the segment only until something in front of the app — a proxy, a
+ * CDN — decides it is a file extension. A query parameter is escaped once by the
+ * client and read once here.
+ */
+const getBookingPerson = asyncHandler(async(req, res) => {
+    const data = await bookingService.getBookingPerson((req.query || {}).email);
+    res.json(ApiResponse.success(data));
+});
+
+/* ============================================================ categories */
+
+const listCategories = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await categoryService.listCategories()));
+});
+
+const addCategory = asyncHandler(async(req, res) => {
+    const data = await categoryService.addCategory(req.body || {}, req.user || {});
+    res.status(201).json(ApiResponse.created(data, 'Category added'));
+});
+
+const renameCategory = asyncHandler(async(req, res) => {
+    const data = await categoryService.renameCategory(req.params.categoryId, req.body || {}, req.user || {});
+    res.json(ApiResponse.success(
+        data,
+        // The count of re-stamped events is the half of this an editor cannot
+        // see for themselves, so it goes in the message rather than only in the
+        // payload.
+        data.moved
+            ? `Renamed, and moved ${data.moved} event${data.moved === 1 ? '' : 's'} onto it`
+            : 'Category renamed'
+    ));
+});
+
+const deleteCategory = asyncHandler(async(req, res) => {
+    const data = await categoryService.deleteCategory(req.params.categoryId, req.user || {});
+    res.json(ApiResponse.success(data, 'Category removed'));
+});
+
+const reorderCategory = asyncHandler(async(req, res) => {
+    const data = await categoryService.reorderCategory(
+        req.params.categoryId, (req.body || {}).direction, req.user || {}
+    );
+    res.json(ApiResponse.success(data, 'Order saved'));
+});
+
+const addStandardCategories = asyncHandler(async(req, res) => {
+    const data = await categoryService.addStandard(req.user || {});
+    res.json(ApiResponse.success(
+        data,
+        data.added.length
+            ? `Added ${data.added.length} categor${data.added.length === 1 ? 'y' : 'ies'}`
+            : 'Every standard category is already listed'
+    ));
+});
+
 module.exports = {
     listEvents,
     getEvent,
@@ -133,5 +290,20 @@ module.exports = {
     payRegistration,
     cancelRegistration,
     listRegistrations,
-    myRegistrations
+    myRegistrations,
+    listBookings,
+    getBooking,
+    recordBookingPayment,
+    cancelBooking,
+    bookingOverview,
+    listBookingPeople,
+    getBookingPerson,
+    listAttendees,
+    exportBookings,
+    listCategories,
+    addCategory,
+    renameCategory,
+    deleteCategory,
+    reorderCategory,
+    addStandardCategories
 };

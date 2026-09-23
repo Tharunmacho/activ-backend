@@ -49,6 +49,41 @@ const startServer = async() => {
         if (adminsDbReady) logger.info('adminsdb connected (per-tier admin collections)');
         else logger.warn('adminsdb is unreachable — admin creation will fail until it recovers');
 
+        /*
+         * EVERY LINK IN EVERY MESSAGE COMES FROM `FRONTEND_URL`.
+         *
+         * Notification emails and WhatsApp messages carry absolute links built
+         * from it — "Complete your application", "Pay now", "Track your
+         * application". Left at localhost while a real mail host and a real
+         * WhatsApp provider are configured, the platform sends real members
+         * links to their own machine, and every one of them is a dead end that
+         * nothing reports: the mail is delivered, the send succeeds, the log row
+         * is green, and the member simply cannot get in.
+         *
+         * Checked at boot rather than at send time because there is no send-time
+         * surface anyone watches, and because the answer never varies between
+         * one message and the next — it is a deployment fact, and boot is when
+         * deployment facts are worth stating.
+         *
+         * Local development trips neither branch: with no SMTP host and no
+         * BotBee token, a localhost URL is simply correct.
+         */
+        const frontendIsLocal = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2)(:|\/|$)/i
+            .test(String(config.frontendUrl || ''));
+        const messagingIsLive = !!(config.email && config.email.host) || config.botbee.isConfigured;
+
+        if (frontendIsLocal && messagingIsLive) {
+            logger.warn(
+                'FRONTEND_URL is a local address while messaging is configured — '
+                + 'every link sent to a member will be a dead end',
+                {
+                    frontendUrl: config.frontendUrl,
+                    email: !!(config.email && config.email.host),
+                    whatsapp: config.botbee.isConfigured
+                }
+            );
+        }
+
         // Connect to Redis (optional)
         const redisClient = await connectRedis();
 

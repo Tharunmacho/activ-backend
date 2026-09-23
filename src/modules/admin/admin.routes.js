@@ -71,28 +71,21 @@ const TEAM_ROLES = ['super_admin', 'state_admin', 'district_admin'];
 router.get('/team/directory', requireRole(...TEAM_ROLES), controller.getDirectory);
 router.get('/team/applications', requireRole(...TEAM_ROLES), controller.getSuperApplications);
 
-/**
- * Staffing the regions beneath you.
+/*
+ * STAFFING IS THE SUPER ADMIN'S, AND ONLY THE SUPER ADMIN'S.
  *
- * A state admin appoints the district and block admins of their state; a
- * district admin the block admins of their district. Both already carry those
- * regions' application queues, so being unable to see — let alone replace — the
- * people working them meant every staffing change went through the super admin.
+ * `/team/admins` used to sit here — six routes letting a state admin appoint
+ * the district and block admins of their state, and a district admin the block
+ * admins of their district. The association asked for that to come back to one
+ * desk, so the screen, its routes and these endpoints were removed together.
  *
- * The same handlers again. `superadmin.service` answers "who may manage whom"
- * and "which region" once, from the acting token: the tier a caller may create
- * is checked on the way in (an escalation bug here would mint an account with
- * more authority than the one that made it), and the region is FORCED rather
- * than validated, so a value outside their patch cannot be expressed at all.
+ * Removing the endpoints is the half that matters. Taking the page out of the
+ * rail hides a capability; a rail is not a permission boundary, and anyone who
+ * knew the URL — or kept an old tab open — would still have had it.
  *
- * Literal before parameterised, exactly as on the `/super` block above.
+ * `/team/directory` and `/team/applications` above are untouched: those are the
+ * Hub, which is reading, not staffing.
  */
-router.get('/team/admins', requireRole(...TEAM_ROLES), controller.listAdmins);
-router.get('/team/admins/regions', requireRole(...TEAM_ROLES), controller.suggestAdminRegions);
-router.post('/team/admins', requireRole(...TEAM_ROLES), controller.createAdmin);
-router.get('/team/admins/:id/removal-preview', requireRole(...TEAM_ROLES), controller.previewAdminRemoval);
-router.put('/team/admins/:id', requireRole(...TEAM_ROLES), controller.updateAdmin);
-router.delete('/team/admins/:id', requireRole(...TEAM_ROLES), controller.deleteAdmin);
 
 // Common Stats & User Management
 router.get('/stats', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.getDashboardStats);
@@ -105,7 +98,15 @@ router.get('/analytics', requireRole('block_admin', 'district_admin', 'state_adm
 router.post('/reports/generate', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.generateReport);
 
 // UserManagementScreen action buttons (activate | suspend | delete)
-router.post('/users/:id/:action', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.userAction);
+/*
+ * Block / unblock / delete a member — State and Super only.
+ *
+ * `adminService.memberAction` re-checks the same thing, and deliberately: this
+ * gate is the route table's business and that one travels with the behaviour.
+ * Listing members and opening one is unchanged for every tier — see `/users`
+ * above, which is a read.
+ */
+router.post('/users/:id/:action', requireRole('state_admin', 'super_admin'), controller.userAction);
 
 // The caller's own profile
 router.get('/profile', controller.getAdminProfile);

@@ -2,6 +2,8 @@ const express = require('express');
 const controller = require('./member.controller');
 const extras = require('./memberExtras.controller');
 const directory = require('./directory.controller');
+/* The directory is a membership benefit — see the note over its routes. */
+const { requirePaidMembership } = require('../common/requirePaidMembership');
 const validators = require('./member.validators');
 const { verifyToken } = require('../../core/middleware/auth');
 const upload = require('../../core/middleware/upload');
@@ -28,9 +30,22 @@ router.get('/declaration-info', verifyToken, controller.getDeclarationInfo);
  * sector list is a literal path and must precede `/directory/:id` or it is read
  * as a member id.
  */
-router.get('/directory/sectors', verifyToken, directory.listSectors);
-router.get('/directory', verifyToken, directory.searchDirectory);
-router.get('/directory/:id', verifyToken, directory.getDirectoryEntry);
+/*
+ * ==========================================================================
+ * PAID MEMBERS ONLY — AND THE SERVER IS WHERE THAT IS DECIDED
+ * ==========================================================================
+ *
+ * These carried `verifyToken` and nothing else, so any signed-in applicant
+ * could read the whole membership from the API while the screen that shows
+ * it was locked. A gate the client alone enforces is not a gate.
+ *
+ * `memberContext` already describes this as “the paid-only directory” in the
+ * comment explaining why `approved` must not count as paid. The routes had
+ * not caught up with it.
+ */
+router.get('/directory/sectors', verifyToken, requirePaidMembership, directory.listSectors);
+router.get('/directory', verifyToken, requirePaidMembership, directory.searchDirectory);
+router.get('/directory/:id', verifyToken, requirePaidMembership, directory.getDirectoryEntry);
 
 router.get('/recent-activity', verifyToken, extras.listActivity);
 router.get('/certificate/:kind', verifyToken, extras.getCertificate);

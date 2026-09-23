@@ -1,5 +1,6 @@
 const { body, validationResult } = require('express-validator');
 const ApiError = require('../../core/utils/ApiError');
+const { validateMobile } = require('../common/phoneNumber');
 
 /**
  * Express 4 does not await async middleware, so THROWING here escapes as an
@@ -41,12 +42,45 @@ const registerValidator = validate([
     .trim()
     .notEmpty()
     .withMessage('Full name is required'),
+    /*
+     * `validateMobile`, not `/^[0-9]{10}$/`.
+     *
+     * The old pattern accepted `0000000000` and `1234567890` — ten digits each,
+     * neither of them a number anyone can be reached on. It also REJECTED
+     * `+91 98765 43210`, which is how a person writes their own number, so the
+     * form refused correct input and accepted filler. The shared rule handles
+     * both: it normalises the country code and spacing away, then refuses the
+     * shapes that cannot be real.
+     *
+     * It is `validateMobile` and not `validateIndianMobile` so a member outside
+     * India can register at all. A bare number — which is every request any
+     * client sends today — is still judged by the identical Indian rule; only a
+     * '+'-prefixed foreign number takes the other branch. Nothing that was
+     * accepted before is refused now.
+     */
     body('phoneNumber')
     .trim()
-    .notEmpty()
-    .withMessage('Phone number is required')
-    .matches(/^[0-9]{10}$/)
-    .withMessage('Phone number must be 10 digits')
+    .custom((value) => {
+        const result = validateMobile(value, { label: 'Phone number' });
+        if (!result.ok) throw new Error(result.reason);
+        return true;
+    }),
+    /*
+     * WhatsApp number — required at registration, optional on the record.
+     *
+     * The schema leaves it optional because every member registered before this
+     * field existed has none, and making it required there would fail their
+     * next profile save on a value nobody ever asked them for. The requirement
+     * belongs here, at the one moment the applicant is actually in front of the
+     * form.
+     */
+    body('whatsappNumber')
+    .trim()
+    .custom((value) => {
+        const result = validateMobile(value, { label: 'WhatsApp number' });
+        if (!result.ok) throw new Error(result.reason);
+        return true;
+    })
 ]);
 
 /**

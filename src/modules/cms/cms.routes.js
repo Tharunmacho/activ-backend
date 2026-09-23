@@ -76,6 +76,26 @@ router.get('/contact-info', publicLimiter, controller.getContactInfo);
 // The copy around the events grid and the gallery grid; the items themselves
 // come from /events and /gallery below.
 router.get('/events-settings', publicLimiter, controller.getEventsSettings);
+
+/*
+ * ================================================ regions and states
+ *
+ * LITERALS BEFORE PARAMETERS, as Express matches in declaration order.
+ * `/regions/map` must be registered above `/regions/:slug` or the parameter
+ * route captures the word "map" and the menu asks for a region that does not
+ * exist. The same trap `/membership/settings` documents.
+ *
+ * `optionalAuth` on every one: a public visitor gets published content, and a
+ * signed-in super admin gets drafts too, so Preview is the same URL rather than
+ * a second code path that can disagree with the real page.
+ */
+router.get('/regions/map', publicLimiter, optionalAuth, controller.getRegionMap);
+router.get('/regions/gallery', publicLimiter, controller.listRegionGallery);
+router.get('/regions/gallery/filters', publicLimiter, controller.getGalleryFilters);
+router.get('/regions/:slug/feed/:type', publicLimiter, optionalAuth, controller.getRegionFeed);
+router.get('/regions/:slug', publicLimiter, optionalAuth, controller.getRegionPage);
+router.get('/states/:slug/feed/:type', publicLimiter, optionalAuth, controller.getStateFeed);
+router.get('/states/:slug', publicLimiter, optionalAuth, controller.getStatePage);
 router.get('/gallery-settings', publicLimiter, controller.getGallerySettings);
 
 /**
@@ -103,9 +123,83 @@ router.get('/events', publicLimiter, optionalAuth, controller.getEvents);
  */
 router.get('/events/:id', publicLimiter, optionalAuth, controller.getEvent);
 
+/**
+ * The legal documents — Privacy, Terms, Return, Cancellation.
+ *
+ * PUBLIC READS, and they have to be: the footer draws these links on every page
+ * of the site, including the ones an anonymous visitor lands on first, and the
+ * policy pages themselves are what a visitor is sent to before agreeing to
+ * anything. Below the admin guard they would 401 and the footer would lose its
+ * legal row with nothing on screen to explain it.
+ *
+ * `optionalAuth` so a signed-in editor sees their own DRAFTS here, while the
+ * public sees published documents only. Without it an editor previewing an
+ * unpublished policy would get a 404 on the page they had just saved.
+ *
+ * `/legal/links` is declared ABOVE `/legal/:slug` — Express matches in order,
+ * and a literal behind a parameter route is a literal the parameter captures.
+ * The same trap `/settings` before `/plans/:key` carries a note about.
+ */
+router.get('/legal', publicLimiter, optionalAuth, controller.getLegalDocuments);
+router.get('/legal/links', publicLimiter, controller.getLegalLinks);
+router.get('/legal/:slug', publicLimiter, optionalAuth, controller.getLegalDocument);
+
+/**
+ * ----------------------------------------------------------- the newsroom
+ *
+ * PUBLIC READS. The newsroom is a page on the public site, and most of the
+ * people who open it have never signed in.
+ *
+ * `optionalAuth` so a signed-in editor sees their own DRAFTS here, and the
+ * public sees published articles only — the rule the legal documents
+ * already follow. Without it, previewing an unpublished article 404s on the
+ * page the editor has just saved.
+ *
+ * `/news/schemes` and `/news/settings` are declared ABOVE `/news/:slug`.
+ * Express matches in order, and a literal behind a parameter route is a
+ * literal the parameter captures — the same trap `/legal/links` carries a
+ * note about, and the one that would make the schemes list resolve as an
+ * article called "schemes".
+ */
+/**
+ * The membership prospectus. PUBLIC, like every other page’s copy, and
+ * `optionalAuth` so an editor previewing a switched-off section sees it.
+ */
+router.get('/membership', publicLimiter, optionalAuth, controller.getMembership);
+
+router.get('/news', publicLimiter, optionalAuth, controller.listNews);
+router.get('/news/schemes', publicLimiter, optionalAuth, controller.listSchemes);
+router.get('/news/settings', publicLimiter, controller.getNewsSettings);
+router.get('/news/:slug', publicLimiter, optionalAuth, controller.getArticle);
+
+/*
+ * THE SCHEMES PAGE. Public, `optionalAuth` so an editor sees drafts.
+ * `/schemes/states` and `/schemes/settings` sit ABOVE `/schemes/:slug` for the
+ * reason given over the news routes: a literal behind a parameter route is a
+ * literal the parameter captures.
+ */
+router.get('/schemes', publicLimiter, optionalAuth, controller.listSchemesPublic);
+router.get('/schemes/states', publicLimiter, optionalAuth, controller.schemeStateCounts);
+router.get('/schemes/settings', publicLimiter, controller.getSchemeSettings);
+router.get('/schemes/:slug', publicLimiter, optionalAuth, controller.getSchemePublic);
+
 // ---------------------------------------------------------------- public write
 
 router.post('/contact-messages', contactFormLimiter, controller.createContactMessage);
+
+/*
+ * A message addressed to an office-bearer.
+ *
+ * The SAME limiter as the contact form, on purpose: both are endpoints any
+ * stranger can write to, and the leader form is the more attractive of the
+ * two to abuse because each message names a real person.
+ *
+ * The purposes are a public read because the form cannot be drawn without
+ * them, and they are the complete list of what can be sent — see the note
+ * in `cms.leaderMessages.service`.
+ */
+router.get('/leader-messages/purposes', publicLimiter, controller.getLeaderMessagePurposes);
+router.post('/leader-messages', contactFormLimiter, controller.createLeaderMessage);
 
 // ---------------------------------------------------------------- admin
 
@@ -148,8 +242,81 @@ router.post('/events', upload.single('image'), controller.createEvent);
 router.put('/events/:id', upload.single('image'), controller.updateEvent);
 router.delete('/events/:id', controller.deleteEvent);
 
+/*
+ * Editing a policy.
+ *
+ * `PUT /legal/:slug` both creates and replaces — an upsert on the slug, which
+ * is the document's identity. A separate POST would need its own slug
+ * validation and its own duplicate handling, and the two would drift.
+ *
+ * The revision routes are read-only except `restore`, which is itself a save:
+ * history is written by saving, never edited directly. A history somebody can
+ * edit is not a history.
+ *
+ * `/revisions` sits under the slug, so no literal competes with `:slug` here.
+ */
+router.get('/legal/:slug/revisions', controller.getLegalRevisions);
+router.get('/legal/:slug/revisions/:version', controller.getLegalRevision);
+router.post('/legal/:slug/revisions/:version/restore', controller.restoreLegalRevision);
+router.put('/legal/:slug', controller.saveLegalDocument);
+// Unpublishes. A policy someone agreed to at a URL is never deleted — see
+// `retireLegalDocument`.
+router.delete('/legal/:slug', controller.retireLegalDocument);
+
+/*
+ * The Regions & States editor.
+ *
+ * `PUT` both creates and replaces, keyed on the region or the state — there are
+ * five regions and thirty-six states and all of them are known in advance, so
+ * "does a page exist yet" is not a question an editor should be asked. A
+ * separate POST would need its own duplicate handling, and the two would drift.
+ */
+/*
+ * A DIFFERENT PREFIX, not `/regions/pages`.
+ *
+ * The public `GET /regions/:slug` is declared above the auth guard, and Express
+ * matches in declaration order across the whole router — so `/regions/pages`
+ * would be captured by the parameter route, resolve as the region named
+ * "pages", and 404 before it ever reached the guard. The admin half therefore
+ * lives on its own nouns, where no parameter can swallow it.
+ */
+router.get('/region-pages', controller.listRegionPagesAdmin);
+/* Declared after the list. Both are literals at different depths, so
+   neither captures the other; `:slug` is a region key or `national`. */
+router.get('/region-pages/:slug', controller.getRegionPageAdmin);
+router.get('/state-pages/:slug', controller.getStatePageAdmin);
+router.put('/region-pages/:slug', controller.saveRegionPage);
+router.put('/state-pages/:slug', controller.saveStatePage);
+router.delete('/state-pages/:slug', controller.deleteStatePage);
+
+/* The newsroom’s own screen. `/news-admin` and not `/news`, so no write
+   method here can be shadowed by the public parameter route above. */
+router.put('/membership', controller.saveMembership);
+
+router.get('/news-admin', controller.listNewsAdmin);
+router.post('/news-admin/articles', controller.saveArticle);
+router.put('/news-admin/articles/:id', controller.saveArticle);
+router.delete('/news-admin/articles/:id', controller.deleteArticle);
+router.post('/news-admin/schemes', controller.saveScheme);
+router.put('/news-admin/schemes/:id', controller.saveScheme);
+router.delete('/news-admin/schemes/:id', controller.deleteScheme);
+router.put('/news-admin/settings', controller.saveNewsSettings);
+
+/* The Schemes screen. `/schemes-admin`, not `/schemes`, for the same reason
+   the newsroom's is `/news-admin`. The `/news-admin/schemes` routes above stay
+   for any older client, and write the same shape through the same cleaner. */
+router.get('/schemes-admin', controller.listSchemesAdmin);
+router.post('/schemes-admin/schemes', controller.saveSchemeAdmin);
+router.put('/schemes-admin/schemes/:id', controller.saveSchemeAdmin);
+router.delete('/schemes-admin/schemes/:id', controller.deleteSchemeAdmin);
+router.put('/schemes-admin/settings', controller.saveSchemeSettings);
+
 router.get('/contact-messages', controller.listContactMessages);
 router.patch('/contact-messages/:id/status', controller.setMessageStatus);
 router.delete('/contact-messages/:id', controller.deleteContactMessage);
+
+router.get('/leader-messages', controller.listLeaderMessages);
+router.patch('/leader-messages/:id', controller.updateLeaderMessage);
+router.delete('/leader-messages/:id', controller.deleteLeaderMessage);
 
 module.exports = router;

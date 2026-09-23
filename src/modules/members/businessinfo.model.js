@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { BUSINESS_TYPES } = require('./businessTypes');
+const { CONSTITUTION_TYPES } = require('./businessOptions');
 
 // BusinessInfo Schema - for storing business information in additional form
 const businessInfoSchema = new mongoose.Schema({
@@ -26,7 +27,7 @@ const businessInfoSchema = new mongoose.Schema({
     },
     constitutionType: {
         type: String,
-        enum: ['OPC', 'TRUST', 'SOCIETY', 'Proprietorship', 'Partnership', 'Private Limited', ''],
+        enum: [...CONSTITUTION_TYPES, ''],
         default: ''
     },
     businessTypes: [{

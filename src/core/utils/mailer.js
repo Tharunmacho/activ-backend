@@ -19,14 +19,24 @@ const logger = require('../../config/logger');
 let transporter = null;
 let initialised = false;
 
-const isConfigured = () => !!(config.email && config.email.host && config.email.user);
+/**
+ * `config.email.isConfigured` — the SAME check the notification mailer uses.
+ *
+ * This asked only for a host and a user, so a `.env` with `EMAIL_HOST` and
+ * `EMAIL_USER` filled in but the password left on its placeholder reported
+ * itself configured and then failed authentication on every send. It also
+ * disagreed with `modules/notifications/email.service.js`, which was reading a
+ * different variable name for the password entirely — one sender live, the
+ * other silently mocking. One predicate, one set of variables.
+ */
+const isConfigured = () => !!(config.email && config.email.isConfigured);
 
 const getTransporter = () => {
     if (initialised) return transporter;
     initialised = true;
 
     if (!isConfigured()) {
-        logger.warn('SMTP is not configured (EMAIL_HOST / EMAIL_USER); welcome emails will be skipped');
+        logger.warn('SMTP is not configured (EMAIL_HOST / EMAIL_USER / EMAIL_PASS); welcome emails will be skipped');
         return null;
     }
 
@@ -34,8 +44,9 @@ const getTransporter = () => {
         transporter = nodemailer.createTransport({
             host: config.email.host,
             port: config.email.port,
-            // 465 is implicit TLS; everything else negotiates STARTTLS.
-            secure: Number(config.email.port) === 465,
+            // 465 is implicit TLS; everything else negotiates STARTTLS. Decided
+            // in `config.email` now, so both transports agree.
+            secure: config.email.secure,
             auth: { user: config.email.user, pass: config.email.password }
         });
     } catch (err) {

@@ -1,4 +1,8 @@
 const memberService = require('./member.service');
+/* ONE expression for the membership number, for the reason the model's
+   own comment gives: four copies of it is how the dashboard and the
+   certificate came to print different numbers for the same member. */
+const { membershipNumberFor } = require('./memberNumber');
 const MemberDetails = require('./memberdetails.model');
 const PersonalInfo1 = require('./personalinfo1.model');
 const BusinessInfo = require('./businessinfo.model');
@@ -6,8 +10,11 @@ const MemberFinancialInfo = require('./memberfinancialinfo.model');
 const MemberDeclaration = require('./memberdeclaration.model');
 const MemberAuth = require('../auth/auth.model');
 const ApiResponse = require('../../core/utils/ApiResponse');
+const { invalidateMemberContext } = require('../common/memberContext');
 const asyncHandler = require('../../core/utils/asyncHandler');
 const bcrypt = require('bcrypt');
+const { internationalFromPhone, validateMobile } = require('../common/phoneNumber');
+const { ALL_SOCIAL_CATEGORIES, GENDERS } = require('./demographicOptions');
 
 /**
  * The short names every client actually sends, mapped to the schema's names.
@@ -90,11 +97,49 @@ const updateMember = asyncHandler(async(req, res) => {
     // Before anything reads the body: see `FIELD_ALIASES` above.
     const profileData = normalizeProfileAliases(rawProfileData);
     
-    // Get member from "web users" collection
-    const member = await MemberDetails.findById(req.user.userId);
+    /*
+     * THE TWO READS GO OUT TOGETHER.
+     *
+     * Measured against the live cluster, every round trip from this app
+     * server costs ~65 ms, and this handler was making six or seven of them
+     * strictly one after another — which is most of the "saving is slow" a
+     * member feels, before a single document has been written.
+     *
+     * `MemberDetails` and `PersonalInfo1` are read by id and by `userId`;
+     * neither read depends on the other, so they are issued at once. The
+     * `BusinessInfo` read further down stays where it is: it runs only when
+     * the request carries business answers, and starting it eagerly would
+     * add a round trip to every save that does not.
+     *
+     *   scripts/time-profile-update.js prints the timings this is based on.
+     */
+    const [member, existingPersonalInfo] = await Promise.all([
+        MemberDetails.findById(req.user.userId),
+        PersonalInfo1.findOne({ userId: req.user.userId }),
+    ]);
     
     if (!member) {
         return res.status(404).json(ApiResponse.error('Member not found', 404));
+    }
+
+    /*
+     * A MEMBER OUTSIDE INDIA has no state, district or block — whatever a
+     * client sends for them is dropped here, before any write reads it — and
+     * gives a free-text place instead. The flag comes from the stored record
+     * or the stored number, never from this request.
+     */
+    const abroad = member.isInternational === true
+        ? { international: true, country: member.country || '' }
+        : internationalFromPhone(member.phoneNumber);
+    if (abroad.international) {
+        delete profileData.state;
+        delete profileData.district;
+        delete profileData.block;
+        const place = String(profileData.place || profileData.city || '').trim().slice(0, 200);
+        if (place) {
+            profileData.place = place;
+            profileData.city = place;
+        }
     }
     
     // Store original email before any updates (needed for finding auth record)
@@ -161,8 +206,29 @@ const updateMember = asyncHandler(async(req, res) => {
         }
     }
     
-    // Save personal details to PersonalInfo1 collection (excluding email and password)
-    let personalInfo = await PersonalInfo1.findOne({ userId: req.user.userId });
+    /*
+     * The two enum-constrained demographic fields, checked before anything is
+     * written.
+     *
+     * Both `PersonalInfo1` and `MemberDetails` constrain them, and a value
+     * outside the enum does not come back as "that is not a choice" — it throws
+     * inside `.save()` and turns a profile update into a 500 with a Mongoose
+     * sentence for a message. `undefined` means "not a usable answer", and
+     * every assignment below reads it as "leave the stored value alone" rather
+     * than as "blank it".
+     *
+     * Declared here because the PersonalInfo1 block immediately below is the
+     * first thing that writes them.
+     */
+    const safeSocialCategory = ALL_SOCIAL_CATEGORIES.includes(profileData.socialCategory)
+        ? profileData.socialCategory
+        : undefined;
+    const safeGender = GENDERS.includes(profileData.gender)
+        ? profileData.gender
+        : undefined;
+
+    // Read at the top of the handler, alongside the member — see the note there.
+    let personalInfo = existingPersonalInfo;
     
     /**
      * Fall back to the member's own record when this request carries no personal
@@ -193,6 +259,7 @@ const updateMember = asyncHandler(async(req, res) => {
         city: member.city,
         religion: member.religion,
         socialCategory: member.socialCategory,
+        gender: member.gender,
     };
 
     if (personalInfo) {
@@ -204,8 +271,11 @@ const updateMember = asyncHandler(async(req, res) => {
             district: profileData.district || personalInfo.district,
             block: profileData.block || personalInfo.block,
             city: profileData.city || personalInfo.city,
+            isInternational: abroad.international,
+            place: abroad.international ? (profileData.place || personalInfo.place || member.place || '') : '',
             religion: profileData.religion || personalInfo.religion,
             socialCategory: profileData.socialCategory || personalInfo.socialCategory,
+            gender: safeGender !== undefined ? safeGender : personalInfo.gender,
             isLocked: true, // Lock the form after save
             updatedAt: new Date()
         });
@@ -220,8 +290,11 @@ const updateMember = asyncHandler(async(req, res) => {
             district: profileData.district || personalFallback.district,
             block: profileData.block || personalFallback.block,
             city: profileData.city || personalFallback.city,
+            isInternational: abroad.international,
+            place: abroad.international ? (profileData.place || member.place || '') : '',
             religion: profileData.religion || personalFallback.religion,
             socialCategory: profileData.socialCategory || personalFallback.socialCategory,
+            gender: safeGender !== undefined ? safeGender : personalFallback.gender,
             isLocked: true // Lock the form after first save
         });
     }
@@ -233,22 +306,33 @@ const updateMember = asyncHandler(async(req, res) => {
     // whole profile form and their canonical record would still hold the values
     // captured at registration — which is what the admin dashboards, the
     // geofenced block/district/state queries and getMyProfile all read.
-    // `socialCategory` is enum-constrained on this model; an unrecognised value
-    // would throw on save and turn a profile update into a 500.
-    const SOCIAL_CATEGORIES = ['Christian ST', 'Christian SC', 'ST', 'SC', 'Others', ''];
-    const safeSocialCategory = SOCIAL_CATEGORIES.includes(profileData.socialCategory)
-        ? profileData.socialCategory
-        : undefined;
+    // `socialCategory` and `gender` were whitelisted above, before the first
+    // write that uses them.
+
+    /*
+     * Both numbers are normalised on the way in, exactly as registration does.
+     *
+     * Without this a member who edits their profile and types `+91 98765 43210`
+     * overwrites the ten-digit value registration stored with a spaced one, and
+     * every lookup keyed on the number stops finding them. `undefined` for an
+     * unusable value so the loop below leaves the existing number alone rather
+     * than replacing a good number with a blank.
+     */
+    const normalisedPhone = validateMobile(profileData.phoneNumber);
+    const normalisedWhatsapp = validateMobile(profileData.whatsappNumber);
 
     const coreUpdates = {
         fullName: profileData.fullName,
-        phoneNumber: profileData.phoneNumber,
+        phoneNumber: normalisedPhone.ok ? normalisedPhone.stored : profileData.phoneNumber,
+        whatsappNumber: normalisedWhatsapp.ok ? normalisedWhatsapp.stored : undefined,
         state: profileData.state,
         district: profileData.district,
         block: profileData.block,
         city: profileData.city,
+        place: abroad.international ? profileData.place : undefined,
         religion: profileData.religion,
         socialCategory: safeSocialCategory,
+        gender: safeGender,
         profilePhoto: profileData.profilePhoto
     };
 
@@ -261,17 +345,45 @@ const updateMember = asyncHandler(async(req, res) => {
         }
     });
 
+    /* Recorded once and kept: a member found abroad by their number stays so. */
+    if (abroad.international && member.isInternational !== true) {
+        member.isInternational = true;
+        member.country = abroad.country;
+        coreChanged = true;
+    }
+
     if (coreChanged) {
         member.profileCompleted = true;
         await member.save();
     }
 
-    // Dynamically sync updated profile details & email to Application collection in MongoDB
-    try {
+    /*
+     * THE APPLICATION MIRROR IS BEST EFFORT, SO IT NO LONGER HOLDS THE REPLY.
+     *
+     * This copies the member's name, email, phone and region onto their
+     * Application rows so the admin queues show current details. It has
+     * always been wrapped in a `try` that swallows its own failure — which
+     * says plainly that the save is not considered to depend on it — and yet
+     * the member waited for it before their own screen came back.
+     *
+     * `void (async () => …)()` runs it after this handler has replied. A
+     * failure is logged rather than silently dropped, which is a change: it
+     * was invisible before.
+     *
+     * THE FILTER IS DEDUPED. It listed `email` twice (the current one and the
+     * original, identical whenever the email did not change) and could carry
+     * empty strings, and an `$or` branch that matches nothing still has to be
+     * planned. Only the predicates that can actually match are sent.
+     */
+    void (async () => {
+      try {
         const Application = require('../applications/application.model');
         const searchEmail = (member.email || originalEmail || '').toLowerCase();
+        const emails = [...new Set([searchEmail, String(originalEmail || '').toLowerCase()])]
+            .filter(Boolean);
+        const or = [{ userId: req.user.userId }, ...emails.map((value) => ({ email: value }))];
         await Application.updateMany(
-            { $or: [{ userId: req.user.userId }, { email: searchEmail }, { email: (originalEmail || '').toLowerCase() }] },
+            { $or: or },
             {
                 $set: {
                     ...(profileData.fullName ? { fullName: profileData.fullName } : {}),
@@ -289,13 +401,17 @@ const updateMember = asyncHandler(async(req, res) => {
                     'data.personalDetails.state': profileData.state || member.state,
                     'data.personalDetails.city': profileData.city || member.city,
                     'data.personalDetails.religion': profileData.religion || member.religion,
-                    'data.personalDetails.socialCategory': profileData.socialCategory || member.socialCategory
+                    'data.personalDetails.socialCategory': profileData.socialCategory || member.socialCategory,
+                    'data.personalDetails.gender': safeGender || member.gender || ''
                 }
             }
         );
-    } catch (syncErr) {
+      } catch (syncErr) {
+        // Logged, not swallowed: the mirror going stale is a real fault, it
+        // is just not one the member should wait for.
         console.error('Error syncing member updates to Application collection:', syncErr);
-    }
+      }
+    })();
 
     /**
      * One answer, not two.
@@ -542,10 +658,18 @@ const updateMember = asyncHandler(async(req, res) => {
         city: personalInfo.city,
         religion: personalInfo.religion,
         socialCategory: personalInfo.socialCategory,
+        gender: personalInfo.gender || member.gender || '',
         email: member.email,
         isLocked: personalInfo.isLocked
     };
     
+    /* The member context caches the region and the membership status for
+       fifteen seconds, and a profile save is one of the two things that can
+       make it wrong. A delete from a Map costs nothing and the worst it can
+       do is make the next request pay for a read it would have paid for
+       fifteen seconds later anyway. */
+    invalidateMemberContext(req.user.userId);
+
     res.json(ApiResponse.success(responseData, 'Profile updated successfully'));
 });
 
@@ -568,11 +692,42 @@ const getMyProfile = asyncHandler(async(req, res) => {
         district: personalInfo.district,
         block: personalInfo.block,
         city: personalInfo.city,
+        /* Members outside India: no region, a place instead — see `internationalFromPhone`. */
+        isInternational: member.isInternational === true,
+        country: member.country || '',
+        place: member.place || '',
         religion: personalInfo.religion,
         socialCategory: personalInfo.socialCategory,
+        /* `personalInfo` predates this field for every member who filled the
+           form in before it was asked; their answer, if any, is on the member
+           record. */
+        gender: personalInfo.gender || member.gender || '',
         email: member.email,
         profilePhoto: member.profilePhoto || null,
         membershipStatus: member.membershipStatus || 'pending',
+        /*
+         * TWO DIFFERENT QUESTIONS, AND ONLY ONE OF THEM WAS ANSWERED HERE.
+         *
+         * `membershipType` is the PLAN somebody has paid for — 'annual' on a
+         * paid member, and the literal string 'none' until the payment
+         * clears. `memberType` is WHAT KIND OF APPLICANT they are —
+         * 'business' or 'aspirant' — decided at registration and true from
+         * the moment they apply.
+         *
+         * Only the first was returned, and the profile screen printed it
+         * under the heading "Membership Type". So a business applicant
+         * looking at their own profile was told their membership type was
+         * "none" — which is not their type, it is the plan they have not
+         * bought yet. The data was correct on the record the whole time:
+         * `memberType: 'business'` was sitting one field away and never left
+         * the server.
+         *
+         * `registrationType` is the fallback because the two are written
+         * together by `applicationService.createApplication` and a legacy row
+         * may carry only the second.
+         */
+        memberType: member.memberType || member.registrationType || '',
+
         membershipType: member.membershipType || 'none',
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
         /*
@@ -590,8 +745,28 @@ const getMyProfile = asyncHandler(async(req, res) => {
          * and mints a different one on every screen load.
          */
         memberId: String(member._id),
-        membershipNumber: member.membershipNumber || String(member._id).slice(-8).toUpperCase(),
+        membershipNumber: membershipNumberFor(member),
         membershipActivatedAt: member.membershipActivatedAt || null,
+
+        /*
+         * WHAT WAS PAID, AND AGAINST WHAT.
+         *
+         * The member record has carried `paymentAmount` and `paymentId` since
+         * the gateway started writing them — `payment.service` sets both on a
+         * successful capture — but this response never included them, so the
+         * receipt screen, the plan screen and the member's own dashboard all
+         * printed a dash where the amount should be. There was nothing wrong
+         * with the data; it simply never left the server.
+         *
+         * `lastPayment*` are the names the client asks for first, and they do
+         * not exist on this model — the stored fields answer to them here so
+         * one shape reaches every screen.
+         */
+        paymentAmount: member.paymentAmount ?? null,
+        lastPaymentAmount: member.paymentAmount ?? null,
+        paymentId: member.paymentId || '',
+        lastPaymentDate: member.lastPaymentDate || member.membershipActivatedAt || null,
+        paymentMethod: member.paymentMethod || '',
         isLocked: personalInfo.isLocked || false
     } : {
         fullName: member.fullName,
@@ -600,11 +775,39 @@ const getMyProfile = asyncHandler(async(req, res) => {
         district: member.district,
         block: member.block,
         city: member.city,
+        /* Members outside India: no region, a place instead — see `internationalFromPhone`. */
+        isInternational: member.isInternational === true,
+        country: member.country || '',
+        place: member.place || '',
         religion: member.religion,
         socialCategory: member.socialCategory,
+        gender: member.gender || '',
         email: member.email,
         profilePhoto: member.profilePhoto || null,
         membershipStatus: member.membershipStatus || 'pending',
+        /*
+         * TWO DIFFERENT QUESTIONS, AND ONLY ONE OF THEM WAS ANSWERED HERE.
+         *
+         * `membershipType` is the PLAN somebody has paid for — 'annual' on a
+         * paid member, and the literal string 'none' until the payment
+         * clears. `memberType` is WHAT KIND OF APPLICANT they are —
+         * 'business' or 'aspirant' — decided at registration and true from
+         * the moment they apply.
+         *
+         * Only the first was returned, and the profile screen printed it
+         * under the heading "Membership Type". So a business applicant
+         * looking at their own profile was told their membership type was
+         * "none" — which is not their type, it is the plan they have not
+         * bought yet. The data was correct on the record the whole time:
+         * `memberType: 'business'` was sitting one field away and never left
+         * the server.
+         *
+         * `registrationType` is the fallback because the two are written
+         * together by `applicationService.createApplication` and a legacy row
+         * may carry only the second.
+         */
+        memberType: member.memberType || member.registrationType || '',
+
         membershipType: member.membershipType || 'none',
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
         /*
@@ -622,8 +825,28 @@ const getMyProfile = asyncHandler(async(req, res) => {
          * and mints a different one on every screen load.
          */
         memberId: String(member._id),
-        membershipNumber: member.membershipNumber || String(member._id).slice(-8).toUpperCase(),
+        membershipNumber: membershipNumberFor(member),
         membershipActivatedAt: member.membershipActivatedAt || null,
+
+        /*
+         * WHAT WAS PAID, AND AGAINST WHAT.
+         *
+         * The member record has carried `paymentAmount` and `paymentId` since
+         * the gateway started writing them — `payment.service` sets both on a
+         * successful capture — but this response never included them, so the
+         * receipt screen, the plan screen and the member's own dashboard all
+         * printed a dash where the amount should be. There was nothing wrong
+         * with the data; it simply never left the server.
+         *
+         * `lastPayment*` are the names the client asks for first, and they do
+         * not exist on this model — the stored fields answer to them here so
+         * one shape reaches every screen.
+         */
+        paymentAmount: member.paymentAmount ?? null,
+        lastPaymentAmount: member.paymentAmount ?? null,
+        paymentId: member.paymentId || '',
+        lastPaymentDate: member.lastPaymentDate || member.membershipActivatedAt || null,
+        paymentMethod: member.paymentMethod || '',
         isLocked: false
     };
     

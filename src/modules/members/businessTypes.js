@@ -12,12 +12,24 @@
  * uploaded, and the answer comes back as a server error. A dropdown must not
  * offer a choice the database refuses.
  *
+ * `Dealer` and `Franchise` were added for the business-creation account: a
+ * dealership and a franchise are neither manufacture nor plain trade, and the
+ * members filing as one had to pick `Others`, which is the value that tells a
+ * report nothing.
+ *
  * Both clients keep a copy of this list, because a dropdown cannot wait on a
  * network round-trip to render. Anything added here has to be added there —
  * `website/src/lib/businessTypes.ts` and
  * `frontend/src/constants/businessTypes.ts` both name this file.
  */
-const BUSINESS_TYPES = ['Manufacturing', 'Trader', 'Service Provider', 'Others'];
+const BUSINESS_TYPES = [
+    'Manufacturing',
+    'Trader',
+    'Service Provider',
+    'Dealer',
+    'Franchise',
+    'Others',
+];
 
 /**
  * Match input to a canonical type, or return '' if it is not one of them.

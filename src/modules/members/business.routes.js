@@ -35,13 +35,33 @@ const upload = multer({
 router.use(verifyToken);
 
 // Business profile routes
-router.post('/business-profiles', upload.single('logo'), businessController.createBusinessProfile);
+router.post('/business-profiles', upload.fields([{ name: 'logo', maxCount: 1 }, { name: 'banner', maxCount: 1 }]), businessController.createBusinessProfile);
 router.get('/business-profiles/me', businessController.getBusinessProfile);
 router.get('/business-profiles/all', businessController.getAllBusinessProfiles);
 router.get('/business-profiles/discover', businessController.discoverCompanies);
+
+/*
+ * TRUST LIST, and the member-facing company page.
+ *
+ * DECLARED BEFORE `/business-profiles/:id`. Express matches in the order routes
+ * are registered, so a literal path behind a parameter route is a literal the
+ * parameter captures: `/business-profiles/trust-list` would arrive at
+ * `getBusinessProfileById` with `id = "trust-list"`, which is not a valid
+ * ObjectId and answers 404. The same trap is documented for `/settings` behind
+ * `/plans/:key` in CLAUDE.md, and it is silent both times — the route exists,
+ * the request is authenticated, and the answer is simply wrong.
+ */
+router.get('/business-profiles/trust-list', businessController.getTrustList);
+router.get('/business-profiles/trust-list/ids', businessController.getTrustListIds);
+router.post('/business-profiles/trust-list/:companyId', businessController.addToTrustList);
+router.delete('/business-profiles/trust-list/:companyId', businessController.removeFromTrustList);
+
+/* "View as member" — the whitelist-projected page any member may open. */
+router.get('/business-profiles/public/:id', businessController.getPublicCompany);
+
 router.get('/business-profiles/:id', businessController.getBusinessProfileById);
-router.put('/business-profiles/me', upload.single('logo'), businessController.updateBusinessProfile);
-router.put('/business-profiles/:id', upload.single('logo'), businessController.updateBusinessProfileById);
+router.put('/business-profiles/me', upload.fields([{ name: 'logo', maxCount: 1 }, { name: 'banner', maxCount: 1 }]), businessController.updateBusinessProfile);
+router.put('/business-profiles/:id', upload.fields([{ name: 'logo', maxCount: 1 }, { name: 'banner', maxCount: 1 }]), businessController.updateBusinessProfileById);
 router.delete('/business-profiles/me', businessController.deleteBusinessProfile);
 router.delete('/business-profiles/:id', businessController.deleteBusinessProfileById);
 

@@ -46,18 +46,75 @@ const isPaidStatus = (value) => PAID_STATUSES.includes(String(value || '').toLow
  * member record, so an admin calling a member endpoint sees the national feed
  * instead of a 500.
  */
+/**
+ * ============================================================================
+ * THE MEMBER'S OWN ROW, CACHED FOR FIFTEEN SECONDS
+ * ============================================================================
+ *
+ * Measured, not guessed: against the live cluster a bare `ping` — no query, no
+ * collection — costs 400–500ms and spikes past four seconds under load. Every
+ * index these endpoints need is already present and the collections hold
+ * between two and twenty documents, so a page costs roughly half a second
+ * times the number of SEQUENTIAL round trips on it, and nothing else.
+ *
+ * This function is one of those round trips on almost every member endpoint in
+ * the product — events, announcements, notifications, the directory, messages.
+ * It reads one document and six fields off it, and it read it again every time.
+ *
+ * FIFTEEN SECONDS, deliberately short. This is a latency patch and not a data
+ * store; the longest anything here can be wrong for is one page load.
+ *
+ * The one unacceptable staleness would be `isPaid` — a member who has just paid
+ * and still sees the unpaid association. So every path that writes
+ * `membershipStatus` calls `invalidateMemberContext` by hand, and the TTL is
+ * the backstop rather than the mechanism. Region is the other cached field, and
+ * a profile edit drops the entry for the same reason.
+ */
+const CONTEXT_TTL_MS = 15 * 1000;
+
+/* A plain Map, bounded. A member area with more live members than this at once
+   would want Redis; at that point `cacheClient` is already wired up and this
+   becomes four lines against it. The cap exists so a long-running process
+   cannot accumulate a row per member who has ever signed in. */
+const CONTEXT_MAX = 500;
+const contextCache = new Map();
+
+/**
+ * Drop a member's cached row. Call it from anything that writes their
+ * membership status or their region — see the note above.
+ *
+ * Safe to call with a missing or malformed id; it simply does nothing.
+ */
+const invalidateMemberContext = (id) => {
+    const key = String(id || '');
+    if (key) contextCache.delete(key);
+};
+
+const cachedMember = async (id) => {
+    const hit = contextCache.get(id);
+    if (hit && hit.expires > Date.now()) return hit.value;
+
+    const member = await MemberDetails.findById(id)
+        .select('fullName email state district block membershipStatus memberType registrationType')
+        .lean()
+        .catch(() => null);
+
+    /* A miss is cached too. A member id with no profile row — an admin calling
+       a member endpoint — would otherwise pay the full round trip on every
+       single request, which is the case this was slowest for. */
+    if (contextCache.size >= CONTEXT_MAX) contextCache.clear();
+    contextCache.set(id, { value: member, expires: Date.now() + CONTEXT_TTL_MS });
+
+    return member;
+};
+
 const resolveMemberContext = async (req) => {
     const user = req.user || {};
     const id = String(user.userId || user.id || user._id || '');
     const role = String(user.role || '');
     const isAdmin = ADMIN_ROLES.includes(role);
 
-    const member = id
-        ? await MemberDetails.findById(id)
-            .select('fullName email state district block membershipStatus memberType registrationType')
-            .lean()
-            .catch(() => null)
-        : null;
+    const member = id ? await cachedMember(id) : null;
 
     return {
         id,
@@ -75,4 +132,19 @@ const resolveMemberContext = async (req) => {
     };
 };
 
-module.exports = { resolveMemberContext, isPaidStatus, PAID_STATUSES, ADMIN_ROLES };
+module.exports = {
+    resolveMemberContext,
+    /**
+     * The cached row itself, for a caller that has an id rather than a request.
+     *
+     * Same cache, same fifteen seconds, same invalidation — which is the point
+     * of exporting it rather than letting a second caller open its own. The
+     * projection is fixed (see `cachedMember`); anything needing a field
+     * outside it must read the member itself.
+     */
+    memberSnapshot: cachedMember,
+    invalidateMemberContext,
+    isPaidStatus,
+    PAID_STATUSES,
+    ADMIN_ROLES,
+};

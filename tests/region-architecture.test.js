@@ -104,121 +104,199 @@ test('an admin with a blank region is ignored rather than creating an empty node
     assert.strictEqual(states.size, 0);
 });
 
-// --- orphan fallback --------------------------------------------------------
+// --- who may decide, and where the gaps are ---------------------------------
 
-console.log('\nOrphan fallback routing');
+console.log('\nParallel review, and unstaffed regions');
+
+/*
+ * There is no orphan fallback any more, and no queue to escalate.
+ *
+ * Under the sequential workflow a file belonged to one tier at a time, so a
+ * region whose block admin had been deleted held applications nobody could
+ * open — `effectiveTier` existed to walk that file up to the first tier that
+ * was staffed, and `absorbedTiers` existed so the tier it landed on did not
+ * have to approve it twice.
+ *
+ * Submitting to all three tiers at once removes the problem rather than routing
+ * around it: a block with no admin is still covered, because the district and
+ * state admin of that region were already holding the same file. What is left
+ * to report is the one case that still strands an applicant — a region with
+ * nobody at ANY tier — and that is what these assert.
+ */
 
 const FULL = { block: 1, district: 1, state: 1 };
 const NO_BLOCK = { block: 0, district: 1, state: 1 };
 const NO_BLOCK_OR_DISTRICT = { block: 0, district: 0, state: 1 };
 const NOBODY = { block: 0, district: 0, state: 0 };
 
-test('a fully staffed region routes to the tier that formally owns the file', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, FULL), 'block');
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-District' }, FULL), 'district');
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-State' }, FULL), 'state');
+test('a pending application is held by all three tiers of its own region', () => {
+    assert.deepStrictEqual(
+        tierRouting.reviewingTiers({ status: 'Pending' }),
+        ['block', 'district', 'state']
+    );
 });
 
-test('a deleted block admin escalates their queue to the district tier', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, NO_BLOCK), 'district');
-    assert.ok(tierRouting.isOrphaned({ status: 'Pending-Block' }, NO_BLOCK));
+test('any of the three may decide it, and so may the super admin', () => {
+    ['block', 'district', 'state', 'super'].forEach(tier => assert.strictEqual(
+        tierRouting.canTierAct({ status: 'Pending' }, tier), true, tier
+    ));
 });
 
-test('escalation keeps climbing past every unstaffed tier', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, NO_BLOCK_OR_DISTRICT), 'state');
+test("an application the STATE decided is nobody's to decide again", () => {
+    /*
+     * The outcome is the State's verdict and it is terminal — but it has to
+     * have been the STATE's. A bare `Approved` with no attribution is read as
+     * the State's, because under both the previous workflows the state
+     * timestamp was what an unattributed approval left behind.
+     */
+    [
+        { status: 'Approved', approvedBy: { adminType: 'StateAdmin' } },
+        { status: 'Rejected', rejectedBy: { adminType: 'StateAdmin' } },
+        { status: 'Approved', stateApprovedAt: new Date() }
+    ].forEach((app) => {
+        assert.strictEqual(tierRouting.canTierAct(app, 'state'), false, app.status);
+        assert.strictEqual(tierRouting.canTierAct(app, 'super'), false, app.status);
+    });
 });
 
-test('an entirely unstaffed region lands on the super admin, never nowhere', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, NOBODY), 'super');
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-State' }, NOBODY), 'super');
+test("an application a LOWER tier decided is still the State's to decide", () => {
+    /*
+     * The association's rule: nobody is a member until the State says so. A row
+     * the previous build let a District admin approve has a member profile and
+     * an `Approved` status, and the State has still never seen it — so the seat
+     * stays open and the buttons stay on.
+     */
+    const byDistrict = { status: 'Approved', approvedBy: { adminType: 'DistrictAdmin' } };
+    assert.strictEqual(tierRouting.canTierAct(byDistrict, 'state'), true);
+    assert.strictEqual(tierRouting.canTierAct(byDistrict, 'super'), true);
+    // ...and the district, which did decide, cannot decide twice.
+    assert.strictEqual(tierRouting.canTierAct(byDistrict, 'district'), false);
 });
 
-test('terminal statuses owe nobody a decision', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Approved' }, NOBODY), null);
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Rejected' }, NOBODY), null);
-    assert.strictEqual(tierRouting.isOrphaned({ status: 'Approved' }, NOBODY), false);
+test("a State approval carries the tiers below it", () => {
+    /*
+     * The association's rule: the tiers are an authority hierarchy. Once the
+     * State has approved, the District's and Block's steps are settled — asking
+     * them to decide would be asking for a decision that changes nothing.
+     */
+    const stateApproved = {
+        status: 'Approved',
+        approvedBy: { adminType: 'StateAdmin' },
+        reviews: { state: { decision: 'approved', adminType: 'StateAdmin' } }
+    };
+    assert.deepStrictEqual(tierRouting.reviewingTiers(stateApproved), []);
+    assert.strictEqual(tierRouting.canTierAct(stateApproved, 'block'), false);
+    assert.strictEqual(tierRouting.canTierAct(stateApproved, 'district'), false);
 });
 
-test('legacy status spellings escalate the same way as canonical ones', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'PENDING' }, NO_BLOCK), 'district');
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'pending_block_approval' }, NO_BLOCK), 'district');
+test('legacy status spellings are held exactly the same way', () => {
+    ['PENDING', 'Pending-Block', 'Pending-District', 'Pending-State', 'pending_block_approval']
+        .forEach(status => assert.deepStrictEqual(
+            tierRouting.reviewingTiers({ status }),
+            ['block', 'district', 'state'],
+            status
+        ));
 });
 
-test('unknown coverage never escalates — an unknown is not "nobody is there"', () => {
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, null), 'block');
-    assert.strictEqual(tierRouting.isOrphaned({ status: 'Pending-Block' }, null), false);
+test('a missing block admin is not a coverage gap', () => {
+    // It was the canonical one. The district and state admin hold the same
+    // applications, so nothing is stranded and nothing needs escalating.
+    assert.strictEqual(tierRouting.isUnattended(NO_BLOCK), false);
+    assert.strictEqual(tierRouting.isUnattended(NO_BLOCK_OR_DISTRICT), false);
+    assert.strictEqual(tierRouting.isUnattended(FULL), false);
 });
 
-test('a still-staffed block keeps its own queue when the district is empty', () => {
-    // District staffing is irrelevant to a file the block still owns.
-    const coverage = { block: 1, district: 0, state: 1 };
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-Block' }, coverage), 'block');
-    assert.strictEqual(tierRouting.effectiveTier({ status: 'Pending-District' }, coverage), 'state');
+test('a region with nobody at any tier is, and is the super admin\'s to clear', () => {
+    assert.strictEqual(tierRouting.isUnattended(NOBODY), true);
+    assert.deepStrictEqual(tierRouting.unstaffedTiers(NOBODY), ['block', 'district', 'state']);
 });
 
-console.log('\nAbsorbed approval steps');
-
-test('a district admin acting on an orphaned block file absorbs the block step', () => {
-    assert.deepStrictEqual(tierRouting.absorbedTiers({ status: 'Pending-Block' }, 'district'), ['block']);
+test('unknown coverage is never reported as unattended', () => {
+    // An unknown is not "nobody is there", and reporting a staffed region as
+    // abandoned is worse than reporting nothing.
+    assert.strictEqual(tierRouting.isUnattended(null), false);
+    assert.deepStrictEqual(tierRouting.unstaffedTiers(null), []);
 });
 
-test('a state admin acting on a doubly-orphaned file absorbs both steps', () => {
-    assert.deepStrictEqual(tierRouting.absorbedTiers({ status: 'Pending-Block' }, 'state'), ['block', 'district']);
+test('unstaffedTiers names the vacancies without claiming they strand anyone', () => {
+    assert.deepStrictEqual(tierRouting.unstaffedTiers(NO_BLOCK), ['block']);
+    assert.deepStrictEqual(tierRouting.unstaffedTiers(NO_BLOCK_OR_DISTRICT), ['block', 'district']);
 });
 
-test('a tier acting on its own file absorbs nothing', () => {
-    assert.deepStrictEqual(tierRouting.absorbedTiers({ status: 'Pending-District' }, 'district'), []);
+// --- bucket classification ---------------------------------------------------
+
+console.log('\nDashboard buckets');
+
+test('an application in an unstaffed block is pending for every tier that covers it', () => {
+    const app = { status: 'Pending' };
+    [LEVELS.BLOCK, LEVELS.DISTRICT, LEVELS.STATE].forEach(level => assert.strictEqual(
+        classifyForLevel(app, level, NO_BLOCK), 'pending', level
+    ));
 });
 
-test('a lower tier can never absorb a higher one', () => {
-    assert.deepStrictEqual(tierRouting.absorbedTiers({ status: 'Pending-State' }, 'block'), []);
+test('staffing changes no bucket at all', () => {
+    const app = { status: 'Pending' };
+    [FULL, NO_BLOCK, NO_BLOCK_OR_DISTRICT, NOBODY, null].forEach(coverage => assert.strictEqual(
+        classifyForLevel(app, LEVELS.DISTRICT, coverage), 'pending'
+    ));
 });
 
-test('the super admin absorbs every remaining step', () => {
-    assert.deepStrictEqual(tierRouting.absorbedTiers({ status: 'Pending-Block' }, 'super'), ['block', 'district', 'state']);
+test('classification never re-opens a tier\'s own decision', () => {
+    const districtApproved = {
+        status: 'Pending',
+        reviews: { district: { decision: 'approved', adminType: 'DistrictAdmin' } }
+    };
+    const districtRejected = {
+        status: 'Pending',
+        reviews: { district: { decision: 'rejected', adminType: 'DistrictAdmin' } }
+    };
+    assert.strictEqual(classifyForLevel(districtApproved, LEVELS.DISTRICT, NOBODY), 'approved');
+    assert.strictEqual(classifyForLevel(districtRejected, LEVELS.DISTRICT, NOBODY), 'rejected');
 });
 
-test('the escalation reason names both the missing tier and the one that inherited', () => {
-    const reason = tierRouting.fallbackReason({ status: 'Pending-Block' }, NO_BLOCK);
-    assert.ok(reason.includes('Block'), reason);
-    assert.ok(reason.includes('District'), reason);
-    assert.strictEqual(tierRouting.fallbackReason({ status: 'Pending-Block' }, FULL), '');
+test("a tier's bucket is its own verdict, not the application's outcome", () => {
+    /*
+     * A row approved by the block under the previous build. The block's own
+     * decision reads back; the district, which never decided anything, is
+     * pending — and the APPLICATION is still Approved, which is what enrols the
+     * member. Three different answers from one document, all true.
+     */
+    const approvedByBlock = {
+        status: 'Approved',
+        blockApprovedAt: new Date(),
+        approvedBy: { adminType: 'BlockAdmin' }
+    };
+    assert.strictEqual(classifyForLevel(approvedByBlock, LEVELS.BLOCK, NOBODY), 'approved');
+    assert.strictEqual(classifyForLevel(approvedByBlock, LEVELS.DISTRICT, NOBODY), 'pending');
+    assert.strictEqual(tierRouting.normalizeStatus(approvedByBlock.status), 'Approved');
 });
 
-// --- bucket classification with fallback ------------------------------------
-
-console.log('\nDashboard buckets under fallback');
-
-test('an orphaned block file lands in the district admin\'s pending bucket', () => {
-    const app = { status: 'Pending-Block' };
-    assert.strictEqual(classifyForLevel(app, LEVELS.DISTRICT), 'upstream', 'without coverage it is still upstream');
-    assert.strictEqual(classifyForLevel(app, LEVELS.DISTRICT, NO_BLOCK), 'pending');
-});
-
-test('escalation does not leak the file into every tier at once', () => {
-    const app = { status: 'Pending-Block' };
-    assert.strictEqual(classifyForLevel(app, LEVELS.STATE, NO_BLOCK), 'upstream',
-        'the state tier must not also claim a file the district inherited');
-});
-
-test('a doubly-orphaned file reaches the state tier and only the state tier', () => {
-    const app = { status: 'Pending-Block' };
-    assert.strictEqual(classifyForLevel(app, LEVELS.STATE, NO_BLOCK_OR_DISTRICT), 'pending');
-    assert.strictEqual(classifyForLevel(app, LEVELS.DISTRICT, NO_BLOCK_OR_DISTRICT), 'upstream');
-});
-
-test('fallback never re-opens a terminal file', () => {
-    const approved = { status: 'Approved', blockApprovedAt: new Date(), districtApprovedAt: new Date() };
-    const rejected = { status: 'Rejected', rejectedBy: { adminType: 'BlockAdmin' } };
-    assert.strictEqual(classifyForLevel(approved, LEVELS.DISTRICT, NOBODY), 'approved');
-    assert.strictEqual(classifyForLevel(rejected, LEVELS.DISTRICT, NOBODY), 'closed');
-});
-
-test('full staffing leaves every existing bucket rule untouched', () => {
+test("a file left mid-relay keeps the block's real approval and owes the rest", () => {
     const blockApproved = { status: 'Pending-District', blockApprovedAt: new Date() };
+    // The block did approve it — `blockApprovedAt` was only ever written by the
+    // block acting — so its own queue must not ask it again.
     assert.strictEqual(classifyForLevel(blockApproved, LEVELS.BLOCK, FULL), 'approved');
     assert.strictEqual(classifyForLevel(blockApproved, LEVELS.DISTRICT, FULL), 'pending');
-    assert.strictEqual(classifyForLevel(blockApproved, LEVELS.STATE, FULL), 'upstream');
+    assert.strictEqual(classifyForLevel(blockApproved, LEVELS.STATE, FULL), 'pending');
+});
+
+test('stateApprovedAt alone is NOT read as the State having approved', () => {
+    /*
+     * The parallel build stamped `stateApprovedAt` on EVERY approval whoever
+     * made it, because it is what the member screens read as the approval date.
+     * Treating it as the State's own verdict would credit the State with every
+     * decision a Block or District admin ever made — the exact bug the per-tier
+     * verdicts exist to stop.
+     */
+    const approvedByBlockUnderParallel = {
+        status: 'Approved',
+        stateApprovedAt: new Date(),
+        blockApprovedAt: new Date(),
+        approvedBy: { adminType: 'BlockAdmin' }
+    };
+    assert.strictEqual(classifyForLevel(approvedByBlockUnderParallel, LEVELS.BLOCK, FULL), 'approved');
+    assert.strictEqual(classifyForLevel(approvedByBlockUnderParallel, LEVELS.STATE, FULL), 'pending');
+    assert.strictEqual(tierRouting.canTierAct(approvedByBlockUnderParallel, 'state'), true);
 });
 
 // --- canonical geography ----------------------------------------------------

@@ -297,6 +297,65 @@ const testMediaHelpers = () => {
         !escaped.startsWith(UPLOADS_DIR + path.sep));
 };
 
+
+// =================================================== unit: section overrides
+
+/**
+ * What the editor did to each card — removed it, or added rows to it.
+ *
+ * The rule worth pinning is the FILTER. The CMS sends one row per card it
+ * rendered, so without it every save would store a dozen rows saying
+ * nothing, and a later schema change would orphan all of them. A row earns
+ * its place by being hidden or by carrying a field, and by nothing else.
+ *
+ * `cleanSections` is not exported — it is an internal cleaner, like every
+ * other one in that service — so this drives it through the seam it is
+ * reachable from: the shape a caller would send.
+ */
+const testSectionOverrides = () => {
+    section('Section overrides (unit)');
+
+    const { cleanSectionsForTest } = require('../src/modules/cms/cms.service');
+    if (typeof cleanSectionsForTest !== 'function') {
+        check('cleanSections is reachable from the test seam', false);
+        return;
+    }
+    const clean = cleanSectionsForTest;
+
+    check('a hidden card is kept',
+        clean([{ key: 'a.b', hidden: true }]).length === 1);
+    check('a card carrying a field is kept',
+        clean([{ key: 'a.b', fields: [{ label: 'x', value: 'y' }] }]).length === 1);
+
+    // The one that matters: a card nobody touched stores nothing.
+    check('a card with nothing said about it is dropped',
+        clean([{ key: 'a.b', hidden: false, fields: [] }]).length === 0);
+    check('a row with no key is dropped',
+        clean([{ key: '', hidden: true }]).length === 0);
+
+    // A duplicate would make "is this hidden" depend on which row won.
+    const dupes = clean([
+        { key: 'a.b', hidden: true },
+        { key: 'a.b', hidden: false, fields: [{ label: 'x', value: 'y' }] },
+    ]);
+    check('a duplicate key stores one row', dupes.length === 1);
+    check('the first spelling of a duplicate key wins', dupes[0].hidden === true);
+
+    // A multipart save stringifies arrays; see `cleanPhotos`.
+    check('a stringified array is parsed',
+        clean(JSON.stringify([{ key: 'a.b', hidden: true }])).length === 1);
+    check('a string that is not an array yields nothing',
+        clean('not json').length === 0);
+
+    // Multipart also stringifies booleans, which is how a flag survives a
+    // text-only save and vanishes on any save with an image attached.
+    check("hidden: 'true' counts as hidden",
+        clean([{ key: 'a.b', hidden: 'true' }])[0].hidden === true);
+
+    check('a field with neither label nor value is dropped',
+        clean([{ key: 'a.b', hidden: true, fields: [{ label: '', value: '' }] }])[0]
+            .fields.length === 0);
+};
 // ============================================================ live: public
 
 const testPublicReads = async() => {
@@ -583,6 +642,7 @@ const main = async() => {
     testSanitiser();
     testOnboardingVisibility();
     testMediaHelpers();
+    testSectionOverrides();
 
     const reachable = (await call('GET', '/cms/site')).status === 200;
 
