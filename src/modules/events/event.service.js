@@ -276,6 +276,36 @@ const toEvent = (doc = {}, extras = {}) => ({
         speaker: item.speaker || '',
         location: item.location || ''
     })),
+    /*
+     * THE PER-DAY PROGRAMME — and it has to be mapped HERE, not only in
+     * `pickEventDetail`.
+     *
+     * That function is called as `pickEventDetail(toEvent(e))`, so it reads
+     * THIS object rather than the Mongoose document. A field added there and
+     * not here is therefore always empty: `days` was stored correctly,
+     * sanitised correctly and served as `[]` on every request, so the event
+     * page fell back to the flat agenda and the day-by-day programme an
+     * editor had just typed in appeared nowhere. Reported as "it is not
+     * updated".
+     *
+     * The dates are ISO strings, like every other date this mapper emits, so
+     * the client never receives a Date it has to guess the shape of.
+     */
+    days: (doc.days || []).map((day) => ({
+        id: day._id ? String(day._id) : '',
+        date: day.date ? new Date(day.date).toISOString() : '',
+        startTime: day.startTime || '',
+        endTime: day.endTime || '',
+        agenda: (day.agenda || []).map((item) => ({
+            id: item._id ? String(item._id) : '',
+            startTime: item.startTime || '',
+            endTime: item.endTime || '',
+            title: item.title || '',
+            description: item.description || '',
+            speaker: item.speaker || '',
+            location: item.location || ''
+        }))
+    })),
     speakers: (doc.speakers || []).map((item) => ({
         id: item._id ? String(item._id) : '',
         name: item.name || '',
