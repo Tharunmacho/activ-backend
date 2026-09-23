@@ -34,7 +34,7 @@ const galleryState = (payload = {}) => {
 };
 
 const {
-    toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders, sanitizeTargets,
+    toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeDays, sanitizeReminders, sanitizeTargets,
     sanitizeRegistrationFields
 } = eventService;
 
@@ -63,6 +63,9 @@ const pickEventDetail = (event = {}) => ({
     targetLabel: event.targetLabel,
     audience: event.audience,
     agenda: event.agenda,
+    /* The per-day programme. Empty on a single-day event and on everything
+       written before it existed — the reader falls back to `agenda`. */
+    days: event.days || [],
     speakers: event.speakers,
     venueAddress: event.venueAddress,
     venueMapUrl: event.venueMapUrl,
@@ -138,6 +141,7 @@ const eventDetailUpdates = (payload = {}) => {
         update.audience = String(payload.audience || '').toLowerCase() === 'paid' ? 'paid' : 'all';
     }
     if (payload.agenda !== undefined) update.agenda = sanitizeAgenda(parseArray(payload.agenda));
+    if (payload.days !== undefined) update.days = sanitizeDays(parseArray(payload.days));
     if (payload.speakers !== undefined) update.speakers = sanitizeSpeakers(parseArray(payload.speakers));
     if (payload.reminderOffsetsHours !== undefined) {
         update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));

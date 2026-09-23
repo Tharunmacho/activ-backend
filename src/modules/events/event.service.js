@@ -96,6 +96,35 @@ const sanitizeAgenda = (value) => {
     });
 };
 
+/**
+ * THE PER-DAY PROGRAMME — see `eventDaySchema`.
+ *
+ * A day is kept when it has a date; without one there is nothing to print it
+ * under and nothing to sort it by, so it is an empty row the editor tabbed
+ * through. Days are sorted by date, because "day 2" is a fact about the
+ * calendar rather than about the order somebody happened to type them in.
+ *
+ * `agenda` inside a day goes through exactly the same cleaner as the flat one,
+ * so a session gets the same treatment wherever it is written.
+ */
+const sanitizeDays = (value) => {
+    if (!Array.isArray(value)) return [];
+
+    return value
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => {
+            const date = item.date ? new Date(item.date) : null;
+            return {
+                date: date && !Number.isNaN(date.getTime()) ? date : null,
+                startTime: toClockTime(item.startTime || item.start),
+                endTime: toClockTime(item.endTime || item.end),
+                agenda: sanitizeAgenda(item.agenda)
+            };
+        })
+        .filter((item) => item.date)
+        .sort((a, b) => a.date.getTime() - b.date.getTime());
+};
+
 const sanitizeSpeakers = (value) => {
     if (!Array.isArray(value)) return [];
 
@@ -462,6 +491,7 @@ const sanitize = (payload = {}) => {
     }
 
     if (payload.agenda !== undefined) out.agenda = sanitizeAgenda(parseMaybeJson(payload.agenda));
+    if (payload.days !== undefined) out.days = sanitizeDays(parseMaybeJson(payload.days));
     if (payload.speakers !== undefined) out.speakers = sanitizeSpeakers(parseMaybeJson(payload.speakers));
     if (payload.reminderOffsetsHours !== undefined) {
         out.reminderOffsetsHours = sanitizeReminders(parseMaybeJson(payload.reminderOffsetsHours));
@@ -1528,6 +1558,7 @@ module.exports.toEvent = toEvent;
 module.exports.toRegistration = toRegistration;
 module.exports.sanitizeAgenda = sanitizeAgenda;
 module.exports.sanitizeSpeakers = sanitizeSpeakers;
+module.exports.sanitizeDays = sanitizeDays;
 module.exports.sanitizeReminders = sanitizeReminders;
 module.exports.toClockTime = toClockTime;
 module.exports.registrationClosesAt = registrationClosesAt;

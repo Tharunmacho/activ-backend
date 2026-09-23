@@ -19,6 +19,36 @@ const agendaItemSchema = new mongoose.Schema({
     location: { type: String, trim: true, default: '' }
 }, { _id: true });
 
+/**
+ * ============================================================================
+ * ONE DAY OF A MULTI-DAY EVENT — its own hours, its own agenda
+ * ============================================================================
+ *
+ * A three-day conclave does not run 09:00 to 17:00 three times. Day one opens
+ * late after registration, day two is the full programme, day three closes at
+ * lunch. The event carried ONE `startAt`/`endAt` pair and ONE flat agenda, so
+ * the page could only ever print a single span for all three days and a list
+ * of sessions with nothing saying which day they fell on.
+ *
+ * `date` is the day itself. `startTime`/`endTime` are STRINGS — "09:30", not
+ * instants — for the same reason the agenda rows are: they belong to the day,
+ * so moving the event to a different date must not leave them pointing at the
+ * old one. `date` and the time are combined only when something needs an
+ * instant.
+ *
+ * OPTIONAL, AND EMPTY ON EVERY EVENT WRITTEN BEFORE THIS. A reader that finds
+ * no days falls back to `startAt`/`endAt` and the flat `agenda`, which is
+ * what every single-day event still uses — there is nothing to migrate, and a
+ * one-day event gains no per-day furniture it does not need.
+ */
+const eventDaySchema = new mongoose.Schema({
+    date: { type: Date, default: null },
+    startTime: { type: String, trim: true, default: '' },
+    endTime: { type: String, trim: true, default: '' },
+    /** What happens on THIS day. Same shape as the flat agenda. */
+    agenda: { type: [agendaItemSchema], default: [] }
+}, { _id: true });
+
 const speakerSchema = new mongoose.Schema({
     name: { type: String, trim: true, default: '' },
     role: { type: String, trim: true, default: '' },
@@ -400,6 +430,14 @@ const eventSchema = new mongoose.Schema({
 
     // ---- the detail an event page needs (EVT-001)
     agenda: { type: [agendaItemSchema], default: [] },
+    /**
+     * The per-day programme — see `eventDaySchema`.
+     *
+     * Empty for a single-day event and for everything written before this
+     * existed. `agenda` above stays as the flat list those events use, and as
+     * the fallback for a multi-day event whose days have not been filled in.
+     */
+    days: { type: [eventDaySchema], default: [] },
     speakers: { type: [speakerSchema], default: [] },
 
     /** The street address under the venue name, and a map link if there is one. */
