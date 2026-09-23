@@ -128,6 +128,29 @@ router.use('/messages', messageRoutes);
  */
 router.use('/webhook', webhookRoutes);
 
+/**
+ * ==========================================================================
+ * `/payment`, ALSO ABOVE THE GATE — because a GUEST can pay for a seat
+ * ==========================================================================
+ *
+ * `/event-bookings` is already up here (see the note above it) precisely so
+ * somebody with no ACTIV account can book. Checkout was left below, so the
+ * moment bookings started going through the gateway a guest hit 401 on
+ * `/payment/create-request` — after typing in every participant.
+ *
+ * SAFE, because every route in that file carries its own guard rather than
+ * leaning on this one: `/order`, `/order/:id`, `/complete`, `/mock-authorize`
+ * and `/status` are all `verifyToken`, `/renew` is `verifyToken` plus
+ * `super_admin`, and `/create-request` is `optionalAuth` with an explicit
+ * check that a MEMBERSHIP still needs an account. `/config` and `/plans` are
+ * public on purpose — a price list and "which checkout is live" are things a
+ * visitor is allowed to know.
+ *
+ * Checked route by route before moving it. A blanket gate is not a licence to
+ * leave individual routes unguarded, and this mount is the proof of that.
+ */
+router.use('/payment', paymentRoutes);
+
 router.use('/', businessRoutes);  // Business profile routes
 router.use('/products', productRoutes);  // Products routes
 router.use('/applications', applicationRoutes);
@@ -146,7 +169,7 @@ router.use('/events', eventRoutes);
  */
 router.use('/announcements', announcementRoutes);
 router.use('/audit', auditRoutes);
-router.use('/payment', paymentRoutes);
-/* `/webhook` is mounted ABOVE `businessRoutes` — see the note there. */
+/* `/payment` and `/webhook` are both mounted ABOVE `businessRoutes` — see
+   the notes there. */
 
 module.exports = router;
