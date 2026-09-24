@@ -1,6 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const logger = require('../../config/logger');
+const { removeFile } = require('../../core/storage/uploadStore');
 
 /**
  * Remove uploaded files that nothing points at any more.
@@ -127,6 +128,10 @@ const removeOrphans = async(candidates) => {
                 logger.warn('Refused to delete a file outside uploads', { name });
                 continue;
             }
+
+            // The database copy goes too — otherwise the fallback in
+            // `uploadStore` would keep serving a file the CMS deleted.
+            await removeFile(name);
 
             try {
                 await fs.unlink(target);

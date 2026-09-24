@@ -9,14 +9,22 @@ const { apiLimiter } = require('./core/middleware/rateLimit');
 const { performanceMonitor } = require('./core/middleware/performance');
 
 const path = require('path');
+const { serveFromDatabase, persistUploadsMiddleware } = require('./core/storage/uploadStore');
 
 const app = express();
 
 // Trust reverse proxy for X-Forwarded-For (Caddy/Nginx)
 app.set('trust proxy', 1);
 
-// Serve uploaded images statically from /uploads folder
+// Serve uploaded images statically from /uploads folder — and from the
+// database when the disk copy is gone, which on the deployed container is
+// after every deploy. See `core/storage/uploadStore.js`.
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/uploads', serveFromDatabase);
+
+// Every successful upload is copied into the database, whichever router's
+// multer received it.
+app.use(persistUploadsMiddleware);
 
 // Security middleware
 setupSecurity(app);
