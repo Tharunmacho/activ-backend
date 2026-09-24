@@ -113,6 +113,17 @@ const startServer = async() => {
             });
         });
 
+        /*
+         * Event booking reminders, sent at the hours-before offsets each event
+         * sets. Non-fatal: a reminder sweep can never be a reason not to boot.
+         * `EVENT_REMINDERS_ENABLED=false` turns it off.
+         */
+        try {
+            require('./modules/events/eventbooking.service').startReminderScheduler();
+        } catch (error) {
+            logger.warn('Event reminder scheduler not started', { error: error && error.message });
+        }
+
         // Start listening
         server.listen(config.port, '0.0.0.0', () => {
             logger.info(`

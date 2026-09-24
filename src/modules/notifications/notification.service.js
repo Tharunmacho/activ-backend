@@ -265,7 +265,11 @@ class NotificationService {
                         preheader: rendered.email.preheader,
                         bodyHtml: rendered.email.bodyHtml,
                         actionButton: rendered.email.actionButton,
+                        secondaryButton: rendered.email.secondaryButton,
                         facts: rendered.email.facts,
+                        tone: rendered.email.tone,
+                        badge: rendered.email.badge,
+                        highlight: rendered.email.highlight,
                         contact
                     });
 
@@ -345,13 +349,34 @@ class NotificationService {
                      * the day substitution starts working.
                      */
                     let sessionText = null;
-                    const sent = await whatsappTemplate.sendTemplateMessage(
+                    let sent = await whatsappTemplate.sendTemplateMessage(
                         phone,
                         rendered.whatsapp.template,
                         rendered.whatsapp.params,
                         'en',
                         rendered.whatsapp.text
                     );
+
+                    /*
+                     * A detailed template that Meta refused — still in review,
+                     * renamed, or its variable count changed — is retried ONCE
+                     * through the generic approved one the builder names as
+                     * `fallback`. The failure is kept on the result so the log
+                     * row still says the detailed template is broken.
+                     */
+                    const fb = rendered.whatsapp.fallback;
+                    if (!sent.success && fb && fb.template && fb.template !== rendered.whatsapp.template) {
+                        const firstError = sent.error;
+                        logger.warn('Detailed WhatsApp template failed; retrying with the generic one', {
+                            event: eventName, template: rendered.whatsapp.template, error: firstError
+                        });
+                        const retry = await whatsappTemplate.sendTemplateMessage(
+                            phone, fb.template, fb.params, 'en', rendered.whatsapp.text
+                        );
+                        sent = retry.success
+                            ? { ...retry, error: `Detailed template "${rendered.whatsapp.template}" failed: ${firstError}` }
+                            : retry;
+                    }
 
                     /*
                      * THE FREE TEXT IS A FALLBACK, NOT A SECOND COPY.

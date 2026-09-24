@@ -207,6 +207,23 @@ const withMeta = async(fn, response = { status: 200, data: { messages: [{ id: 'w
     }
 };
 
+/**
+ * Run `fn` as a deployment with NO Meta token.
+ *
+ * The two "unconfigured" checks used to read the real config, so on any
+ * machine whose .env carries META_ACCESS_TOKEN (the production setup) they
+ * failed for a reason that was not a fault.
+ */
+const withoutMeta = async(fn) => {
+    const realCfg = { ...config.metaCloud };
+    Object.assign(config.metaCloud, { accessToken: '', phoneNumberId: '', isConfigured: false });
+    try {
+        return await fn();
+    } finally {
+        Object.assign(config.metaCloud, realCfg);
+    }
+};
+
 const testMeta = async() => {
     section('Meta Cloud API — the request Meta actually receives');
 
@@ -258,14 +275,14 @@ const testMeta = async() => {
         && String(fail.result.error).includes('Template name does not exist'));
 
     check('an unconfigured Meta service is mock, not a false success',
-        (await meta.sendTemplateMessage('9876543210', 'x', ['a'])).mock === true);
+        (await withoutMeta(() => meta.sendTemplateMessage('9876543210', 'x', ['a']))).mock === true);
 };
 
 const testRouting = async() => {
     section('Provider routing — one decision, both call sites');
 
     check('with no Meta token, templates go to BotBee',
-        whatsappTemplate.providerName() === 'botbee');
+        (await withoutMeta(async() => whatsappTemplate.providerName())) === 'botbee');
 
     const { sent, result } = await withMeta(() =>
         whatsappTemplate.sendTemplateMessage('9876543210', 'activ_reg_welcome', ['Tharun'], 'en_US'));

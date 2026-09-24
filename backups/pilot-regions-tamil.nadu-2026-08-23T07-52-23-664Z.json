@@ -1,0 +1,1650 @@
+{
+  "state": "Tamil Nadu",
+  "extractedAt": "2026-08-23T07:52:23.653Z",
+  "districts": [
+    "Ariyalur",
+    "Chengalpattu",
+    "Chennai",
+    "Coimbatore",
+    "Cuddalore",
+    "Dharmapuri",
+    "Dindigul",
+    "Erode",
+    "Kallakurichi",
+    "Kancheepuram",
+    "Kanniyakumari",
+    "Karur",
+    "Krishnagiri",
+    "Madurai",
+    "Mayiladuthurai",
+    "Nagapattinam",
+    "Namakkal",
+    "Perambalur",
+    "Pudukkottai",
+    "Ramanathapuram",
+    "Ranipet",
+    "Salem",
+    "Sivaganga",
+    "Tenkasi",
+    "Thanjavur",
+    "The Nilgiris",
+    "Theni",
+    "Thiruvallur",
+    "Thiruvarur",
+    "Thoothukkudi",
+    "Tiruchirappalli",
+    "Tirunelveli",
+    "Tirupathur",
+    "Tiruppur",
+    "Tiruvannamalai",
+    "Vellore",
+    "Viluppuram",
+    "Virudhunagar"
+  ],
+  "blocks": [
+    {
+      "district": "Ariyalur",
+      "block": "Andimadam"
+    },
+    {
+      "district": "Ariyalur",
+      "block": "Ariyalur"
+    },
+    {
+      "district": "Ariyalur",
+      "block": "Jayamkondam"
+    },
+    {
+      "district": "Ariyalur",
+      "block": "Sendurai"
+    },
+    {
+      "district": "Ariyalur",
+      "block": "T.Palur"
+    },
+    {
+      "district": "Ariyalur",
+      "block": "Thirumanur"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Acharapakkam"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Chithamur"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Kattankolathur"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Lathur"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Madurantakam"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "St.Thomas Mount"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Thiruporur"
+    },
+    {
+      "district": "Chengalpattu",
+      "block": "Tirukkalukunram"
+    },
+    {
+      "district": "Chennai",
+      "block": "Adyar"
+    },
+    {
+      "district": "Chennai",
+      "block": "Alandur"
+    },
+    {
+      "district": "Chennai",
+      "block": "Ambattur"
+    },
+    {
+      "district": "Chennai",
+      "block": "Annanagar"
+    },
+    {
+      "district": "Chennai",
+      "block": "Kodambakkam"
+    },
+    {
+      "district": "Chennai",
+      "block": "Madhavaram"
+    },
+    {
+      "district": "Chennai",
+      "block": "Manali"
+    },
+    {
+      "district": "Chennai",
+      "block": "Mylapore"
+    },
+    {
+      "district": "Chennai",
+      "block": "Perungudi"
+    },
+    {
+      "district": "Chennai",
+      "block": "Royapuram"
+    },
+    {
+      "district": "Chennai",
+      "block": "Sozhanganallur"
+    },
+    {
+      "district": "Chennai",
+      "block": "Teynampet"
+    },
+    {
+      "district": "Chennai",
+      "block": "Thiru-Vi-Ka Nagar"
+    },
+    {
+      "district": "Chennai",
+      "block": "Thiruvotriyur"
+    },
+    {
+      "district": "Chennai",
+      "block": "Tondiarpet"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Anamalai"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Annur"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Karamadai"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Kinathukadavu"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Madukkarai"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Periyanayakkanpalayam"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Pollachi North"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Pollachi South"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Sarcarsamakulam"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Sultanpet"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Sulur"
+    },
+    {
+      "district": "Coimbatore",
+      "block": "Thondamuthur"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Annagramam"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Cuddalore"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Kammapuram"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Kattumannarkoil"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Keerapalayam"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Komaratchi"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Kurinjipadi"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Mangalur"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Melbhuvanagiri"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Nallur"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Panruti"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Parangipettai"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Srimushnam"
+    },
+    {
+      "district": "Cuddalore",
+      "block": "Vriddhachalam"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Dharmapuri"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Eriyur"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Harur"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Kadathur"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Karimangalam"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Morappur"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Nallampalli"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Palakkodu"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Pappireddipatty"
+    },
+    {
+      "district": "Dharmapuri",
+      "block": "Pennagaram"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Athoor"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Dindigul"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Guziliamparai"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Kodaikanal"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Nattam"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Nilakottai"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Oddanchatram"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Palani"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Reddiyarchatiram"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Shanarpatti"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Thoppampatti"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Vadamadurai"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Vattalkundu"
+    },
+    {
+      "district": "Dindigul",
+      "block": "Vedasandur"
+    },
+    {
+      "district": "Erode",
+      "block": "Ammapet"
+    },
+    {
+      "district": "Erode",
+      "block": "Andiyur"
+    },
+    {
+      "district": "Erode",
+      "block": "Bhavani"
+    },
+    {
+      "district": "Erode",
+      "block": "Bhavanisagar"
+    },
+    {
+      "district": "Erode",
+      "block": "Chennimalai"
+    },
+    {
+      "district": "Erode",
+      "block": "Erode"
+    },
+    {
+      "district": "Erode",
+      "block": "Gopichettipalaiyam"
+    },
+    {
+      "district": "Erode",
+      "block": "Kodumudi"
+    },
+    {
+      "district": "Erode",
+      "block": "Modakurichi"
+    },
+    {
+      "district": "Erode",
+      "block": "Nambiyur"
+    },
+    {
+      "district": "Erode",
+      "block": "Perundurai"
+    },
+    {
+      "district": "Erode",
+      "block": "Satyamangalam"
+    },
+    {
+      "district": "Erode",
+      "block": "Talavadi"
+    },
+    {
+      "district": "Erode",
+      "block": "Thoockanaickenpalaiyam"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Chinnasalem"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Kallakkurichi"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Kalrayanhills"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Rishivandiam"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Sankarapuram"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Thiagadurgam"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Tirukkoyilur"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Tirunavalur"
+    },
+    {
+      "district": "Kallakurichi",
+      "block": "Ulundurpet"
+    },
+    {
+      "district": "Kancheepuram",
+      "block": "Kanchipuram"
+    },
+    {
+      "district": "Kancheepuram",
+      "block": "Kunnattur"
+    },
+    {
+      "district": "Kancheepuram",
+      "block": "Sriperumbudur"
+    },
+    {
+      "district": "Kancheepuram",
+      "block": "Uttiramerur"
+    },
+    {
+      "district": "Kancheepuram",
+      "block": "Walajabad"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Agastiswaram"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Killiyoor"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Kurunthancode"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Melpuram"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Munchira"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Rajakkamangalam"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Thackalai"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Thiruvattar"
+    },
+    {
+      "district": "Kanniyakumari",
+      "block": "Thovala"
+    },
+    {
+      "district": "Karur",
+      "block": "Aravakurichi"
+    },
+    {
+      "district": "Karur",
+      "block": "K.Paramathy"
+    },
+    {
+      "district": "Karur",
+      "block": "Kadavur"
+    },
+    {
+      "district": "Karur",
+      "block": "Karur"
+    },
+    {
+      "district": "Karur",
+      "block": "Krishnarayapuram"
+    },
+    {
+      "district": "Karur",
+      "block": "Kulittalai"
+    },
+    {
+      "district": "Karur",
+      "block": "Thanthoni"
+    },
+    {
+      "district": "Karur",
+      "block": "Thogaimalai"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Bargur"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Hosur"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Kaveripattinam"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Kelamangalam"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Mathur"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Shoolagiri"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Thally"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Uthangarai"
+    },
+    {
+      "district": "Krishnagiri",
+      "block": "Veppanapalli"
+    },
+    {
+      "district": "Madurai",
+      "block": "Alanganallur"
+    },
+    {
+      "district": "Madurai",
+      "block": "Chellampatti"
+    },
+    {
+      "district": "Madurai",
+      "block": "Kallikudi"
+    },
+    {
+      "district": "Madurai",
+      "block": "Kottampatti"
+    },
+    {
+      "district": "Madurai",
+      "block": "Madurai East"
+    },
+    {
+      "district": "Madurai",
+      "block": "Madurai West"
+    },
+    {
+      "district": "Madurai",
+      "block": "Melur"
+    },
+    {
+      "district": "Madurai",
+      "block": "Sedapatti"
+    },
+    {
+      "district": "Madurai",
+      "block": "T.Kallupatti"
+    },
+    {
+      "district": "Madurai",
+      "block": "Tirumangalam"
+    },
+    {
+      "district": "Madurai",
+      "block": "Tirupparangunram"
+    },
+    {
+      "district": "Madurai",
+      "block": "Usilampatti"
+    },
+    {
+      "district": "Madurai",
+      "block": "Vadipatti"
+    },
+    {
+      "district": "Mayiladuthurai",
+      "block": "Kollidam"
+    },
+    {
+      "district": "Mayiladuthurai",
+      "block": "Kuttalam"
+    },
+    {
+      "district": "Mayiladuthurai",
+      "block": "Mayiladuthurai"
+    },
+    {
+      "district": "Mayiladuthurai",
+      "block": "Sembanar Koil"
+    },
+    {
+      "district": "Mayiladuthurai",
+      "block": "Sirkazhi"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Keelaiyur"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Kilvelur"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Nagappattinam"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Thalanayar"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Thirumarugal"
+    },
+    {
+      "district": "Nagapattinam",
+      "block": "Vedaranyam"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Elacipalayam"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Erumapatty"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Kabilamalai"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Kolli Hills"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Mallasamudram"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Mohanur"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Namagiripet"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Namakkal"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Pallipalayam"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Paramathy"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Puduchatram"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Rasipuram"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Sendamangalam"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Tiruchengodu"
+    },
+    {
+      "district": "Namakkal",
+      "block": "Vennandur"
+    },
+    {
+      "district": "Perambalur",
+      "block": "Perambalur"
+    },
+    {
+      "district": "Perambalur",
+      "block": "Veppanthattai"
+    },
+    {
+      "district": "Perambalur",
+      "block": "Veppur"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Annavasal"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Arantangi"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Arimalam"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Avadaiyarkovil"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Gandaravakottai"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Karambakudi"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Kunnandarkoil"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Manalmelkudi"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Ponnamaravati"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Pudukkottai"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Thiruvarankulam"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Tirumayam"
+    },
+    {
+      "district": "Pudukkottai",
+      "block": "Viralimalai"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Bogalur"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Kadaladi"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Kamudi"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Mandapam"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Mudukulathur"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Nainarkoil"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Paramakkudi"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Rajasingamangalam"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Ramanathapuram"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Tiruppullani"
+    },
+    {
+      "district": "Ramanathapuram",
+      "block": "Tiruvadanai"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Arakkonam"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Arcot"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Kaveripakkam"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Nemili"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Sholinghur"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Timiri"
+    },
+    {
+      "district": "Ranipet",
+      "block": "Walajapet"
+    },
+    {
+      "district": "Salem",
+      "block": "Attur"
+    },
+    {
+      "district": "Salem",
+      "block": "Ayodhiyapattinam"
+    },
+    {
+      "district": "Salem",
+      "block": "Gangavalli"
+    },
+    {
+      "district": "Salem",
+      "block": "Idappadi"
+    },
+    {
+      "district": "Salem",
+      "block": "Kadaiyampatty"
+    },
+    {
+      "district": "Salem",
+      "block": "Kolathur"
+    },
+    {
+      "district": "Salem",
+      "block": "Konganapuram"
+    },
+    {
+      "district": "Salem",
+      "block": "Macdonalds Choultry"
+    },
+    {
+      "district": "Salem",
+      "block": "Mecheri"
+    },
+    {
+      "district": "Salem",
+      "block": "Nangavalli"
+    },
+    {
+      "district": "Salem",
+      "block": "Omalur"
+    },
+    {
+      "district": "Salem",
+      "block": "Panamarathupatti"
+    },
+    {
+      "district": "Salem",
+      "block": "Peddanaickenpalayam"
+    },
+    {
+      "district": "Salem",
+      "block": "Salem"
+    },
+    {
+      "district": "Salem",
+      "block": "Sankari"
+    },
+    {
+      "district": "Salem",
+      "block": "Talavasal"
+    },
+    {
+      "district": "Salem",
+      "block": "Taramangalam"
+    },
+    {
+      "district": "Salem",
+      "block": "Valapady"
+    },
+    {
+      "district": "Salem",
+      "block": "Veerapandi"
+    },
+    {
+      "district": "Salem",
+      "block": "Yercaud"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Devakottai"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Ilayankudi"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Kalaiyarkoil"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Kallal"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Kannankudi"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Manamadurai"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "S.Pudur"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Sakkottai"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Singampunari"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Sivaganga"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Tiruppathur"
+    },
+    {
+      "district": "Sivaganga",
+      "block": "Tiruppuvanam"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Alangulam"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Kadaiyanallur"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Kadayam"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Keelapavoor"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Kuruvikulam"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Melaneelithanallur"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Sankarankovil"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Shencottah"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Tenkasi"
+    },
+    {
+      "district": "Tenkasi",
+      "block": "Vasudevanallur"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Ammapettai"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Budalur"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Kumbakonam"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Madukkur"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Orattanadu"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Papanasam"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Pattukkottai"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Peravurani"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Sethubhavachatram"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Thanjavur"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Thiruppanandal"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Thiruvaiyaru"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Thiruvonam"
+    },
+    {
+      "district": "Thanjavur",
+      "block": "Tiruvidaimarudur"
+    },
+    {
+      "district": "The Nilgiris",
+      "block": "Coonoor"
+    },
+    {
+      "district": "The Nilgiris",
+      "block": "Gudalur"
+    },
+    {
+      "district": "The Nilgiris",
+      "block": "Kotagiri"
+    },
+    {
+      "district": "The Nilgiris",
+      "block": "Udhagamandalam"
+    },
+    {
+      "district": "Theni",
+      "block": "Andipatti"
+    },
+    {
+      "district": "Theni",
+      "block": "Bodinayakkanur"
+    },
+    {
+      "district": "Theni",
+      "block": "Chinnamanur"
+    },
+    {
+      "district": "Theni",
+      "block": "Kadamalaikundru Myladumparai"
+    },
+    {
+      "district": "Theni",
+      "block": "Kambam"
+    },
+    {
+      "district": "Theni",
+      "block": "Periyakulam"
+    },
+    {
+      "district": "Theni",
+      "block": "Theni"
+    },
+    {
+      "district": "Theni",
+      "block": "Uttamapalaiyam"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Ellapuram"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Gummidipundi"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Kadambathur"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Minjur"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Pallipattu"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Poonamallee"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Poondi"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Puzhal"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "R.K.Pet"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Sholavaram"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Tiruttani"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Tiruvallur"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Tiruvelangadu"
+    },
+    {
+      "district": "Thiruvallur",
+      "block": "Villivakkam"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Kodavasal"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Koradacherry"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Mannargudi"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Muthupettai"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Nannilam"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Nidamangalam"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Thiruvarur"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Tirutturaippundi"
+    },
+    {
+      "district": "Thiruvarur",
+      "block": "Valangaiman"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Alwarthirunagari"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Karungulam"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Kayathar"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Kovilpatti"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Ottapidaram"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Pudur"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Sattankulam"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Srivaikundam"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Thoothukkudi"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Tiruchendur"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Udangudi"
+    },
+    {
+      "district": "Thoothukkudi",
+      "block": "Vilathikulam"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Andanallur"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Lalgudi"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Manachanallur"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Manapparai"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Manikandam"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Marungapuri"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Musiri"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Pullambadi"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Tattayyangarpettai"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Thiruverambur"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Thottiam"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Turaiyur"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Uppiliapuram"
+    },
+    {
+      "district": "Tiruchirappalli",
+      "block": "Vaiyampatti"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Ambasamudram"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Cheranmahadevi"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Kalakadu"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Manur"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Nanguneri"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Palayamkottai"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Pappakudi"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Radhapuram"
+    },
+    {
+      "district": "Tirunelveli",
+      "block": "Valliyoor"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Alangayan"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Jolarpet"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Kandili"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Madhanur"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Natrampalli"
+    },
+    {
+      "district": "Tirupathur",
+      "block": "Tiruppattur"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Avanashi"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Dharapuram"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Gudimangalam"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Kangayam"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Kundadam"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Madathukulam"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Mulanur"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Palladam"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Pongalur"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Tiruppur"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Udumalpet"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Uttukkuli"
+    },
+    {
+      "district": "Tiruppur",
+      "block": "Vellakoil"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Anakkavur"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Arani"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Arni"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Chengam"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Chetput"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Cheyyar"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Jawathu Hills"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Kalasapakkam"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Keelpennathur"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Pernamallur"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Polur"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Pudupalayam"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Thandrampet"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Thellar"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Thiruvannamalai"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Thurinjapuram"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Vandavasi"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "Vembakkam"
+    },
+    {
+      "district": "Tiruvannamalai",
+      "block": "West Arani"
+    },
+    {
+      "district": "Vellore",
+      "block": "Anaicut"
+    },
+    {
+      "district": "Vellore",
+      "block": "Gudiyattam"
+    },
+    {
+      "district": "Vellore",
+      "block": "K.V.Kuppam"
+    },
+    {
+      "district": "Vellore",
+      "block": "Kaniyambadi"
+    },
+    {
+      "district": "Vellore",
+      "block": "Katpadi"
+    },
+    {
+      "district": "Vellore",
+      "block": "Peranambattu"
+    },
+    {
+      "district": "Vellore",
+      "block": "Vellore"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Gingee"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Kanai"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Kandamangalam"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Koliyanur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Mailam"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Marakkanam"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Melmalayanur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Mugaiyur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Olakkur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Thiruvennainallur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Vallam"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Vanur"
+    },
+    {
+      "district": "Viluppuram",
+      "block": "Vikravandi"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Aruppukottai"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Kariapatti"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Narikudi"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Rajapalaiyam"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Sattur"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Sivakasi"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Srivilliputtur"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Tiruchuli"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Vembakottai"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Virudhunagar"
+    },
+    {
+      "district": "Virudhunagar",
+      "block": "Watrap"
+    }
+  ]
+}

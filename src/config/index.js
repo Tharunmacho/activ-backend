@@ -312,7 +312,17 @@ module.exports = {
                 welcome: real(process.env.BOTBEE_TPL_WELCOME) || 'activ_registration_welcome',
                 status: real(process.env.BOTBEE_TPL_STATUS) || 'activ_membership_status',
                 payment: real(process.env.BOTBEE_TPL_PAYMENT) || 'activ_payment_request',
-                event: real(process.env.BOTBEE_TPL_EVENT) || 'activ_event_reminder'
+                event: real(process.env.BOTBEE_TPL_EVENT) || 'activ_event_reminder',
+                /*
+                 * The detailed event-booking templates. EMPTY BY DEFAULT: until a
+                 * name is set here the booking messages go through `event` above,
+                 * which is already approved. Set each one only once Meta has
+                 * approved it (scripts/whatsapp-booking-templates.js submits them),
+                 * and a send that still fails falls back to `event` on its own.
+                 */
+                booking: real(process.env.BOTBEE_TPL_BOOKING) || '',
+                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || '',
+                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || ''
             },
 
             /*

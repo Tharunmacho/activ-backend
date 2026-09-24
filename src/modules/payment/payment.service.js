@@ -360,21 +360,7 @@ class PaymentService {
             const paidAmount = parseFloat(amount);
 
             if (order.orderType === 'event_booking') {
-                const eventBookingService = require('../events/eventbooking.service');
-                // Complete the payment on the event booking
-                const booking = await eventBookingService.completePayment(order.bookingRef, {
-                    gatewayPaymentId: payment_id,
-                    signature: 'instamojo_webhook_verified', // signature bypass since we already verified webhook mac
-                    mode: 'online'
-                });
-
-                // Mark order as paid
-                order.status = 'paid';
-                order.gatewayPaymentId = payment_id; // update to the actual payment ID now
-                order.paidAt = new Date();
-                order.paymentMethod = 'instamojo';
-                await order.save();
-
+                const booking = await this.settleEventBookingOrder(order, payment_id);
                 return {
                     success: true,
                     message: 'Event booking paid successfully',
@@ -454,6 +440,134 @@ class PaymentService {
             });
             throw error;
         }
+    }
+
+    /**
+     * Confirm an event booking whose payment has been VERIFIED — by the
+     * webhook's MAC, or by asking Instamojo directly (`verifyPaymentWithGateway`).
+     *
+     * Idempotent, because both paths can arrive for the same payment and in
+     * either order: the webhook and the buyer's browser leave Instamojo at the
+     * same moment. Whichever loses finds the booking already paid and answers
+     * with it rather than failing. `completePayment` claims the booking with a
+     * conditional update, so the seats are confirmed and the confirmation
+     * email / WhatsApp goes out exactly once.
+     */
+    async settleEventBookingOrder(order, paymentId) {
+        const eventBookingService = require('../events/eventbooking.service');
+
+        let booking;
+        try {
+            booking = await eventBookingService.completePayment(order.bookingRef, {
+                gatewayPaymentId: paymentId,
+                signature: 'instamojo_webhook_verified', // verified by the caller, see above
+                mode: 'online'
+            });
+        } catch (error) {
+            // Already paid by the other path: that is success, not failure.
+            booking = await eventBookingService.getBooking(order.bookingRef).catch(() => null);
+            if (!booking || !booking.payment || booking.payment.status !== 'paid') throw error;
+        }
+
+        if (order.status !== 'paid') {
+            order.status = 'paid';
+            order.gatewayPaymentId = paymentId || order.gatewayPaymentId;
+            order.paidAt = new Date();
+            order.paymentMethod = 'instamojo';
+            await order.save();
+        }
+
+        return booking;
+    }
+
+    /**
+     * Ask INSTAMOJO whether a payment request has been paid.
+     *
+     * The payment request id comes from OUR stored order, never from the
+     * browser — so what is being verified is the order this server created,
+     * and a query string cannot point it at somebody else's payment. Returns
+     * `{ paid, paymentId }`; any error answers `paid: false` and the caller
+     * keeps waiting for the webhook.
+     */
+    async verifyPaymentWithGateway(paymentRequestId, paymentId = '', expectedAmount = 0) {
+        if (!paymentRequestId || !this.isConfigured()) return { paid: false };
+
+        const amountOk = (value) => !(expectedAmount > 0) || parseFloat(value) + 0.001 >= Number(expectedAmount);
+
+        try {
+            if (paymentId) {
+                const res = await axios.get(
+                    `${this.baseUrl}/payment-requests/${encodeURIComponent(paymentRequestId)}/${encodeURIComponent(paymentId)}/`,
+                    { headers: this.authHeaders(), timeout: 20000 }
+                );
+                const payment = res.data && res.data.payment_request && res.data.payment_request.payment;
+                if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
+                    return { paid: true, paymentId: payment.payment_id || paymentId };
+                }
+            }
+
+            const res = await axios.get(
+                `${this.baseUrl}/payment-requests/${encodeURIComponent(paymentRequestId)}/`,
+                { headers: this.authHeaders(), timeout: 20000 }
+            );
+            const request = (res.data && res.data.payment_request) || {};
+            const payments = Array.isArray(request.payments) ? request.payments : [];
+            const credited = payments.find((p) => p && typeof p === 'object'
+                && String(p.status).toLowerCase() === 'credit' && amountOk(p.amount));
+            if (credited) return { paid: true, paymentId: credited.payment_id || paymentId };
+            if (String(request.status).toLowerCase() === 'completed' && amountOk(request.amount)) {
+                const first = payments[0];
+                return { paid: true, paymentId: (typeof first === 'string' ? first : first && first.payment_id) || paymentId };
+            }
+        } catch (error) {
+            logger.warn('Instamojo payment verification failed', {
+                paymentRequestId, error: error && error.message
+            });
+        }
+        return { paid: false };
+    }
+
+    /**
+     * Where the buyer lands after Instamojo — `GET /payment/return/:orderId`.
+     *
+     * PUBLIC, because a GUEST pays for seats and has no token. What it reveals
+     * is the order's own state and booking reference, to whoever holds the
+     * random 32-hex order id that was only ever in that buyer's return URL.
+     *
+     * If the order is an unpaid event booking it asks Instamojo directly, and
+     * confirms the booking when Instamojo says the money is credited. So the
+     * booking — and its email / WhatsApp — no longer waits on the webhook
+     * reaching this server, which on a local or mis-configured deployment it
+     * never did: the seats sat unpaid until an admin confirmed them by hand.
+     */
+    async resolveReturn(orderId, { paymentId = '', gatewayStatus = '' } = {}) {
+        const PaymentOrder = require('./paymentorder.model');
+        const order = await PaymentOrder.findOne({ orderId: String(orderId || '') }).catch(() => null);
+        if (!order) throw ApiError.notFound('No such payment order');
+
+        if (order.orderType === 'event_booking' && order.status !== 'paid'
+            && String(gatewayStatus).toLowerCase() !== 'failed') {
+            const requestId = String(order.gatewayPaymentId || '');
+            if (requestId && !requestId.startsWith('ord_')) {
+                const verdict = await this.verifyPaymentWithGateway(requestId, paymentId, order.amount);
+                if (verdict.paid) {
+                    await this.settleEventBookingOrder(order, verdict.paymentId).catch((error) => {
+                        logger.error('Verified event payment could not be settled', {
+                            orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
+                        });
+                    });
+                }
+            }
+        }
+
+        return {
+            orderId: order.orderId,
+            orderType: order.orderType || 'membership',
+            status: order.status,
+            amount: order.amount,
+            bookingRef: order.bookingRef || '',
+            eventId: order.eventId ? String(order.eventId) : ''
+        };
     }
 
     /**

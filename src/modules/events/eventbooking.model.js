@@ -288,6 +288,14 @@ const eventBookingSchema = new mongoose.Schema({
     expiresAt: { type: Date, default: null },
 
     /**
+     * Which reminders have gone out, as the hours-before offsets they were
+     * sent for (`Event.reminderOffsetsHours`). `sendDueReminders` claims an
+     * offset by adding it here, so a reminder is sent once per booking even
+     * with several server instances running the timer.
+     */
+    remindersSent: { type: [Number], default: [] },
+
+    /**
      * The secret that lets a GUEST change their own booking.
      *
      * A member is identified by `userId` and needs none of this. A guest has no

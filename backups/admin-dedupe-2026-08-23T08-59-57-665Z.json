@@ -1,0 +1,557 @@
+[
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442652a232b0f2aadc54b6",
+      "fullName": "Anantapur District Admin",
+      "email": "anantapur.district@activ.com",
+      "password": "$2a$10$kyHORSPulCGWh5GLVSAtA.DYqZqSkLP.3d4ydubVFCSNMplpuSA..",
+      "phoneNumber": "9876543211",
+      "role": "district_admin",
+      "state": "Andhra Pradesh",
+      "district": "Anantapur",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:38.439Z",
+      "updatedAt": "2025-12-18T16:05:38.439Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442652a232b0f2aadc54b8",
+      "fullName": "Andhra Pradesh State Admin",
+      "email": "ap.state@activ.com",
+      "password": "$2a$10$mwx2N2yF0N9bYQRzpO1Rf.Jp9CR3Q90QUU4UbVPaE6nuJLaL4IHsG",
+      "phoneNumber": "9876543212",
+      "role": "state_admin",
+      "state": "Andhra Pradesh",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:38.615Z",
+      "updatedAt": "2025-12-18T16:05:38.615Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a816553256ed103376465c0",
+      "email": "ariyalur.district@activ.com",
+      "createdAt": "2026-08-16T07:22:59.692Z",
+      "district": "Ariyalur",
+      "fullName": "Ariyalur District Admin",
+      "isActive": true,
+      "password": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T07:22:59.692Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a8a999ee13b156f438f14a7",
+      "email": "ariyalurbloack@gmail.com",
+      "password": "$2a$10$6xjS0fmaBVBPinFSnypKveBeszBY1obj7uQEZpB/kZ9fsFlf8KdEO",
+      "fullName": "Thaarun",
+      "phone": "90923172644",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "district": "Ariyalur",
+      "block": "Ariyalur",
+      "parentAdminId": "6a816553256ed103376465bf",
+      "isActive": true,
+      "createdAt": "2026-08-23T06:56:30.346Z",
+      "updatedAt": "2026-08-23T06:56:30.346Z",
+      "createdVia": "super_admin_ui"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6957fdb4b938194488ec307f",
+      "adminId": "BA28001001",
+      "email": "block.andimadam.ariyalur.tamil.nadu@activ.com",
+      "passwordHash": "$2a$10$QW5Brz83YxwN4o0dakQX/uU.yET5wIVt/Yna14KBMabqdJ7Upb/Pq",
+      "fullName": "Andimadam Block Admin",
+      "role": "block_admin",
+      "active": true,
+      "meta": {
+        "state": "Tamil Nadu",
+        "district": "Ariyalur",
+        "block": "Andimadam",
+        "stateLc": "tamil nadu",
+        "districtLc": "ariyalur",
+        "blockLc": "andimadam",
+        "mustResetPassword": false
+      },
+      "lastLoginAt": null,
+      "createdAt": "2026-01-02T17:17:40.430Z",
+      "updatedAt": "2026-08-16T15:52:15.676Z",
+      "__v": 0,
+      "block": "Andimadam",
+      "district": "Ariyalur",
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "state": "Tamil Nadu",
+      "isActive": true
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a809483256ed10337630210",
+      "email": "block.ariyalur.ariyalur.tamil.nadu@activ.com",
+      "adminType": "BlockAdmin",
+      "block": "Ariyalur",
+      "createdAt": "2026-08-15T16:32:03.948Z",
+      "district": "Ariyalur",
+      "fullName": "Ariyalur Block Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:14.584Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcb4256ed10337657600",
+      "email": "block.jayankondam.ariyalur.tamil.nadu@activ.com",
+      "block": "Jayankondam",
+      "createdAt": "2026-08-16T15:52:19.363Z",
+      "district": "Ariyalur",
+      "fullName": "Jayankondam Block Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:19.363Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcb2256ed103376575e3",
+      "email": "block.sendurai.ariyalur.tamil.nadu@activ.com",
+      "block": "Sendurai",
+      "createdAt": "2026-08-16T15:52:17.058Z",
+      "district": "Ariyalur",
+      "fullName": "Sendurai Block Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:17.058Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcb6256ed10337657611",
+      "email": "block.thirumanur.ariyalur.tamil.nadu@activ.com",
+      "block": "Thirumanur",
+      "createdAt": "2026-08-16T15:52:21.002Z",
+      "district": "Ariyalur",
+      "fullName": "Thirumanur Block Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:21.002Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcb3256ed103376575ed",
+      "email": "block.udayarpalayam.ariyalur.tamil.nadu@activ.com",
+      "block": "Udayarpalayam",
+      "createdAt": "2026-08-16T15:52:18.254Z",
+      "district": "Ariyalur",
+      "fullName": "Udayarpalayam Block Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:18.254Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442652a232b0f2aadc54bc",
+      "fullName": "Bangalore Urban District Admin",
+      "email": "blr.district@activ.com",
+      "password": "$2a$10$1y/3mIsHLnZyJHfLDJsZNOVOFCwBYVCt2wy3ZWPLyPj7W/O60OcIW",
+      "phoneNumber": "9876543214",
+      "role": "district_admin",
+      "state": "Karnataka",
+      "district": "Bangalore Urban",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:38.965Z",
+      "updatedAt": "2025-12-18T16:05:38.965Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442652a232b0f2aadc54ba",
+      "fullName": "Bangalore North Block Admin",
+      "email": "blr.north.block@activ.com",
+      "password": "$2a$10$7IExIHxpGmHjBqGwuEcFz.jpTNALZjhQX9oS8n9N0n4Hw1qZZtmVy",
+      "phoneNumber": "9876543213",
+      "role": "block_admin",
+      "state": "Karnataka",
+      "district": "Bangalore Urban",
+      "block": "Bangalore North",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:38.785Z",
+      "updatedAt": "2025-12-18T16:05:38.785Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a816553256ed103376465bf",
+      "email": "district.ariyalur.ariyalur.tamil.nadu@activ.com",
+      "createdAt": "2026-08-16T07:22:59.565Z",
+      "district": "Ariyalur",
+      "fullName": "Ariyalur District Admin",
+      "isActive": true,
+      "password": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T07:22:59.565Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcae256ed103376575bd",
+      "email": "district.ariyalur.tamil.nadu@activ.com",
+      "block": "Ariyalur",
+      "createdAt": "2026-08-16T15:52:13.217Z",
+      "district": "Ariyalur",
+      "fullName": "Ariyalur District Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:13.217Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a816553256ed103376465be",
+      "email": "district.ariyalur@activ.com",
+      "createdAt": "2026-08-16T07:22:59.449Z",
+      "district": "Ariyalur",
+      "fullName": "Ariyalur District Admin",
+      "isActive": true,
+      "password": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T07:22:59.449Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442653a232b0f2aadc54be",
+      "fullName": "Karnataka State Admin",
+      "email": "karnataka.state@activ.com",
+      "password": "$2a$10$4ItYgrX8qxSjSMXap9uDn.zVhclrPLzzdE8Tda35EnTy/NYdhg/oK",
+      "phoneNumber": "9876543215",
+      "role": "state_admin",
+      "state": "Karnataka",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:39.133Z",
+      "updatedAt": "2026-08-16T07:25:09.093Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a81dcad256ed103376575ad",
+      "email": "state.tamil.nadu@activ.com",
+      "block": "Ariyalur",
+      "createdAt": "2026-08-16T15:52:11.672Z",
+      "district": "Ariyalur",
+      "fullName": "Tamil Nadu State Admin",
+      "isActive": true,
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "role": "state_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T15:52:11.672Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6a8165d5256ed103376465c1",
+      "email": "state.tamilnadu@activ.com",
+      "createdAt": "2026-08-16T07:25:09.011Z",
+      "fullName": "Tamil Nadu State Admin",
+      "isActive": true,
+      "password": "$2a$10$4ItYgrX8qxSjSMXap9uDn.zVhclrPLzzdE8Tda35EnTy/NYdhg/oK",
+      "role": "state_admin",
+      "state": "Tamil Nadu",
+      "updatedAt": "2026-08-16T07:25:09.011Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442653a232b0f2aadc54c0",
+      "fullName": "Super Admin",
+      "email": "super.admin@activ.com",
+      "password": "$2a$10$ae6y83PjgnhikMGmK/qoP.HR0SUnzo.wMO3h60eqayS5BF0ClKYP.",
+      "phoneNumber": "9876543216",
+      "role": "super_admin",
+      "state": "Tamil Nadu",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:39.287Z",
+      "updatedAt": "2026-08-16T15:52:09.735Z",
+      "__v": 0,
+      "block": "Ariyalur",
+      "district": "Ariyalur"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6944272d7a9476e58e4d5a45",
+      "fullName": "Tamil Nadu State Admin",
+      "email": "tamilnadu.state@activ.com",
+      "password": "$2a$10$4ItYgrX8qxSjSMXap9uDn.zVhclrPLzzdE8Tda35EnTy/NYdhg/oK",
+      "phoneNumber": "9876543222",
+      "role": "state_admin",
+      "state": "Tamil Nadu",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:09:17.261Z",
+      "updatedAt": "2026-08-16T07:25:08.916Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "69442652a232b0f2aadc54b4",
+      "fullName": "Thandrampattu Block Admin",
+      "email": "thandrampattu.block@activ.com",
+      "password": "$2a$10$ah0iG/MKgL3Uytr6w0ZOoutzpcJUodgL6iPGr.VyboJNQoOzZIPw6",
+      "phoneNumber": "9876543210",
+      "role": "block_admin",
+      "state": "Andhra Pradesh",
+      "district": "Anantapur",
+      "block": "Thandrampattu",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:05:38.243Z",
+      "updatedAt": "2025-12-18T16:05:38.243Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "duplicate email",
+    "document": {
+      "_id": "6944272c7a9476e58e4d5a3f",
+      "fullName": "Thandrampet Block Admin",
+      "email": "thandrampet.block@activ.com",
+      "password": "$2a$10$46Di92ULoQJ0uocB1OWCJudB/mY7ry.fTiBivnSCOMFBGlP8yxY.u",
+      "phoneNumber": "9876543220",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "district": "Tiruvannamalai",
+      "block": "Thandrampet",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:09:16.644Z",
+      "updatedAt": "2025-12-18T16:09:16.644Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "blockadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bfa5c9f34bbe35179a",
+      "adminId": "BA6976",
+      "email": "ariyalurbloack@gmail.com",
+      "passwordHash": "$2a$10$6xjS0fmaBVBPinFSnypKveBeszBY1obj7uQEZpB/kZ9fsFlf8KdEO",
+      "fullName": "Thaarun",
+      "phoneNumber": "90923172644",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "district": "Ariyalur",
+      "block": "Ariyalur",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2026-08-23T06:56:30.346Z",
+      "updatedAt": "2026-08-23T07:52:31.812Z"
+    }
+  },
+  {
+    "collection": "blockadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6e9a5c9f34bbe351927",
+      "adminId": "BA0370",
+      "email": "block.thandrampet.tiruvannamalai.tamil.nadu@activ.com",
+      "passwordHash": "$2a$10$gyoWy.8ygzmbxrqXU6v/QOkgyv1GVLXmY/KGS7U5kg2f9qY3CGIxq",
+      "fullName": "Thandrampet Block Admin",
+      "phoneNumber": "",
+      "role": "block_admin",
+      "state": "Tamil Nadu",
+      "district": "Tiruvannamalai",
+      "block": "Thandrampet",
+      "active": true,
+      "createdVia": "tn_pilot_seed",
+      "mustResetPassword": true,
+      "createdAt": "2026-08-23T07:53:10.961Z",
+      "updatedAt": "2026-08-23T07:53:10.961Z"
+    }
+  },
+  {
+    "collection": "districtadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bda5c9f34bbe351794",
+      "adminId": "DA0766",
+      "email": "district.ariyalur@activ.com",
+      "passwordHash": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "fullName": "Ariyalur District Admin",
+      "phoneNumber": "",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "district": "Ariyalur",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2026-08-16T07:22:59.449Z",
+      "updatedAt": "2026-08-23T07:52:29.934Z"
+    }
+  },
+  {
+    "collection": "districtadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bea5c9f34bbe351795",
+      "adminId": "DA0767",
+      "email": "district.ariyalur.ariyalur.tamil.nadu@activ.com",
+      "passwordHash": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "fullName": "Ariyalur District Admin",
+      "phoneNumber": "",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "district": "Ariyalur",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2026-08-16T07:22:59.565Z",
+      "updatedAt": "2026-08-23T07:52:30.204Z"
+    }
+  },
+  {
+    "collection": "districtadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bea5c9f34bbe351796",
+      "adminId": "DA0768",
+      "email": "ariyalur.district@activ.com",
+      "passwordHash": "$2a$10$ORfXD0um31MniPM2Ixa0LemXo.v4yclJZCumzR8UOdJyleD6o.1c.",
+      "fullName": "Ariyalur District Admin",
+      "phoneNumber": "",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "district": "Ariyalur",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2026-08-16T07:22:59.692Z",
+      "updatedAt": "2026-08-23T07:52:30.483Z"
+    }
+  },
+  {
+    "collection": "admins",
+    "reason": "same region",
+    "document": {
+      "_id": "6944272d7a9476e58e4d5a42",
+      "fullName": "Tiruvannamalai District Admin",
+      "email": "tiruvannamalai.district@activ.com",
+      "password": "$2a$10$WeqTLRnTt.XfNqbthQQ4zOx26MSplKCFQKBbuYCPyUg/4eH0jku.6",
+      "phoneNumber": "9876543221",
+      "role": "district_admin",
+      "state": "Tamil Nadu",
+      "district": "Tiruvannamalai",
+      "isActive": true,
+      "createdAt": "2025-12-18T16:09:17.004Z",
+      "updatedAt": "2025-12-18T16:09:17.004Z",
+      "__v": 0
+    }
+  },
+  {
+    "collection": "stateadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bda5c9f34bbe351793",
+      "adminId": "SA0039",
+      "email": "tamilnadu.state@activ.com",
+      "passwordHash": "$2a$10$4ItYgrX8qxSjSMXap9uDn.zVhclrPLzzdE8Tda35EnTy/NYdhg/oK",
+      "fullName": "Tamil Nadu State Admin",
+      "phoneNumber": "9876543222",
+      "role": "state_admin",
+      "state": "Tamil Nadu",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2025-12-18T16:09:17.261Z",
+      "updatedAt": "2026-08-23T07:52:29.554Z"
+    }
+  },
+  {
+    "collection": "stateadmins",
+    "reason": "same region",
+    "document": {
+      "_id": "6a8aa6bea5c9f34bbe351797",
+      "adminId": "SA0040",
+      "email": "state.tamilnadu@activ.com",
+      "passwordHash": "$2a$10$4ItYgrX8qxSjSMXap9uDn.zVhclrPLzzdE8Tda35EnTy/NYdhg/oK",
+      "fullName": "Tamil Nadu State Admin",
+      "phoneNumber": "",
+      "role": "state_admin",
+      "state": "Tamil Nadu",
+      "active": true,
+      "createdVia": "migrated_from_admins",
+      "mustResetPassword": false,
+      "createdAt": "2026-08-16T07:25:09.011Z",
+      "updatedAt": "2026-08-23T07:52:30.718Z"
+    }
+  }
+]

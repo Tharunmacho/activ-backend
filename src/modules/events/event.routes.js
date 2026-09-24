@@ -5,6 +5,14 @@ const { verifyToken, requireRole } = require('../../core/middleware/auth');
 
 const router = express.Router();
 
+/**
+ * Who manages the programme: the super admin, and the EVENTS ADMIN — a
+ * separate account whose whole portal is events, categories and bookings.
+ * Every write and every booking screen below is open to both, and to nobody
+ * else; the events admin reaches no other module.
+ */
+const EVENT_MANAGERS = ['super_admin', 'events_admin'];
+
 router.use(verifyToken);
 
 /**
@@ -22,7 +30,7 @@ router.get('/my-registrations', controller.myRegistrations);
  * Super admin only: it counts members by region, which is a question only the
  * person choosing the region has any business asking.
  */
-router.get('/reach', requireRole('super_admin'), controller.reach);
+router.get('/reach', requireRole(...EVENT_MANAGERS), controller.reach);
 
 /*
  * The Booking Events landing table — every event, and how full it is.
@@ -31,7 +39,7 @@ router.get('/reach', requireRole('super_admin'), controller.reach);
  * gives twice: registered after `/:id` it is read as the event id "bookings"
  * and answers 400 on a screen that would simply look broken.
  */
-router.get('/bookings/overview', requireRole('super_admin'), controller.bookingOverview);
+router.get('/bookings/overview', requireRole(...EVENT_MANAGERS), controller.bookingOverview);
 
 /*
  * The contact book: everyone who has booked anything, and one person's history.
@@ -41,8 +49,8 @@ router.get('/bookings/overview', requireRole('super_admin'), controller.bookingO
  * in a path segment is a fight with every proxy that thinks `.com` is a file
  * extension, so the address travels as a query parameter.
  */
-router.get('/bookings/people', requireRole('super_admin'), controller.listBookingPeople);
-router.get('/bookings/person', requireRole('super_admin'), controller.getBookingPerson);
+router.get('/bookings/people', requireRole(...EVENT_MANAGERS), controller.listBookingPeople);
+router.get('/bookings/person', requireRole(...EVENT_MANAGERS), controller.getBookingPerson);
 
 /*
  * CATEGORIES — the chips an event is filed under.
@@ -55,11 +63,11 @@ router.get('/bookings/person', requireRole('super_admin'), controller.getBooking
  * `/categories` before `/:id`, again.
  */
 router.get('/categories', controller.listCategories);
-router.post('/categories', requireRole('super_admin'), controller.addCategory);
-router.post('/categories/standard', requireRole('super_admin'), controller.addStandardCategories);
-router.put('/categories/:categoryId', requireRole('super_admin'), controller.renameCategory);
-router.post('/categories/:categoryId/move', requireRole('super_admin'), controller.reorderCategory);
-router.delete('/categories/:categoryId', requireRole('super_admin'), controller.deleteCategory);
+router.post('/categories', requireRole(...EVENT_MANAGERS), controller.addCategory);
+router.post('/categories/standard', requireRole(...EVENT_MANAGERS), controller.addStandardCategories);
+router.put('/categories/:categoryId', requireRole(...EVENT_MANAGERS), controller.renameCategory);
+router.post('/categories/:categoryId/move', requireRole(...EVENT_MANAGERS), controller.reorderCategory);
+router.delete('/categories/:categoryId', requireRole(...EVENT_MANAGERS), controller.deleteCategory);
 
 // Read: any signed-in user. The controller hides drafts from non-admins and the
 // service hides members-only events from members who have not paid.
@@ -75,7 +83,7 @@ router.post('/:id/register/pay', controller.payRegistration);
 router.delete('/:id/register', controller.cancelRegistration);
 
 // The attendee list is the organiser's, not the attendees'.
-router.get('/:id/registrations', requireRole('super_admin'), controller.listRegistrations);
+router.get('/:id/registrations', requireRole(...EVENT_MANAGERS), controller.listRegistrations);
 
 /*
  * The BOOKING list — the guest "Book Now" flow's other end.
@@ -90,7 +98,7 @@ router.get('/:id/registrations', requireRole('super_admin'), controller.listRegi
  * an id — `/:id/bookings/:ref` cannot collide with anything above it because
  * the literal `bookings` segment sits between the two parameters.
  */
-router.get('/:id/bookings', requireRole('super_admin'), controller.listBookings);
+router.get('/:id/bookings', requireRole(...EVENT_MANAGERS), controller.listBookings);
 /*
  * The spreadsheet, and the door list.
  *
@@ -99,16 +107,16 @@ router.get('/:id/bookings', requireRole('super_admin'), controller.listBookings)
  * declaration order — registered after it, "export" is read as a booking
  * reference and the download answers "booking not found".
  */
-router.get('/:id/bookings/export', requireRole('super_admin'), controller.exportBookings);
-router.get('/:id/attendees', requireRole('super_admin'), controller.listAttendees);
-router.get('/:id/bookings/:ref', requireRole('super_admin'), controller.getBooking);
-router.post('/:id/bookings/:ref/record-payment', requireRole('super_admin'), controller.recordBookingPayment);
-router.post('/:id/bookings/:ref/cancel', requireRole('super_admin'), controller.cancelBooking);
+router.get('/:id/bookings/export', requireRole(...EVENT_MANAGERS), controller.exportBookings);
+router.get('/:id/attendees', requireRole(...EVENT_MANAGERS), controller.listAttendees);
+router.get('/:id/bookings/:ref', requireRole(...EVENT_MANAGERS), controller.getBooking);
+router.post('/:id/bookings/:ref/record-payment', requireRole(...EVENT_MANAGERS), controller.recordBookingPayment);
+router.post('/:id/bookings/:ref/cancel', requireRole(...EVENT_MANAGERS), controller.cancelBooking);
 
 // Write: super admin only.
-router.post('/', requireRole('super_admin'), upload.single('banner'), controller.createEvent);
-router.put('/:id', requireRole('super_admin'), upload.single('banner'), controller.updateEvent);
-router.patch('/:id/status', requireRole('super_admin'), controller.setStatus);
-router.delete('/:id', requireRole('super_admin'), controller.deleteEvent);
+router.post('/', requireRole(...EVENT_MANAGERS), upload.single('banner'), controller.createEvent);
+router.put('/:id', requireRole(...EVENT_MANAGERS), upload.single('banner'), controller.updateEvent);
+router.patch('/:id/status', requireRole(...EVENT_MANAGERS), controller.setStatus);
+router.delete('/:id', requireRole(...EVENT_MANAGERS), controller.deleteEvent);
 
 module.exports = router;

@@ -40,7 +40,13 @@ const LEGACY_COLLECTIONS = {
      * collection for one account would add a name to every scan and every
      * listing for no separation the role does not already provide.
      */
-    cms_admin: 'superadmins'
+    cms_admin: 'superadmins',
+    /**
+     * The events admin: platform-level, no region, one portal (the programme) —
+     * the same shape as the CMS editor, so the same collection and the same
+     * reason. `role` tells them apart.
+     */
+    events_admin: 'superadmins'
 };
 
 const ALL_COLLECTIONS = [PRIMARY_COLLECTION, ...Object.values(LEGACY_COLLECTIONS)];
@@ -66,7 +72,9 @@ const ROLE_LABELS = {
      * edits the About page can also delete every block admin. This role reaches
      * the CMS and nothing else.
      */
-    cms_admin: 'CMS Administrator'
+    cms_admin: 'CMS Administrator',
+    /** Events, categories and bookings — and nothing else. */
+    events_admin: 'Events Administrator'
 };
 
 /** The tiers a super admin is allowed to create, ordered senior first. */
@@ -225,7 +233,7 @@ const collectionForRole = (role) => LEGACY_COLLECTIONS[normalizeRole(role)] || '
  */
 const nextAdminId = async(role) => {
     await adminsDb.ensureReady();
-    const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA', super_admin: 'SUPER', cms_admin: 'CMS' }[normalizeRole(role)] || 'AD';
+    const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA', super_admin: 'SUPER', cms_admin: 'CMS', events_admin: 'EVT' }[normalizeRole(role)] || 'AD';
     const name = collectionForRole(role);
     const handle = name ? legacyCol(name) : null;
     if (!handle) return `${prefix}${Date.now().toString(36).toUpperCase()}`;
@@ -250,6 +258,7 @@ const normalizeRole = (value) => {
     if (role === 'stateadmin' || role === 'state_admin') return 'state_admin';
     if (role === 'superadmin' || role === 'super_admin') return 'super_admin';
     if (role === 'cmsadmin' || role === 'cms_admin') return 'cms_admin';
+    if (role === 'eventsadmin' || role === 'events_admin' || role === 'event_admin') return 'events_admin';
     return role;
 };
 

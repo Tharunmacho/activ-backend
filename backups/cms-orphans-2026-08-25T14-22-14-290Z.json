@@ -1,0 +1,88 @@
+{
+  "takenAt": "2026-08-25T14:22:14.290Z",
+  "note": "Superseded CMS data removed from activ-db after the move to adminsdb.",
+  "collections": {
+    "cms_hero": [],
+    "cms_about": [],
+    "cms_gallery": [],
+    "cms_contact_settings": [],
+    "cms_contact_messages": [],
+    "cmsUsers": [
+      {
+        "_id": "6a8c0736eebcc8ebe13a9518",
+        "email": "superadmin@activ.org.in",
+        "passwordHash": "$2b$10$58kivp8q6KGHYDy5Br2QsOgEfwwlbWWfyrDryRwzDICB1qbFW1jUe",
+        "name": "ACTIV Super Admin",
+        "role": "super_admin",
+        "status": "active",
+        "scope": [],
+        "lastLoginAt": "2026-08-24T15:18:32.555Z",
+        "createdAt": "2026-08-24T08:56:22.638Z",
+        "updatedAt": "2026-08-24T09:51:42.002Z"
+      }
+    ],
+    "siteContent": [],
+    "galleryImages": [
+      {
+        "_id": "6a8c3c36adb9bb5f725b5c54",
+        "title": "good",
+        "caption": "good",
+        "tags": [
+          "chennai",
+          "2026"
+        ],
+        "capturedAt": "2026-08-25T00:00:00.000Z",
+        "isFeatured": false,
+        "isPublished": true,
+        "imageUrl": "/api/media/2026/08/acecb4968aa89a9b5447045763ad306c.jpg",
+        "createdAt": "2026-08-24T12:42:30.970Z",
+        "updatedAt": "2026-08-24T12:42:30.970Z"
+      },
+      {
+        "_id": "6a8c58c73aa4ed284da35462",
+        "title": "good",
+        "caption": "good",
+        "tags": [
+          "chennai"
+        ],
+        "capturedAt": "2026-08-24T00:00:00.000Z",
+        "isFeatured": false,
+        "isPublished": true,
+        "imageUrl": "/api/media/2026/08/2a9325c1d0241d7338a994d2979d7097.png",
+        "createdAt": "2026-08-24T14:44:23.251Z",
+        "updatedAt": "2026-08-24T14:44:23.251Z"
+      },
+      {
+        "_id": "6a8c59283aa4ed284da35463",
+        "title": "raw",
+        "caption": "good",
+        "tags": [
+          "chennai"
+        ],
+        "capturedAt": "2026-08-25T00:00:00.000Z",
+        "isFeatured": false,
+        "isPublished": false,
+        "imageUrl": "/api/media/2026/08/74176e48449dd39dc7e5042b9950311b.png",
+        "createdAt": "2026-08-24T14:46:00.126Z",
+        "updatedAt": "2026-08-24T14:46:00.126Z"
+      },
+      {
+        "_id": "6a8c59743aa4ed284da35464",
+        "title": "good",
+        "caption": "good",
+        "tags": [
+          "chennai",
+          "2026"
+        ],
+        "capturedAt": "2026-08-23T00:00:00.000Z",
+        "isFeatured": true,
+        "isPublished": false,
+        "imageUrl": "/api/media/2026/08/35a092ac937e13052635ab3d01ac942f.png",
+        "createdAt": "2026-08-24T14:47:16.546Z",
+        "updatedAt": "2026-08-24T14:47:16.546Z"
+      }
+    ],
+    "newsArticles": []
+  },
+  "fields": {}
+}

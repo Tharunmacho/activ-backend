@@ -830,10 +830,32 @@ class AuthService {
     }
 
     async changePassword(userId, oldPassword, newPassword) {
-        const memberAuth = await MemberAuth.findById(userId).select('+password');
+        const memberAuth = await MemberAuth.findById(userId).select('+password').catch(() => null);
 
+        /*
+         * AN ADMIN CHANGING THEIR OWN PASSWORD.
+         *
+         * This only ever looked in the member credential collection, so every
+         * admin who used "Change Password" on their Settings screen — block,
+         * district, state, events — was told "User not found" and kept the
+         * password they were trying to replace. Admins live in `adminsdb`,
+         * reached only through `admin.repository`, which also translates
+         * `passwordHash` to the spelling the holding collection uses.
+         */
         if (!memberAuth) {
-            throw ApiError.notFound('User not found');
+            const hit = await adminRepository.findRawById(String(userId || '')).catch(() => null);
+            if (!hit) throw ApiError.notFound('User not found');
+
+            const stored = hit.doc.passwordHash || hit.doc.password || '';
+            const matches = stored.startsWith('$2')
+                ? await bcrypt.compare(String(oldPassword || ''), stored).catch(() => false)
+                : (!!stored && stored === oldPassword);
+            if (!matches) throw ApiError.badRequest('Current password is incorrect');
+
+            await adminRepository.updateById(hit, { passwordHash: await bcrypt.hash(String(newPassword), 10) });
+            await cacheClient.del(CACHE_KEYS.USER(String(hit.objectId)));
+            logger.info('Admin changed their own password', { email: String(hit.doc.email || '').toLowerCase() });
+            return true;
         }
 
         // Verify old password

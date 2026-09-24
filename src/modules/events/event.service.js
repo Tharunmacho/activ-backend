@@ -35,7 +35,17 @@ const newPaymentReference = () =>
  * what was aimed at where they are. A super admin manages the whole programme,
  * so region targeting must not hide anything from them.
  */
-const isSuperAdmin = (context = {}) => String(context.role || '') === 'super_admin';
+const isSuperAdmin = (context = {}) =>
+    ['super_admin', 'events_admin'].includes(String(context.role || ''));
+
+/*
+ * THE EVENTS ADMIN manages the programme and nothing else — the same events,
+ * drafts included, that the super admin manages. `resolveMemberContext` does
+ * not count it as an admin (that list also opens the member directory and the
+ * approval queues), so it is widened HERE, for events only.
+ */
+const withEventsAdmin = (context = {}) =>
+    (String((context && context.role) || '') === 'events_admin' ? { ...context, isAdmin: true } : context);
 
 const str = (value) => String(value === null || value === undefined ? '' : value).trim();
 
@@ -869,6 +879,7 @@ class EventService {
      * and the audience gate needs the same guarantee.
      */
     async listEvents(filters = {}, context = {}) {
+        context = withEventsAdmin(context);
         const isAdmin = !!context.isAdmin;
         const query = {};
 
@@ -985,6 +996,7 @@ class EventService {
     }
 
     async getEvent(id, context = {}) {
+        context = withEventsAdmin(context);
         if (!mongoose.Types.ObjectId.isValid(String(id || ''))) throw ApiError.badRequest('Invalid event id');
 
         const doc = await Event.findById(id).lean().catch(() => null);

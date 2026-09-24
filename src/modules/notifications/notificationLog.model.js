@@ -21,6 +21,10 @@ const notificationLogSchema = new mongoose.Schema({
             'ADMIN_QUEUE_ALERT',
             'EVENT_REGISTERED',
             'EVENT_REMINDER',
+            'EVENT_BOOKING_CONFIRMED',
+            'EVENT_BOOKING_CANCELLED',
+            'EVENT_BOOKING_REMINDER',
+            'EVENT_BOOKING_WAITLISTED',
             'BOT_REPLY',
             'CUSTOM'
         ],

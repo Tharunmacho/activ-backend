@@ -341,6 +341,23 @@ const homeSchema = new mongoose.Schema({
         slides: [{
             media: media(),
             caption: text(),
+            /*
+             * THIS SLIDE'S OWN WORDS.
+             *
+             * The banner used to print one heading and one subheading over
+             * every picture, so a photograph of a conference and a photograph
+             * of an awards night both said the same sentence. Each slide now
+             * carries its own; blank falls back to the shared headline below,
+             * which is what every slide written before these fields shows.
+             *
+             * `align` is which side the words sit on. The picture's subject is
+             * often on one side — a speaker, a stage, a banner — and the words
+             * must be movable off it rather than printed over it.
+             */
+            headline: text(),
+            headlineHighlight: text(),
+            subheadline: text(),
+            align: { type: String, enum: ['left', 'right'], default: 'left' },
         }],
         headline: text(),
         /** Rendered in the accent colour after the headline, on the same line. */
@@ -835,6 +852,18 @@ const galleryItemSchema = new mongoose.Schema({
      * only.
      */
     showOnHome: { type: Boolean, default: true, index: true },
+
+    /**
+     * What the home banner SAYS over this image, and on which side.
+     *
+     * Separate from `title` / `caption`: those describe the item on the gallery
+     * page, these are the large heading and subheading a visitor reads over
+     * the full-width banner. Blank falls back to the banner's shared headline.
+     */
+    bannerHeadline: { type: String, trim: true, default: '' },
+    bannerHighlight: { type: String, trim: true, default: '' },
+    bannerSubheadline: { type: String, trim: true, default: '' },
+    bannerAlign: { type: String, enum: ['left', 'right'], default: 'left' },
 
     /**
      * The event this was made from, where it was made from one.

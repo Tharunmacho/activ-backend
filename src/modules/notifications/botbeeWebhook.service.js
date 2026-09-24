@@ -346,49 +346,165 @@ const helpReply = async({ member, application }) => {
     return reply;
 };
 
-const eventsReply = async({ member }) => {
-    const who = firstNameOf(member.fullName);
+/* ------------------------------------------------------------ EVENTS reply */
+
+/**
+ * The caller's own live bookings, found by the WhatsApp number they wrote from.
+ *
+ * By PHONE, not by account, because most bookings are made by guests who have
+ * no account at all — they gave this number on the booking form, and it is the
+ * number the confirmation was sent to. WhatsApp has already verified the
+ * sender owns it, so answering with those bookings discloses them only to the
+ * person who made them.
+ */
+const bookingsForPhone = async(rawPhone) => {
+    try {
+        const digits = String(botbeeService.normalizePhoneNumber(rawPhone) || '').replace(/\D/g, '');
+        const last10 = digits.slice(-10);
+        if (last10.length !== 10) return [];
+
+        const EventBooking = require('../events/eventbooking.model');
+        const tail = new RegExp(`${last10}$`);
+        return await EventBooking.find({
+            $or: [{ 'bookedBy.phone': tail }, { 'participants.phone': tail }],
+            status: { $in: ['active', 'waitlist'] },
+            $and: [{ $or: [{ eventStartAt: null }, { eventStartAt: { $gte: new Date(Date.now() - 12 * 3600 * 1000) } }] }]
+        }).sort({ eventStartAt: 1 }).limit(5).lean();
+    } catch (error) {
+        logger.warn('WhatsApp bot could not look up bookings for a number', { error: error && error.message });
+        return [];
+    }
+};
+
+/** Upcoming events anybody may read — the same rule the public site applies. */
+const publicUpcomingEvents = async() => {
+    const Event = require('../events/event.model');
+    const { onboardingClause } = require('../events/onboardingVisibility');
+    return Event.find({
+        status: 'published',
+        audience: { $ne: 'paid' },
+        $and: [
+            onboardingClause(),
+            { $or: [{ startAt: null }, { startAt: { $gte: new Date() } }] }
+        ]
+    }).sort({ startAt: 1 }).limit(5).lean().catch(() => []);
+};
+
+/** One event, written out the way a person would want to read it. */
+const describeEventForChat = async(event, index) => {
+    const bookingService = require('../events/eventbooking.service');
+    const { dateLabel, timeLabel } = bookingService.describeSchedule(event.startAt, event.endAt);
+
+    const venue = event.mode === 'online'
+        ? `Online${event.onlinePlatform ? ` (${event.onlinePlatform})` : ''}`
+        : [event.venue, event.venueAddress].filter(Boolean).join(', ');
+
+    const fee = Number(event.registrationFee || 0);
+    const member = event.memberFee !== null && event.memberFee !== undefined ? Number(event.memberFee) : null;
+    const price = fee > 0
+        ? `Rs ${fee.toLocaleString('en-IN')} per person${member !== null && member < fee
+            ? ` (members Rs ${member.toLocaleString('en-IN')})` : ''}`
+        : 'Free';
+
+    let seats = '';
+    try {
+        const { capacity, seatsLeft } = await bookingService.seatsFor(event);
+        if (capacity > 0) seats = seatsLeft > 0 ? `${seatsLeft} of ${capacity} seats left` : 'Fully booked';
+    } catch { /* the count is a nicety */ }
+
+    const id = String(event._id || event.id || '');
+    const lines = [
+        `*${index + 1}. ${event.title || 'Untitled event'}*`,
+        `📅 ${dateLabel}${timeLabel ? `\n⏰ ${timeLabel}` : ''}`,
+        venue ? `📍 ${venue}` : '',
+        `💰 ${price}${seats ? `  ·  🎟️ ${seats}` : ''}`,
+        event.registrationEnabled === false ? '' : `👉 Book now: ${config.frontendUrl}/events/${id}/book`
+    ];
+    return lines.filter(Boolean).join('\n');
+};
+
+/** "Your bookings", or nothing when there are none. */
+const describeBookingsForChat = (bookings = []) => {
+    if (!bookings.length) return '';
+    const bookingService = require('../events/eventbooking.service');
+    const rows = bookings.map((b) => {
+        const { whenLabel } = bookingService.describeSchedule(b.eventStartAt, null);
+        const paid = b.payment && b.payment.status;
+        const state = b.status === 'waitlist' ? '⏳ Waitlist'
+            : paid === 'paid' || paid === 'not_required' ? '✅ Confirmed'
+                : '⚠️ Payment pending';
+        const seats = Number(b.noOfPersons || 1);
+        return `${state} — *${b.eventTitle || 'Event'}*\n`
+            + `   📅 ${whenLabel}\n`
+            + `   🔖 ${b.bookingRef} · ${seats} seat${seats === 1 ? '' : 's'}\n`
+            + `   ${config.frontendUrl}/events/${String(b.eventId || '')}/book?ref=${encodeURIComponent(b.bookingRef)}`;
+    });
+    return `🎫 *Your bookings*\n\n${rows.join('\n\n')}`;
+};
+
+/**
+ * EVENTS — the caller's bookings, then what is coming up.
+ *
+ * `member` is present for a number that matches an ACTIV account, and the
+ * events are then the ones THAT member may see (their region, members-only
+ * ones when their membership is active). For any other number the list is the
+ * public programme — the same events the website shows to a visitor — so a
+ * guest who booked a seat is answered rather than told they are "not
+ * registered".
+ */
+const eventsReply = async({ member = null, phone = '' } = {}) => {
+    const who = member ? firstNameOf(member.fullName) : '';
 
     try {
-        const eventService = require('../events/event.service');
-
-        const result = await eventService.listEvents(
-            {
-                id: String(member._id || ''),
-                role: 'member',
-                state: member.state,
-                district: member.district,
-                block: member.block
-            },
-            { upcoming: true, limit: 5 }
-        );
-
-        const events = (result && (result.events || result.items || result)) || [];
-        const list = Array.isArray(events) ? events.slice(0, 5) : [];
-
-        if (!list.length) {
-            return `Hello ${who}, there are no upcoming ACTIV events for your region right now.\n\n`
-                + `We will message you when one is announced.`;
+        let list = [];
+        if (member) {
+            const eventService = require('../events/event.service');
+            const result = await eventService.listEvents(
+                {
+                    id: String(member._id || ''),
+                    role: 'member',
+                    state: member.state,
+                    district: member.district,
+                    block: member.block
+                },
+                { upcoming: true, limit: 5 }
+            );
+            const events = (result && (result.events || result.items || result)) || [];
+            const ids = (Array.isArray(events) ? events : []).slice(0, 5)
+                .map((e) => String((e && (e.id || e._id)) || '')).filter(Boolean);
+            const Event = require('../events/event.model');
+            const docs = ids.length ? await Event.find({ _id: { $in: ids } }).lean().catch(() => []) : [];
+            // Keep the service's order (undated first, then soonest).
+            list = ids.map((id) => docs.find((d) => String(d._id) === id)).filter(Boolean);
+        } else {
+            list = await publicUpcomingEvents();
         }
 
-        const lines = list.map((event, index) => {
-            const when = event.startAt
-                ? new Date(event.startAt).toLocaleDateString('en-IN', {
-                    day: 'numeric', month: 'short', year: 'numeric'
-                })
-                // Undated events are real and lead the upcoming list; saying so
-                // is the honest rendering, not omitting the line.
-                : 'Date to be confirmed';
-            const venue = event.venue || event.location || '';
-            return `${index + 1}. ${event.title || 'Untitled event'}\n   ${when}${venue ? ` · ${venue}` : ''}`;
-        });
+        const bookings = await bookingsForPhone(phone);
+        const greeting = `👋 Hello${who ? ` ${who}` : ''}! Thank you for reaching out to *ACTIV*.`;
 
-        return `Hello ${who}, upcoming ACTIV events for your region:\n\n${lines.join('\n\n')}\n\n`
-            + `Register at ${config.frontendUrl}/member/events`;
+        const parts = [greeting];
+        const mine = describeBookingsForChat(bookings);
+        if (mine) parts.push(mine);
+
+        if (list.length) {
+            const described = [];
+            for (let i = 0; i < list.length; i += 1) described.push(await describeEventForChat(list[i], i));
+            parts.push(`🗓️ *Upcoming ACTIV events${member ? ' for you' : ''}*\n\n${described.join('\n\n')}`);
+        } else {
+            parts.push('🗓️ There are no upcoming ACTIV events open right now. '
+                + 'We will message you as soon as the next one is announced.');
+        }
+
+        parts.push(`🌐 Full programme: ${config.frontendUrl}/events\n`
+            + (member ? 'Reply *STATUS* for your membership · *HELP* for your regional admin'
+                : `Not a member yet? Join ACTIV at ${config.frontendUrl}`));
+
+        return parts.join('\n\n');
     } catch (error) {
         logger.warn('WhatsApp bot could not list events', { error: error && error.message });
-        return `Hello ${who}, the events list is unavailable right now. `
-            + `You can see the full programme at ${config.frontendUrl}/member/events`;
+        return `Hello${who ? ` ${who}` : ''}, the events list is unavailable right now. `
+            + `You can see the full programme at ${config.frontendUrl}/events`;
     }
 };
 
@@ -480,7 +596,11 @@ const handleInbound = async(body = {}) => {
     const identity = await findMemberByPhone(incoming.from);
 
     let reply;
-    if (identity && identity.ambiguous) {
+    if (identity && identity.ambiguous && command === 'EVENTS') {
+        // The public programme and this number's own bookings belong to no one
+        // account, so a number shared by several accounts can still have them.
+        reply = await eventsReply({ phone: incoming.from });
+    } else if (identity && identity.ambiguous) {
         // Checked BEFORE the command: every command discloses something about a
         // specific account, so there is no branch here that is safe to answer.
         reply = ambiguousReply();
@@ -488,13 +608,18 @@ const handleInbound = async(body = {}) => {
         // An unknown number gets the same answer whatever it asks. Varying the
         // reply by command would let a stranger probe which numbers are
         // registered, and the answer they need is the same either way.
-        reply = command ? notRegisteredReply() : menuReply(false);
+        // EVENTS is the exception: the public programme and the bookings made
+        // under this number are not account information, and most people who
+        // booked a seat are guests with no account to find.
+        reply = command === 'EVENTS'
+            ? await eventsReply({ phone: incoming.from })
+            : (command ? notRegisteredReply() : menuReply(false));
     } else if (command === 'STATUS') {
         reply = await statusReply(identity);
     } else if (command === 'HELP') {
         reply = await helpReply(identity);
     } else if (command === 'EVENTS') {
-        reply = await eventsReply(identity);
+        reply = await eventsReply({ ...identity, phone: incoming.from });
     } else {
         reply = menuReply(true);
     }

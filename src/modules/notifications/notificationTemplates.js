@@ -51,6 +51,78 @@ const oneLine = (value, max = 220) => {
  */
 const clause = (value, max = 200) => oneLine(value, max).replace(/[.,;:\s]+$/, '');
 
+/** HTML-escape a value typed by a person (a participant name, a reason). */
+const esc = (value) => String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/**
+ * Where an event button goes.
+ *
+ * The PUBLIC event page (or the booking itself when there is a reference),
+ * never `/member/events`: a guest who booked has no account, and a
+ * members-only link sent every one of them to the login screen.
+ */
+const eventLink = (ctx = {}) => {
+    const data = ctx.data || {};
+    const id = data.eventId || ctx.eventId || '';
+    if (!id) return appUrl('/events');
+    const ref = data.bookingRef || ctx.bookingRef || '';
+    return appUrl(`/events/${encodeURIComponent(id)}${ref ? `/book?ref=${encodeURIComponent(ref)}` : ''}`);
+};
+
+/** The practical notes before an in-person event, as a tinted box. */
+const beforeYouComeHtml = (ctx = {}) => {
+    const items = ctx.isOnline
+        ? [
+            'The joining link will reach you by email before the event starts.',
+            'Join a few minutes early so you do not miss the opening.',
+            'Keep your booking reference handy in case the organiser asks for it.'
+        ]
+        : [
+            'Please arrive 15 to 30 minutes early for registration.',
+            `Carry this email or your booking reference${ctx.bookingRef ? ` (${ctx.bookingRef})` : ''}.`,
+            'Bring a photo ID for each participant.',
+            'Fees are non-refundable, but you may change the names of the participants.'
+        ];
+    return `<table width="100%" cellpadding="0" cellspacing="0" border="0"
+                   style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; margin:6px 0 4px 0;">
+        <tr><td style="padding:14px 18px;">
+          <div style="font-size:13px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#1d4ed8;
+                      padding-bottom:6px;">Before you come</div>
+          ${items.map((i) => `<div style="font-size:14px; line-height:1.6; color:#1e3a8a;">&#10003;&nbsp; ${esc(i)}</div>`).join('')}
+        </td></tr>
+      </table>`;
+};
+
+/**
+ * A booking message's WhatsApp template: the DETAILED one when it has been
+ * approved and named in the environment, the generic event template otherwise.
+ *
+ * `fallback` rides along so that a detailed template which Meta refuses (still
+ * in review, renamed, parameter count changed) is retried once through the
+ * generic one by `notification.service` — the booker hears something either way.
+ */
+const bookingWhatsApp = (dedicatedName, dedicatedParams, eventParams) => (dedicatedName
+    ? { template: dedicatedName, params: dedicatedParams, fallback: { template: TPL.event, params: eventParams } }
+    : { template: TPL.event, params: eventParams });
+
+/** A parameter value that is never empty — Meta refuses an empty one. */
+const orDash = (value, dash = 'Not specified') => oneLine(value, 300) || dash;
+
+/** "Who is coming", as a short list in a booking email. Empty when nobody is named. */
+const participantsHtml = (names = []) => {
+    const list = (Array.isArray(names) ? names : []).filter(Boolean);
+    if (!list.length) return '';
+    return `<p style="margin:0 0 6px 0;"><strong>Participants</strong></p>
+        <ol style="margin:0 0 12px 0; padding-left:20px;">
+          ${list.map((n) => `<li style="margin-bottom:4px;">${esc(n)}</li>`).join('')}
+        </ol>`;
+};
+
 /**
  * Every event, and what it renders to.
  *
@@ -389,7 +461,7 @@ const TEMPLATES = {
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
-            actionButton: { label: 'View event details', url: appUrl('/member/events') }
+            actionButton: { label: 'View event details', url: eventLink(ctx) }
         },
         whatsapp: {
             /*
@@ -433,7 +505,7 @@ const TEMPLATES = {
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
-            actionButton: { label: 'View event details', url: appUrl('/member/events') }
+            actionButton: { label: 'View event details', url: eventLink(ctx) }
         },
         whatsapp: {
             template: TPL.event,
@@ -446,7 +518,280 @@ const TEMPLATES = {
                 + (ctx.whenLabel ? ` on ${ctx.whenLabel}` : '')
                 + (ctx.venue ? ` at ${ctx.venue}` : '') + '.'
         }
-    })
+    }),
+
+    /*
+     * ======================================================================
+     * EVENT BOOKINGS — confirmed, cancelled, reminded
+     * ======================================================================
+     *
+     * Every value below is built by `eventbooking.service.messageContext` from
+     * the booking AND the live event at the moment of sending: the date and
+     * time in IST as the event is scheduled, the venue, the seats, the
+     * participants, what was paid and how. Nothing here is a fixed sentence
+     * about a fixed event — the wording branches on how the booking was
+     * settled (online through the gateway, recorded by the organiser, or free)
+     * and on why the message is going out.
+     *
+     * WhatsApp reuses the approved event template (`TPL.event`, "a reminder
+     * about {2} on {3}"), so slot 2 carries the booking in words and slot 3
+     * the scheduled date and time. `text` is the fully written-out message
+     * sent inside the session window and by `alsoSendText`.
+     */
+    EVENT_BOOKING_CONFIRMED: (ctx) => {
+        const title = ctx.eventTitle || 'the event';
+        const settled = ctx.settledVia === 'online'
+            ? `We have received your payment of <strong>${esc(ctx.amountLabel)}</strong> online`
+                + ' and your booking is confirmed.'
+            : ctx.settledVia === 'offline'
+                ? `The organiser has received your payment of <strong>${esc(ctx.amountLabel)}</strong>`
+                    + `${ctx.paymentModeLabel ? ` (${esc(ctx.paymentModeLabel)})` : ''} and confirmed your booking.`
+                : 'Your booking is confirmed. No payment is required for this event.';
+
+        return {
+            inApp: {
+                title: 'Booking confirmed',
+                message: `${ctx.seatsLabel} booked for ${title}${ctx.whenLabel ? ` on ${ctx.whenLabel}` : ''}. `
+                    + `Reference ${ctx.bookingRef}.`,
+                type: 'success'
+            },
+            email: {
+                subject: `Booking confirmed — ${title} (${ctx.bookingRef})`,
+                title: 'Your booking is confirmed',
+                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''} · ${ctx.seatsLabel}`,
+                tone: 'success',
+                badge: 'Booking confirmed',
+                highlight: {
+                    label: 'Your booking reference',
+                    value: ctx.bookingRef,
+                    note: ctx.isOnline ? 'Keep this — it is how we find your booking.'
+                        : 'Show this at the registration desk.'
+                },
+                bodyHtml: `
+                    <p style="margin:0 0 12px 0;">Thank you for booking
+                    <strong>${ctx.eventTitleHtml || 'this event'}</strong>. ${settled}</p>
+                    ${ctx.whenLabel ? `<p style="margin:0 0 12px 0;">We look forward to seeing you on
+                    <strong>${esc(ctx.whenLabel)}</strong>${ctx.venueLabel && !ctx.isOnline
+                        ? ` at <strong>${esc(ctx.venueLabel)}</strong>` : ''}.</p>` : ''}
+                    ${participantsHtml(ctx.participantNames)}
+                    ${beforeYouComeHtml(ctx)}`,
+                facts: [
+                    { label: 'Event', value: ctx.eventTitle },
+                    { label: 'Date', value: ctx.dateLabel },
+                    { label: 'Time', value: ctx.timeLabel },
+                    { label: ctx.isOnline ? 'Attend' : 'Venue', value: ctx.venueLabel },
+                    { label: 'Seats', value: String(ctx.seats || '') },
+                    { label: 'Amount', value: ctx.settledVia === 'free' ? 'Free' : ctx.amountLabel },
+                    { label: 'Payment', value: ctx.paymentLabel },
+                    { label: 'Payment ID', value: ctx.paymentId },
+                    { label: 'Booked by', value: ctx.bookedByLine },
+                    { label: 'Booked on', value: ctx.bookedOnLabel },
+                    { label: 'Organiser contact', value: ctx.contactLine }
+                ],
+                actionButton: ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined,
+                secondaryButton: ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined
+            },
+            whatsapp: {
+                ...bookingWhatsApp(TPL.booking, [
+                    ctx.firstName || 'Member',
+                    clause(title, 120) || 'the event',
+                    orDash(ctx.whenLabel, 'Date to be confirmed'),
+                    orDash(ctx.venueLabel, 'To be announced'),
+                    orDash(ctx.participantNames && ctx.participantNames.length
+                        ? `${ctx.seatsLabel} (${ctx.participantNames.join(', ')})` : ctx.seatsLabel),
+                    ctx.settledVia === 'free' ? 'Free event, no payment required'
+                        : orDash(`${ctx.amountLabel} ${ctx.paymentLabel ? `- ${ctx.paymentLabel}` : ''}`),
+                    ctx.bookingRef || 'See your email'
+                ], [
+                    ctx.firstName || 'Member',
+                    `your confirmed booking ${ctx.bookingRef} (${ctx.seatsLabel}) for ${clause(title, 110)}`,
+                    ctx.whenLabel || 'the scheduled date'
+                ]),
+                text: `ACTIV: Booking confirmed ✅`
+                    + `\n\nHello ${ctx.firstName || 'Member'},`
+                    + `\nYour booking for *${title}* is confirmed.`
+                    + `\n\nReference: ${ctx.bookingRef}`
+                    + (ctx.dateLabel ? `\nDate: ${ctx.dateLabel}` : '')
+                    + (ctx.timeLabel ? `\nTime: ${ctx.timeLabel}` : '')
+                    + (ctx.venueLabel ? `\n${ctx.isOnline ? 'Attend' : 'Venue'}: ${ctx.venueLabel}` : '')
+                    + (ctx.mapUrl ? `\nMap: ${ctx.mapUrl}` : '')
+                    + `\nSeats: ${ctx.seats}`
+                    + (ctx.participantNames && ctx.participantNames.length
+                        ? `\nParticipants: ${ctx.participantNames.join(', ')}` : '')
+                    + (ctx.settledVia === 'free'
+                        ? '\nAmount: Free'
+                        : `\nAmount: ${ctx.amountLabel}\nPayment: ${ctx.paymentLabel}`
+                            + (ctx.paymentId ? ` (ID ${ctx.paymentId})` : ''))
+                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+                    + (ctx.viewUrl ? `\nYour booking: ${ctx.viewUrl}` : '')
+            }
+        };
+    },
+
+    EVENT_BOOKING_CANCELLED: (ctx) => {
+        const title = ctx.eventTitle || 'the event';
+        return {
+            inApp: {
+                title: 'Booking cancelled',
+                message: `Your booking ${ctx.bookingRef} for ${title} has been cancelled.`,
+                type: 'warning'
+            },
+            email: {
+                subject: `Booking cancelled — ${title} (${ctx.bookingRef})`,
+                title: 'Your booking has been cancelled',
+                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''}`,
+                tone: 'danger',
+                badge: 'Booking cancelled',
+                highlight: { label: 'Cancelled booking', value: ctx.bookingRef },
+                actionButton: ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined,
+                bodyHtml: `
+                    <p style="margin:0 0 12px 0;">Your booking <strong>${esc(ctx.bookingRef)}</strong> for
+                    <strong>${ctx.eventTitleHtml || 'this event'}</strong> has been cancelled by the organiser,
+                    and the ${esc(ctx.seatsLabel)} it held ${ctx.seats === 1 ? 'has' : 'have'} been released.</p>
+                    ${ctx.reason ? `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${esc(ctx.reason)}</p>` : ''}
+                    <p style="margin:0 0 12px 0;">If you think this is a mistake, or you have a question about
+                    a payment you made, please contact the organiser${ctx.contactLine
+                        ? ` — ${esc(ctx.contactLine)}` : ''}.</p>`,
+                facts: [
+                    { label: 'Booking reference', value: ctx.bookingRef },
+                    { label: 'Event', value: ctx.eventTitle },
+                    { label: 'Date', value: ctx.dateLabel },
+                    { label: 'Time', value: ctx.timeLabel },
+                    { label: 'Seats released', value: String(ctx.seats || '') },
+                    { label: 'Amount', value: ctx.settledVia === 'free' ? '' : ctx.amountLabel },
+                    { label: 'Payment', value: ctx.paymentLabel }
+                ]
+            },
+            whatsapp: {
+                ...bookingWhatsApp(TPL.bookingCancel, [
+                    ctx.firstName || 'Member',
+                    ctx.bookingRef || 'your booking',
+                    clause(title, 120) || 'the event',
+                    orDash(ctx.whenLabel, 'Date to be confirmed'),
+                    orDash(ctx.reason, 'No reason was given'),
+                    orDash(ctx.contactLine, 'the ACTIV office')
+                ], [
+                    ctx.firstName || 'Member',
+                    `the CANCELLATION of your booking ${ctx.bookingRef} for ${clause(title, 110)}`,
+                    ctx.whenLabel || 'the scheduled date'
+                ]),
+                text: `ACTIV: Booking cancelled`
+                    + `\n\nHello ${ctx.firstName || 'Member'},`
+                    + `\nYour booking ${ctx.bookingRef} for *${title}*`
+                    + (ctx.whenLabel ? ` (${ctx.whenLabel})` : '')
+                    + ` has been cancelled by the organiser.`
+                    + (ctx.reason ? `\nReason: ${oneLine(ctx.reason)}` : '')
+                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+            }
+        };
+    },
+
+    EVENT_BOOKING_WAITLISTED: (ctx) => {
+        const title = ctx.eventTitle || 'the event';
+        return {
+            inApp: {
+                title: 'You are on the waitlist',
+                message: `${title} is full. You are on the waitlist (${ctx.bookingRef}); nothing has been charged.`,
+                type: 'info'
+            },
+            email: {
+                subject: `Waitlist — ${title} (${ctx.bookingRef})`,
+                title: 'You are on the waitlist',
+                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''}`,
+                tone: 'warning',
+                badge: 'Waitlist',
+                highlight: { label: 'Waitlist reference', value: ctx.bookingRef },
+                actionButton: ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined,
+                bodyHtml: `
+                    <p style="margin:0 0 12px 0;"><strong>${ctx.eventTitleHtml || 'This event'}</strong> is fully
+                    booked, so your request for ${esc(ctx.seatsLabel)} has been placed on the waitlist.
+                    <strong>No seat is held and nothing has been charged.</strong></p>
+                    <p style="margin:0 0 12px 0;">The organiser will contact you if seats become available.</p>`,
+                facts: [
+                    { label: 'Reference', value: ctx.bookingRef },
+                    { label: 'Event', value: ctx.eventTitle },
+                    { label: 'Date', value: ctx.dateLabel },
+                    { label: 'Time', value: ctx.timeLabel },
+                    { label: 'Seats requested', value: String(ctx.seats || '') },
+                    { label: 'Organiser contact', value: ctx.contactLine }
+                ]
+            },
+            whatsapp: {
+                template: TPL.event,
+                params: [
+                    ctx.firstName || 'Member',
+                    `your WAITLIST request ${ctx.bookingRef} for ${clause(title, 110)} (event full, nothing charged)`,
+                    ctx.whenLabel || 'the scheduled date'
+                ],
+                text: `ACTIV: You are on the waitlist`
+                    + `\n\nHello ${ctx.firstName || 'Member'},`
+                    + `\n*${title}* is fully booked. Your request for ${ctx.seatsLabel} is on the waitlist`
+                    + ` (${ctx.bookingRef}). No seat is held and nothing has been charged.`
+                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+            }
+        };
+    },
+
+    EVENT_BOOKING_REMINDER: (ctx) => {
+        const title = ctx.eventTitle || 'your event';
+        return {
+            inApp: {
+                title: 'Event reminder',
+                message: `${title} starts ${ctx.startsInLabel}${ctx.whenLabel ? ` — ${ctx.whenLabel}` : ''}.`,
+                type: 'info'
+            },
+            email: {
+                subject: `Reminder: ${title} starts ${ctx.startsInLabel}`,
+                title: `${title} starts ${ctx.startsInLabel}`,
+                preheader: `${ctx.whenLabel || ''}${ctx.venueLabel ? ` · ${ctx.venueLabel}` : ''}`,
+                tone: 'info',
+                badge: 'Event reminder',
+                highlight: { label: 'Your booking reference', value: ctx.bookingRef, note: 'Show this at the registration desk.' },
+                bodyHtml: `
+                    <p style="margin:0 0 12px 0;">This is a reminder that
+                    <strong>${ctx.eventTitleHtml || 'your event'}</strong> starts
+                    <strong>${esc(ctx.startsInLabel)}</strong>. Your ${esc(ctx.seatsLabel)}
+                    ${ctx.seats === 1 ? 'is' : 'are'} confirmed under booking
+                    <strong>${esc(ctx.bookingRef)}</strong>.</p>
+                    ${participantsHtml(ctx.participantNames)}
+                    ${beforeYouComeHtml(ctx)}`,
+                facts: [
+                    { label: 'Booking reference', value: ctx.bookingRef },
+                    { label: 'Date', value: ctx.dateLabel },
+                    { label: 'Time', value: ctx.timeLabel },
+                    { label: ctx.isOnline ? 'Attend' : 'Venue', value: ctx.venueLabel },
+                    { label: 'Seats', value: String(ctx.seats || '') },
+                    { label: 'Organiser contact', value: ctx.contactLine }
+                ],
+                actionButton: ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined,
+                secondaryButton: ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined
+            },
+            whatsapp: {
+                ...bookingWhatsApp(TPL.bookingReminder, [
+                    ctx.firstName || 'Member',
+                    clause(title, 120) || 'your event',
+                    ctx.startsInLabel || 'soon',
+                    orDash(ctx.whenLabel, 'Date to be confirmed'),
+                    orDash(ctx.venueLabel, 'To be announced'),
+                    ctx.bookingRef || 'See your email',
+                    orDash(ctx.seatsLabel)
+                ], [
+                    ctx.firstName || 'Member',
+                    `${clause(title, 110)} (booking ${ctx.bookingRef}, ${ctx.seatsLabel})`,
+                    ctx.whenLabel || 'the scheduled date'
+                ]),
+                text: `ACTIV reminder ⏰`
+                    + `\n\nHello ${ctx.firstName || 'Member'},`
+                    + `\n*${title}* starts ${ctx.startsInLabel}.`
+                    + (ctx.dateLabel ? `\nDate: ${ctx.dateLabel}` : '')
+                    + (ctx.timeLabel ? `\nTime: ${ctx.timeLabel}` : '')
+                    + (ctx.venueLabel ? `\n${ctx.isOnline ? 'Attend' : 'Venue'}: ${ctx.venueLabel}` : '')
+                    + (ctx.mapUrl ? `\nMap: ${ctx.mapUrl}` : '')
+                    + `\nBooking: ${ctx.bookingRef} (${ctx.seatsLabel})`
+                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+            }
+        };
+    }
 };
 
 /**
@@ -500,6 +845,66 @@ const TEMPLATES = {
  * `scripts/test-notifications.js --templates` prints both versions.
  */
 const WHATSAPP_TEMPLATES = [
+    /*
+     * THE DETAILED BOOKING TEMPLATES — Meta Cloud API ({{n}} placeholders).
+     *
+     * Sent only once their names are set (BOTBEE_TPL_BOOKING, _CANCEL,
+     * _REMINDER). `scripts/whatsapp-booking-templates.js --submit` creates them
+     * on the WhatsApp Business Account for review; the samples are what Meta's
+     * reviewers see. Emoji are fine in a Utility body; every variable has text
+     * on both sides, which review requires.
+     */
+    {
+        name: 'activ_booking_confirmed',
+        envKey: 'BOTBEE_TPL_BOOKING',
+        category: 'Utility',
+        meta: true,
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Hello {{1}}, your booking for *{{2}}* is confirmed! 🎉\n\n'
+            + '📅 Date & time: {{3}}\n'
+            + '📍 Venue: {{4}}\n'
+            + '🎟️ Seats: {{5}}\n'
+            + '💳 Payment: {{6}}\n'
+            + '🔖 Booking reference: {{7}}\n\n'
+            + 'Please arrive 15 to 30 minutes early and show your booking reference at the registration desk. '
+            + 'A detailed confirmation has also been sent to your email.\n\n'
+            + 'We look forward to welcoming you! Reply EVENTS to see your bookings and upcoming ACTIV events.',
+        params: ['first name', 'event', 'date & time', 'venue', 'seats', 'payment', 'booking reference'],
+        samples: ['Tharun', 'SCST Economic Liberty Conference', 'Saturday, 10 October 2026, 9:00 AM - 5:30 PM IST',
+            'DNC Vijay Mahal, Dharmapuri', '2 seats (Tharun, Ravi)', 'Rs 2,000 - Paid online', 'ACTIVB-MUEE9IBU-445B']
+    },
+    {
+        name: 'activ_booking_cancelled',
+        envKey: 'BOTBEE_TPL_BOOKING_CANCEL',
+        category: 'Utility',
+        meta: true,
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Hello {{1}}, your booking {{2}} for *{{3}}* on {{4}} has been cancelled by the organiser.\n\n'
+            + '📝 Reason: {{5}}\n\n'
+            + 'The seats held by this booking have been released. If you think this is a mistake or have a '
+            + 'question about a payment, please contact {{6}}.\n\n'
+            + 'Reply EVENTS to see other upcoming ACTIV events.',
+        params: ['first name', 'booking reference', 'event', 'date & time', 'reason', 'organiser contact'],
+        samples: ['Tharun', 'ACTIVB-MUEE9IBU-445B', 'SCST Economic Liberty Conference',
+            'Saturday, 10 October 2026, 9:00 AM IST', 'Duplicate booking', 'ACTIV Events, +91 82201 12188']
+    },
+    {
+        name: 'activ_booking_reminder',
+        envKey: 'BOTBEE_TPL_BOOKING_REMINDER',
+        category: 'Utility',
+        meta: true,
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Hello {{1}}, a friendly reminder that *{{2}}* starts {{3}}! ⏰\n\n'
+            + '📅 Date & time: {{4}}\n'
+            + '📍 Venue: {{5}}\n'
+            + '🔖 Booking reference: {{6}} ({{7}})\n\n'
+            + 'Please arrive 15 to 30 minutes early for registration and carry your booking reference. '
+            + 'See you there!',
+        params: ['first name', 'event', 'starts in', 'date & time', 'venue', 'booking reference', 'seats'],
+        samples: ['Tharun', 'SCST Economic Liberty Conference', 'tomorrow',
+            'Saturday, 10 October 2026, 9:00 AM - 5:30 PM IST', 'DNC Vijay Mahal, Dharmapuri',
+            'ACTIVB-MUEE9IBU-445B', '2 seats']
+    },
     {
         name: TPL.welcome,
         category: 'Utility',

@@ -1288,7 +1288,17 @@ class CmsService {
                 // A slide with no media is not a slide — it renders as a blank
                 // frame the visitor has to sit through.
                 slides: asArray(c.slides)
-                    .map(s => ({ media: cleanMedia(s.media || s), caption: str(s.caption) }))
+                    .map(s => ({
+                        media: cleanMedia(s.media || s),
+                        caption: str(s.caption),
+                        // Each slide's own words and side — see the model.
+                        // Capped: a banner heading is a line, not a page — a
+                        // paste of a whole document once filled the hero.
+                        headline: str(s.headline).slice(0, 120),
+                        headlineHighlight: str(s.headlineHighlight).slice(0, 60),
+                        subheadline: str(s.subheadline).slice(0, 280),
+                        align: s.align === 'right' ? 'right' : 'left',
+                    }))
                     .filter(s => s.media.url),
                 headline: str(c.headline),
                 headlineHighlight: str(c.headlineHighlight),
@@ -1673,6 +1683,10 @@ class CmsService {
             featured: boolOf(payload.featured, false),
             pinned: boolOf(payload.pinned, false),
             showOnHome: boolOf(payload.showOnHome, true),
+            bannerHeadline: str(payload.bannerHeadline).slice(0, 120),
+            bannerHighlight: str(payload.bannerHighlight).slice(0, 60),
+            bannerSubheadline: str(payload.bannerSubheadline).slice(0, 280),
+            bannerAlign: payload.bannerAlign === 'right' ? 'right' : 'left',
             fromEventId: str(payload.fromEventId),
             sortOrder,
             visible: boolOf(payload.visible, true),
@@ -1684,9 +1698,15 @@ class CmsService {
         const update = { editedBy: actorOf(user) };
         if (payload.media || payload.url || payload.imageUrl) update.media = cleanMedia(payload.media || payload);
 
-        ['title', 'caption', 'category', 'sector', 'eventDate', 'location'].forEach((field) => {
+        ['title', 'caption', 'category', 'sector', 'eventDate', 'location',
+            'bannerHeadline', 'bannerHighlight', 'bannerSubheadline'].forEach((field) => {
             if (payload[field] !== undefined) update[field] = str(payload[field]);
         });
+        // The same caps as the create path.
+        if (update.bannerHeadline !== undefined) update.bannerHeadline = update.bannerHeadline.slice(0, 120);
+        if (update.bannerHighlight !== undefined) update.bannerHighlight = update.bannerHighlight.slice(0, 60);
+        if (update.bannerSubheadline !== undefined) update.bannerSubheadline = update.bannerSubheadline.slice(0, 280);
+        if (payload.bannerAlign !== undefined) update.bannerAlign = payload.bannerAlign === 'right' ? 'right' : 'left';
 
         /* The state, and the region it implies — see the note on the create
            path. An absent key leaves both untouched, as every other field. */

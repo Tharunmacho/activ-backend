@@ -244,6 +244,27 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
 }));
 
 /**
+ * GET /api/v1/payment/return/:orderId?payment_id=&payment_status=
+ *
+ * What the `/payment-success` page asks when the buyer comes back from
+ * Instamojo. PUBLIC — a guest who paid for seats has no token, and this page
+ * calling the signed-in `/order/:id` sent every guest to the login screen
+ * with their money gone. For an event booking it verifies the payment with
+ * Instamojo itself and confirms the booking (see `resolveReturn`); for a
+ * membership it only reports the order's state.
+ */
+const returnLimiter = require('../../core/middleware/rateLimit')
+    .createRateLimiter({ windowMs: 10 * 60 * 1000, max: 200 });
+
+router.get('/return/:orderId', returnLimiter, asyncHandler(async(req, res) => {
+    const result = await paymentService.resolveReturn(req.params.orderId, {
+        paymentId: String(req.query.payment_id || '').slice(0, 100),
+        gatewayStatus: String(req.query.payment_status || '').slice(0, 30)
+    });
+    res.json(ApiResponse.success(result));
+}));
+
+/**
  * GET /api/v1/payment/status/:paymentRequestId
  * Check payment status
  * Requires authentication

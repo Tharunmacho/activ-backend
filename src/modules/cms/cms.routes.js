@@ -212,13 +212,30 @@ router.post('/leader-messages', contactFormLimiter, controller.createLeaderMessa
  * content is a support ticket waiting to happen. The reverse does NOT hold —
  * nothing under `/admin` accepts `cms_admin`.
  */
+/*
+ * THE EVENT EDITOR, OPEN TO THE EVENTS ADMIN AS WELL — and declared ABOVE the
+ * content gate below, which would otherwise refuse that role on every one.
+ *
+ * The events admin is a separate account whose whole portal is the programme
+ * (see `event.routes.js`). It edits events through the same screen and the
+ * same endpoints as the super admin and the CMS — one write path, so nothing
+ * about an event can differ by who saved it — and reaches no other content.
+ * `/media` is here because the event form uploads its banner and speaker
+ * photos through it.
+ */
+const eventEditors = [verifyToken, requireRole('super_admin', 'cms_admin', 'events_admin')];
+router.post('/events', ...eventEditors, upload.single('image'), controller.createEvent);
+router.put('/events/:id', ...eventEditors, upload.single('image'), controller.updateEvent);
+router.delete('/events/:id', ...eventEditors, controller.deleteEvent);
+router.put('/events-settings', ...eventEditors, controller.updateEventsSettings);
+router.post('/media', ...eventEditors, mediaUpload.single('file'), controller.uploadMedia);
+
 router.use(verifyToken, requireRole('super_admin', 'cms_admin'));
 
 router.get('/overview', controller.getOverview);
 
 router.put('/site', controller.updateSiteSettings);
 router.put('/home', controller.updateHome);
-router.put('/events-settings', controller.updateEventsSettings);
 router.put('/gallery-settings', controller.updateGallerySettings);
 
 /**
@@ -228,7 +245,6 @@ router.put('/gallery-settings', controller.updateGallerySettings);
  * `backend/uploads` and rejects anything that is not an image. Video needs a
  * dedicated uploader — see the note in `mediaUpload`.
  */
-router.post('/media', mediaUpload.single('file'), controller.uploadMedia);
 router.put('/about', controller.updateAbout);
 router.put('/contact-info', controller.updateContactInfo);
 
@@ -238,9 +254,6 @@ router.post('/gallery', upload.single('image'), controller.addGalleryItem);
 router.put('/gallery/:id', upload.single('image'), controller.updateGalleryItem);
 router.delete('/gallery/:id', controller.deleteGalleryItem);
 
-router.post('/events', upload.single('image'), controller.createEvent);
-router.put('/events/:id', upload.single('image'), controller.updateEvent);
-router.delete('/events/:id', controller.deleteEvent);
 
 /*
  * Editing a policy.

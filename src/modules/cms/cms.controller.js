@@ -106,6 +106,14 @@ const updateAbout = asyncHandler(async(req, res) => {
 const canSeeDrafts = (req) =>
     !!(req.user && ['super_admin', 'cms_admin'].includes(req.user.role));
 
+/**
+ * Events only: the content editors, plus the EVENTS ADMIN, whose portal is the
+ * programme and nothing else. Kept apart from `canSeeDrafts` so that role never
+ * sees a draft policy, gallery item or region page.
+ */
+const canSeeEventDrafts = (req) =>
+    canSeeDrafts(req) || !!(req.user && req.user.role === 'events_admin');
+
 // ---------------------------------------------------------------- gallery
 
 const getGallery = asyncHandler(async(req, res) => {
@@ -259,7 +267,7 @@ const getEvents = asyncHandler(async(req, res) => {
      * the editor, depending on which screen asked first. The pages that
      * render what a visitor sees now say so explicitly.
      */
-    const editor = canSeeDrafts(req) && String(req.query.scope || '') !== 'public';
+    const editor = canSeeEventDrafts(req) && String(req.query.scope || '') !== 'public';
     res.json(ApiResponse.success(await cmsService.listEvents({
         includeDrafts: editor,
         // The join link for an online event, which is not public — see
@@ -276,7 +284,7 @@ const getEvents = asyncHandler(async(req, res) => {
  * 404 to everyone but a super admin — exactly as it is absent from the list.
  */
 const getEvent = asyncHandler(async(req, res) => {
-    const editor = canSeeDrafts(req);
+    const editor = canSeeEventDrafts(req);
     res.json(ApiResponse.success(
         await cmsService.listEvent(req.params.id, { includeDrafts: editor, privileged: editor }),
     ));
