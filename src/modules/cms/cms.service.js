@@ -1966,6 +1966,12 @@ class CmsService {
         const now = Date.now();
         const at = e => (e.startAt ? new Date(e.startAt).getTime() : 0);
         const undated = e => !e.startAt;
+        /* An event is over when it ENDS. A three-day conclave on its second
+           morning is still upcoming; reading `startAt` alone filed it as past. */
+        const over = e => {
+            const finish = e.endAt || e.startAt;
+            return !!finish && new Date(finish).getTime() < now;
+        };
 
         /*
          * AN UNDATED EVENT IS NOT A PAST ONE.
@@ -1982,14 +1988,14 @@ class CmsService {
          * first), and every dated event follows in date order.
          */
         const upcoming = events
-            .filter(e => undated(e) || at(e) >= now)
+            .filter(e => undated(e) || !over(e))
             .sort((a, b) => {
                 if (undated(a) !== undated(b)) return undated(a) ? -1 : 1;
                 if (undated(a)) return 0;
                 return at(a) - at(b);
             });
 
-        const past = events.filter(e => !undated(e) && at(e) < now).sort((a, b) => at(b) - at(a));
+        const past = events.filter(e => !undated(e) && over(e)).sort((a, b) => at(b) - at(a));
 
         // `privileged` carries the join link; `includeDrafts` is the same
         // question asked of a different field, and the controller derives both

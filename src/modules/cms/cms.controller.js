@@ -249,7 +249,17 @@ const getEvents = asyncHandler(async(req, res) => {
      * The public caller is unchanged: no session, no drafts, and the onboarding
      * rule applied — see `listEvents`.
      */
-    const editor = canSeeDrafts(req);
+    /*
+     * `?scope=public` ASKS THE VISITOR'S QUESTION EVEN WITH A SESSION.
+     *
+     * The public pages send the admin's token like every other request, so a
+     * signed-in super admin browsing the home page was handed the EDITOR list
+     * — drafts and members-only events included — and the website's read
+     * cache then served that list to the public grid, and the public list to
+     * the editor, depending on which screen asked first. The pages that
+     * render what a visitor sees now say so explicitly.
+     */
+    const editor = canSeeDrafts(req) && String(req.query.scope || '') !== 'public';
     res.json(ApiResponse.success(await cmsService.listEvents({
         includeDrafts: editor,
         // The join link for an online event, which is not public — see

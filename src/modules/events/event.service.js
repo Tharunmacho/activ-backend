@@ -902,8 +902,20 @@ class EventService {
             query.audience = str(filters.audience).toLowerCase();
         }
 
+        /*
+         * Upcoming means NOT YET OVER: the end decides it where there is one.
+         * `startAt >= now` dropped a multi-day event from the member app on
+         * the morning of its first day. Pushed onto `$and` so it cannot
+         * collide with the targeting `$or` below.
+         */
         if (str(filters.upcoming) === 'true') {
-            query.startAt = { $gte: new Date() };
+            const now = new Date();
+            query.$and = [...(query.$and || []), {
+                $or: [
+                    { endAt: { $gte: now } },
+                    { endAt: null, startAt: { $gte: now } }
+                ]
+            }];
         }
 
         /*
