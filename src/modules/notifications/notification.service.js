@@ -259,6 +259,28 @@ class NotificationService {
             /* ------------------------------------------------------ the email */
             if (rendered.email && email) {
                 jobs.push((async() => {
+                    /*
+                     * A QR TICKET, when the email asks for one (`ticketQr` = the
+                     * address it opens): drawn here, embedded inline as
+                     * `cid:ticket-qr` inside the booking-ID stub. A failure to
+                     * draw it only drops the code, never the email.
+                     */
+                    const inlineImages = [];
+                    let highlight = rendered.email.highlight;
+                    if (rendered.email.ticketQr && highlight) {
+                        try {
+                            const QRCode = require('qrcode');
+                            const content = await QRCode.toBuffer(String(rendered.email.ticketQr), {
+                                type: 'png', width: 336, margin: 1, errorCorrectionLevel: 'M',
+                                color: { dark: '#000000', light: '#ffffff' }
+                            });
+                            inlineImages.push({ cid: 'ticket-qr', filename: 'ticket-qr.png', content });
+                            highlight = { ...highlight, qrSrc: 'cid:ticket-qr' };
+                        } catch (qrError) {
+                            logger.warn('Ticket QR not drawn', { event: eventName, error: qrError && qrError.message });
+                        }
+                    }
+
                     const html = emailService.buildHtmlTemplate({
                         title: rendered.email.title,
                         recipientName: ctx.name,
@@ -269,7 +291,7 @@ class NotificationService {
                         facts: rendered.email.facts,
                         tone: rendered.email.tone,
                         badge: rendered.email.badge,
-                        highlight: rendered.email.highlight,
+                        highlight,
                         poster: rendered.email.poster,
                         afterHtml: rendered.email.afterHtml,
                         contact
@@ -279,7 +301,8 @@ class NotificationService {
                         to: email,
                         subject: rendered.email.subject,
                         html,
-                        contact
+                        contact,
+                        inlineImages
                     });
 
                     result.channels.email = sent;

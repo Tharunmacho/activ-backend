@@ -1457,6 +1457,16 @@ class EventBookingService {
             // The start and end on their own, for a template that prints
             // "Time: {from} to {to}".
             startTimeLabel: startParts && !(startParts.midnight && !endParts) ? `${startParts.time} IST` : '',
+            /*
+             * REAL TIMES instead of "before the start": when to report at the
+             * desk (30 min early, in person) and when to join (5 min early,
+             * online). Empty for an event with no set time.
+             */
+            reportTimeLabel: startParts && !startParts.midnight
+                ? `${istParts(new Date(new Date(startAt).getTime() - 30 * 60000)).time} IST` : '',
+            joinTimeLabel: startParts && !startParts.midnight
+                ? `${istParts(new Date(new Date(startAt).getTime() - 5 * 60000)).time} IST` : '',
+            startClock: startParts && !startParts.midnight ? `${startParts.time} IST` : '',
             endTimeLabel: endParts ? `${endParts.time} IST` : '',
             bookerName: (b.bookedBy && b.bookedBy.name) || '',
             bookerPhone: (b.bookedBy && b.bookedBy.phone) || '',
@@ -1517,6 +1527,10 @@ class EventBookingService {
                 ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
                 : '',
             eventUrl: eventId ? appUrl(`/events/${publicId}`) : '',
+            // What the email's QR ticket opens: this booking, for check-in at the desk.
+            ticketUrl: eventId && b.bookingRef
+                ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
+                : '',
             bookedByLine: [b.bookedBy && b.bookedBy.name, b.bookedBy && b.bookedBy.phone]
                 .filter(Boolean).join(' · '),
             bookedOnLabel: b.createdAt

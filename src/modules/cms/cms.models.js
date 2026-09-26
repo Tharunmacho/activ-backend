@@ -1293,6 +1293,19 @@ const newsSettingsSchema = new mongoose.Schema({
 galleryItemSchema.index({ state: 1 });
 galleryItemSchema.index({ region: 1 });
 
+/*
+ * THE READABLE ADDRESS, `/gallery/<slug>` — see `events/eventSlug.js`. Written
+ * on the first save and never changed after, so a shared link survives a
+ * retitle; the id links keep working too. A scalar, so unique means one item.
+ */
+galleryItemSchema.add({ slug: { type: String, trim: true, lowercase: true } });
+galleryItemSchema.index({ slug: 1 }, { unique: true, sparse: true });
+galleryItemSchema.pre('save', async function assignGallerySlug() {
+    if (this.slug) return;
+    const { galleryBaseSlug, uniqueSlugFrom } = require('../events/eventSlug');
+    this.slug = await uniqueSlugFrom(this.constructor, this, galleryBaseSlug(this));
+});
+
 const contactSettingsSchema = new mongoose.Schema({
     key: singletonKey,
 

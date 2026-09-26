@@ -73,7 +73,40 @@ const resolveEventParam = async(req, res, next, value, name) => {
     }
 };
 
+/*
+ * GALLERY ITEMS get the same kind of address: `/gallery/activ-inked-mou-with-gem-2026-09-10`.
+ * The title, plus the item's date when the free-text `eventDate` reads as one.
+ * Same rules as an event: written once on create, never changed by an edit,
+ * and the old id links keep working.
+ */
+const galleryBaseSlug = (item = {}) => {
+    const d = item.eventDate ? new Date(item.eventDate) : null;
+    return [slugify(item.title) || 'gallery', d && !Number.isNaN(d.getTime()) ? datePart(d) : '']
+        .filter(Boolean).join('-');
+};
+
+/** The first free slug for a document, against its own model, from a base. */
+const uniqueSlugFrom = async(Model, doc = {}, base = '') => {
+    for (let n = 1; n < 500; n += 1) {
+        const candidate = n === 1 ? base : `${base}-${n}`;
+        const clash = await Model.exists({ slug: candidate, _id: { $ne: doc._id } });
+        if (!clash) return candidate;
+    }
+    return `${base}-${Date.now().toString(36)}`;
+};
+
+/** The id for a gallery link that may carry an id or a slug. */
+const resolveGalleryId = async(Model, idOrSlug) => {
+    const value = String(idOrSlug || '').trim();
+    if (!value || isObjectId(value)) return value;
+    const doc = await Model.findOne({ slug: value.toLowerCase() }).select('_id').lean().catch(() => null);
+    return doc ? String(doc._id) : value;
+};
+
 /** `/events/<slug>` when the event has one, `/events/<id>` otherwise. */
 const eventPath = (event = {}) => `/events/${encodeURIComponent(event.slug || String(event._id || event.id || ''))}`;
 
-module.exports = { slugify, baseSlug, uniqueSlug, resolveEventId, resolveEventParam, eventPath, isObjectId };
+module.exports = {
+    slugify, baseSlug, uniqueSlug, resolveEventId, resolveEventParam, eventPath, isObjectId,
+    galleryBaseSlug, uniqueSlugFrom, resolveGalleryId
+};

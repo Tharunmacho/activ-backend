@@ -157,7 +157,7 @@ class EmailService {
      * forgotten would turn a completed, terminal approval into a 500 the admin
      * retries against a status that refuses retries.
      */
-    async sendEmail({ to, subject, html, text, contact = null, replyTo = null, headers = {} }) {
+    async sendEmail({ to, subject, html, text, contact = null, replyTo = null, headers = {}, inlineImages = [] }) {
         const recipient = String(to || '').trim();
         if (!recipient) {
             return { success: false, error: 'Recipient email address is required' };
@@ -197,9 +197,26 @@ class EmailService {
                 text: text || this.htmlToText(html),
                 html,
                 headers,
-                attachments: EMBEDDED_LOGO && String(html || '').includes(`cid:${LOGO_CID}`)
-                    ? [{ filename: 'activ-logo.png', path: LOGO_PATH, cid: LOGO_CID, contentDisposition: 'inline' }]
-                    : undefined
+                /*
+                 * Inline images, referenced from the HTML as `cid:<id>`: the logo,
+                 * and any the caller hands over (a booking's QR ticket). Embedded
+                 * rather than linked: clients hide remote images, and Gmail strips
+                 * a data: URI outright.
+                 */
+                attachments: [
+                    ...(EMBEDDED_LOGO && String(html || '').includes(`cid:${LOGO_CID}`)
+                        ? [{ filename: 'activ-logo.png', path: LOGO_PATH, cid: LOGO_CID, contentDisposition: 'inline' }]
+                        : []),
+                    ...(Array.isArray(inlineImages) ? inlineImages : [])
+                        .filter((img) => img && img.cid && img.content && String(html || '').includes(`cid:${img.cid}`))
+                        .map((img) => ({
+                            filename: img.filename || `${img.cid}.png`,
+                            content: img.content,
+                            cid: img.cid,
+                            contentType: img.contentType || 'image/png',
+                            contentDisposition: 'inline'
+                        }))
+                ]
             });
 
             logger.info('Notification email sent', { ...envelope, messageId: info.messageId });
@@ -371,6 +388,10 @@ class EmailService {
                               color:${MUTED};">${esc(highlight.label || 'Reference')}</div>
                   <div style="${mono} font-size:28px; font-weight:700; letter-spacing:3px; color:${NAVY};
                               padding-top:8px; word-break:break-all;">${esc(highlight.value)}</div>
+                  ${highlight.qrSrc ? `
+                  <img src="${esc(highlight.qrSrc)}" width="168" height="168" alt="Your ticket QR code"
+                       style="display:block; margin:16px auto 0 auto; width:168px; height:168px;
+                              background-color:#ffffff; padding:8px; border:1px solid ${LINE}; border-radius:12px;" />` : ''}
                 </td></tr>
                 ${highlight.note ? `${tearHtml}
                 <tr><td align="center" style="padding:14px 20px 20px 20px; ${font} font-size:13px;

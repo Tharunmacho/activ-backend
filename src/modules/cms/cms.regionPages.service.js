@@ -1547,6 +1547,8 @@ module.exports = {
         return {
             items: (rows || []).map((row) => ({
                 id: String(row._id),
+                // The readable gallery address (events/eventSlug.js).
+                slug: row.slug || '',
                 title: row.title || '',
                 caption: row.caption || '',
                 category: row.category || '',

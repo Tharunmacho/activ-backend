@@ -1653,7 +1653,9 @@ class CmsService {
      * how the list behaves — an editor checking a link before publishing should
      * not have to make the image live to do it.
      */
-    async getGalleryItem(id, { includeHidden = false } = {}) {
+    async getGalleryItem(idOrSlug, { includeHidden = false } = {}) {
+        // `/gallery/<slug>` and `/gallery/<id>` are the same item (eventSlug.js).
+        const id = await require('../events/eventSlug').resolveGalleryId(GalleryItem, idOrSlug);
         // Checked here rather than left to Mongoose: a malformed id makes
         // `findById` throw a CastError, which surfaces as a 500 on what is
         // really a visitor following a stale link.

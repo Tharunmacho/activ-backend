@@ -327,12 +327,12 @@ module.exports = {
                  * the approved poster template, so nothing is lost; the day it is
                  * approved it becomes the only one sent, with no redeploy.
                  */
-                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v3',
-                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v3',
-                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || 'activ_booking_cancelled_v2',
-                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v3',
+                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v4',
+                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v4',
+                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || 'activ_booking_cancelled_v3',
+                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v4',
                 // A participant's seat, booked for them by somebody else (names the booker).
-                bookingParticipant: real(process.env.BOTBEE_TPL_BOOKING_PARTICIPANT) || 'activ_participant_seat_v1',
+                bookingParticipant: real(process.env.BOTBEE_TPL_BOOKING_PARTICIPANT) || 'activ_participant_seat_v2',
                 /*
                  * Two ALREADY-APPROVED templates on the account, both with the
                  * event poster as an image header and the association's full

@@ -89,15 +89,9 @@ const noteLinesOf = (ctx = {}) => String(ctx.attendeeNote || '')
  */
 const beforeYouComeHtml = (ctx = {}) => {
     const notes = noteLinesOf(ctx);
-    const standing = ctx.isOnline
-        ? [
-            'Join 5–10 minutes early to check your audio and video.',
-            'A laptop or phone with a stable connection works best.'
-        ]
-        : [
-            'Arrive 15–30 minutes early for registration.',
-            'Carry a photo ID for each participant.'
-        ];
+    // The same timed advice WhatsApp gives, so the two channels never disagree.
+    const standing = standingTips(ctx).map((t) => `${t}.`);
+    if (!ctx.isOnline) standing.push('Show the QR code above at the registration desk for quick check-in.');
     if (ctx.settledVia && ctx.settledVia !== 'free') {
         standing.push('Fees are non-refundable; participant names can be changed.');
     }
@@ -138,14 +132,16 @@ const beforeYouComeHtml = (ctx = {}) => {
  * `fallback` is retried once by `notification.service` if the detailed send
  * fails (still in review, renamed), so the booker hears something either way.
  */
-const bookingWhatsApp = (dedicatedName, dedicatedParams, eventParams, poster = '') => (dedicatedName
-    ? {
-        template: dedicatedName,
-        params: dedicatedParams,
-        headerImage: poster || DEFAULT_WHATSAPP_POSTER(),
-        fallback: { template: TPL.event, params: eventParams }
-    }
-    : { template: TPL.event, params: eventParams });
+const bookingWhatsApp = (dedicatedName, dedicatedParams, eventParams, poster = '') => {
+    const generic = { template: TPL.event, params: eventParams };
+    if (!dedicatedName) return generic;
+    const image = poster || DEFAULT_WHATSAPP_POSTER();
+    // The version before it (see PREVIOUS), same values, then the generic notice.
+    const previous = PREVIOUS[dedicatedName]
+        ? { template: PREVIOUS[dedicatedName], params: dedicatedParams, headerImage: image, fallback: generic }
+        : generic;
+    return { template: dedicatedName, params: dedicatedParams, headerImage: image, fallback: previous };
+};
 
 /** The association, as it signs a message — never "ACTIV Platform". */
 const ORG_SIGNATURE = 'Adidravidar Confederation of Trade & Industrial Vision (ACTIV)';
@@ -174,6 +170,10 @@ const prettyPhone = (value) => {
     const m = raw.replace(/[\s-]/g, '').match(/^(?:\+?91)?(\d{5})(\d{5})$/);
     return m ? `+91 ${m[1]} ${m[2]}` : raw;
 };
+
+/** "Rajesh · +91 82201 12188 · events@activ.org.in" — only what the organiser gave, phone tidied. */
+const organiserLine = (ctx = {}) => [oneLine(ctx.contactName, 80), prettyPhone(ctx.contactPhone), oneLine(ctx.contactEmail, 120)]
+    .filter(Boolean).join(' · ') || ctx.contactLine || '';
 
 /** The organiser, as three separate values — name, phone, email — each on its own line. */
 const contactParts = (ctx = {}) => [
@@ -206,6 +206,11 @@ const onlineLinkKind = (url) => {
     return 'join';
 };
 
+/** "join at 2:55 PM IST, 5 minutes before the 3:00 PM IST start" — a real time, never just "the start". */
+const joinWhen = (ctx = {}) => (ctx.joinTimeLabel && ctx.startClock
+    ? `join at ${ctx.joinTimeLabel}, 5 minutes before the ${ctx.startClock} start`
+    : 'join 5 minutes before the webinar begins');
+
 /** The three pieces of the webinar message that depend on the link kind. */
 const webinarLinkLines = (ctx = {}) => {
     const platform = ctx.onlinePlatform || 'webinar';
@@ -215,14 +220,14 @@ const webinarLinkLines = (ctx = {}) => {
             `Final step: complete your ${platform} registration`,
             ctx.registerUrl,
             'As soon as you submit that form, your personal joining link appears on the screen. '
-                + 'Save it, and join 5-10 minutes before the start'
+                + `Save it, and ${joinWhen(ctx)}`
         ];
     }
     if (kind === 'join') {
         return [
             `Your ${platform} joining link`,
             ctx.registerUrl,
-            'Tap the link 5-10 minutes before the start to check your audio and video. Please keep it to yourself'
+            `Tap the link to ${joinWhen(ctx)}, and check your audio and video. Please keep it to yourself`
         ];
     }
     return [
@@ -277,6 +282,21 @@ const V2 = {
     reminder: 'activ_booking_reminder_v2'
 };
 
+/*
+ * THE VERSION BEFORE EACH ONE, same variables, different fixed wording (the
+ * `_v4` set drops the "Jaibhim" greeting). While a new version is in Meta
+ * review, Meta refuses it and the SAME values go out on the approved version
+ * before it, so a booking is never left without its detailed message.
+ */
+const PREVIOUS = {
+    activ_webinar_registration_v4: 'activ_webinar_registration_v3',
+    activ_event_booking_v4: 'activ_event_booking_v3',
+    activ_booking_reminder_v4: 'activ_booking_reminder_v3',
+    activ_participant_seat_v2: 'activ_participant_seat_v1',
+    activ_booking_cancelled_v3: 'activ_booking_cancelled_v2'
+};
+const withPrevious = (steps) => steps.flatMap((s) => (PREVIOUS[s.template] ? [s, { ...s, template: PREVIOUS[s.template] }] : [s]));
+
 const customTemplates = (kind, ctx = {}) => {
     const title = clause(ctx.eventTitle, 120) || 'the event';
     const date = orDash(ctx.dateLabel, 'Date to be confirmed');
@@ -300,7 +320,7 @@ const customTemplates = (kind, ctx = {}) => {
                     orDash(whereLine(ctx)), label, orDash(plink, 'See your email'), ref, tip1, tip2, cName, cPhone, cEmail]
             });
         }
-        return [...steps, ...customTemplates('confirmed', ctx)];
+        return [...withPrevious(steps), ...customTemplates('confirmed', ctx)];
     }
 
     if (kind === 'confirmed' && ctx.isOnline) {
@@ -350,7 +370,7 @@ const customTemplates = (kind, ctx = {}) => {
                 orDash(link, 'See your booking email'), ref, `${tip1}; ${tip2}`, orgLine]
         });
     }
-    return steps.filter((s) => s.template);
+    return withPrevious(steps.filter((s) => s.template));
 };
 
 /**
@@ -450,6 +470,8 @@ const feeLine = (ctx = {}, rupee = '₹') => {
 const bookingFacts = (ctx = {}, { payment = true, seatsLabel = 'Seats' } = {}) => [
     { label: 'Date', value: ctx.dateLabel },
     { label: 'Time', value: ctx.timeLabel },
+    // When to be at the desk — a real clock time, not "before the start".
+    { label: 'Reporting time', value: !ctx.isOnline && ctx.reportTimeLabel ? `${ctx.reportTimeLabel} (30 minutes early, for registration)` : '' },
     { label: 'Format', value: ctx.formatLabel },
     ctx.isOnline
         ? { label: 'Registration link', value: ctx.registerUrl || (ctx.kind === 'confirmed' || ctx.kind === 'reminder'
@@ -460,7 +482,7 @@ const bookingFacts = (ctx = {}, { payment = true, seatsLabel = 'Seats' } = {}) =
     { label: seatsLabel, value: seatsLine(ctx) },
     // ONE row for the money: "Free", or "₹500 · Paid online".
     ...(payment ? [{ label: ctx.settledVia === 'free' ? 'Entry' : 'Fee', value: feeLine(ctx) }] : []),
-    { label: 'Organiser', value: ctx.contactLine }
+    { label: 'Organiser', value: organiserLine(ctx) }
 ];
 
 /** The one sentence about money in a confirmation — none for a free event. */
@@ -484,8 +506,18 @@ const whereLine = (ctx = {}) => (ctx.isOnline
 
 /** The standing advice, worded for a webinar or for a hall. */
 const standingTips = (ctx = {}) => (ctx.isOnline
-    ? ['Join 5 to 10 minutes before the start to check your audio and video', 'Use a laptop or phone with a stable internet connection']
-    : ['Please arrive 15 to 30 minutes before the start time for registration', 'Carry a valid photo ID for each participant']);
+    ? [
+        ctx.joinTimeLabel && ctx.startClock
+            ? `Join by ${ctx.joinTimeLabel} (the webinar starts at ${ctx.startClock}) to check your audio and video`
+            : 'Join 5 minutes before the webinar begins to check your audio and video',
+        'Use a laptop or phone with a stable internet connection'
+    ]
+    : [
+        ctx.reportTimeLabel && ctx.startClock
+            ? `Please report by ${ctx.reportTimeLabel} for registration; the programme starts at ${ctx.startClock}`
+            : 'Please arrive 30 minutes before the programme begins, for registration',
+        'Carry this booking (on your phone or printed) and a valid government-issued photo ID'
+    ]);
 
 /**
  * The written-out WhatsApp message (session window / text fallback) for a
@@ -499,7 +531,7 @@ const bookingText = (ctx = {}, { heading, lead, closing }) => {
     const [linkHead, link, linkHow] = online ? webinarLinkLines(ctx) : ['', '', ''];
     const [cName, cPhone, cEmail] = contactParts(ctx);
     return `${heading}\n\n`
-        + `Dear ${greetName(ctx)}, Jaibhim! 🙏\n${lead}\n\n`
+        + `Dear ${greetName(ctx)},\n${lead}\n\n`
         + waLines([
             ['🗓', ctx.dateLabel],
             ['⏰', ctx.timeLabel],
@@ -958,8 +990,12 @@ const TEMPLATES = {
                 highlight: {
                     label: 'Booking ID',
                     value: ctx.bookingRef,
-                    note: online ? 'Keep this for any question about your registration.' : 'Show this at the registration desk.'
+                    note: online
+                        ? 'Keep this booking ID for any question about your registration.'
+                        : 'Show this QR code or booking ID at the registration desk.'
                 },
+                // The QR ticket drawn into the stub (notification.service): opens this booking.
+                ticketQr: ctx.ticketUrl,
                 bodyHtml: online
                     ? `<p style="margin:0;">Thank you for registering for our webinar.${settledSentence(ctx)}</p>`
                         + (ctx.registerUrl
@@ -1023,7 +1059,7 @@ const TEMPLATES = {
                         { label: 'Amount', value: ctx.amountLabel },
                         { label: 'Payment', value: ctx.paymentLabel }
                     ]),
-                    { label: 'Organiser', value: ctx.contactLine }
+                    { label: 'Organiser', value: organiserLine(ctx) }
                 ]
             },
             whatsapp: {
@@ -1114,8 +1150,12 @@ const TEMPLATES = {
                 highlight: {
                     label: 'Booking ID',
                     value: ctx.bookingRef,
-                    note: online ? 'Keep this for any question about your registration.' : 'Show this at the registration desk.'
+                    note: online
+                        ? 'Keep this booking ID for any question about your registration.'
+                        : 'Show this QR code or booking ID at the registration desk.'
                 },
+                // The QR ticket drawn into the stub (notification.service): opens this booking.
+                ticketQr: ctx.ticketUrl,
                 bodyHtml: online
                     ? `<p style="margin:0;">${ctx.registerUrl
                         ? 'Your place is reserved. Not registered on the platform yet? Do it now with the button below —'
@@ -1168,8 +1208,11 @@ const TEMPLATES = {
                 highlight: {
                     label: 'Booking ID',
                     value: ctx.bookingRef,
-                    note: online ? 'Keep this for any question about your seat.' : 'Show this at the registration desk.'
+                    note: online
+                        ? 'Keep this booking ID for any question about your seat.'
+                        : 'Show this QR code or booking ID at the registration desk.'
                 },
+                ticketQr: ctx.ticketUrl,
                 bodyHtml: `<p style="margin:0;"><strong>${esc(booker)}</strong> has reserved a seat for you at this `
                     + `${online ? 'webinar' : 'event'}. Everything you need is below.</p>`
                     + (online && ctx.registerUrl
@@ -1582,6 +1625,21 @@ const WHATSAPP_TEMPLATES = [
         samples: ['Rajeshwari', 'Annual Industrial Expo', '15 August 2026']
     }
 ];
+
+/*
+ * THE CURRENT SET (`PREVIOUS` keys): each is its predecessor with a plain
+ * "Dear *name*," greeting and nothing else changed, derived here so the two
+ * can never drift — same variables, same order, same layout. Listed first, so
+ * `scripts/whatsapp-booking-templates.js` shows the live ones on top.
+ */
+WHATSAPP_TEMPLATES.unshift(...Object.entries(PREVIOUS).map(([next, prev]) => {
+    const base = WHATSAPP_TEMPLATES.find((t) => t.name === prev);
+    return base && {
+        ...base,
+        name: next,
+        bodyWithVariables: base.bodyWithVariables.replace('Dear *{{1}}*, Jaibhim! 🙏', 'Dear *{{1}}*,')
+    };
+}).filter(Boolean));
 
 /**
  * The template used when the one an event asks for is not on the account.

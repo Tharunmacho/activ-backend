@@ -191,7 +191,18 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
      */
     const orderId = 'ord_' + require('crypto').randomBytes(16).toString('hex');
 
-    const returnUrl = `${process.env.FRONTEND_URL}/payment-success`
+    /*
+     * BACK TO THE SITE THEY PAID FROM. The request's own Origin, when it is
+     * one this API already trusts (CORS_ORIGIN), else FRONTEND_URL. Always
+     * using FRONTEND_URL sent someone paying on a local or staging site to the
+     * live one after Instamojo — a 404 whenever that site was down, and a
+     * payment whose confirmation page they never saw.
+     */
+    const trusted = (require('../../config').cors.origin || []).map((o) => String(o).trim().replace(/\/+$/, ''));
+    const origin = String(req.headers.origin || '').trim().replace(/\/+$/, '');
+    const siteBase = (origin && trusted.includes(origin)) ? origin : String(process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+
+    const returnUrl = `${siteBase}/payment-success`
         + `?orderId=${encodeURIComponent(orderId)}`;
 
     const paymentData = {
