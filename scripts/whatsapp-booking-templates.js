@@ -59,6 +59,43 @@ const uploadSampleImage = async() => {
     return imageHandle;
 };
 
+/** A one-page sample PDF for the DOCUMENT-header review, built in memory. */
+let pdfHandle = '';
+const uploadSamplePdf = async() => {
+    if (pdfHandle) return pdfHandle;
+    const text = 'BT /F1 24 Tf 72 720 Td (ACTIV event agenda) Tj ET';
+    const objs = [
+        '<< /Type /Catalog /Pages 2 0 R >>',
+        '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+        `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
+        '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+    ];
+    let pdf = '%PDF-1.4\n';
+    const offsets = [];
+    objs.forEach((o, i) => { offsets.push(pdf.length); pdf += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`
+        + offsets.map((n) => `${String(n).padStart(10, '0')} 00000 n \n`).join('')
+        + `trailer << /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    const bytes = Buffer.from(pdf, 'latin1');
+
+    const dbg = await axios.get(`${base}/${version}/debug_token`, {
+        params: { input_token: token }, headers: { Authorization: `Bearer ${token}` }, timeout: 20000
+    });
+    const session = await axios.post(`${base}/${version}/${dbg.data.data.app_id}/uploads`, null, {
+        params: { file_length: bytes.length, file_type: 'application/pdf', file_name: 'activ-agenda-sample.pdf' },
+        headers: { Authorization: `Bearer ${token}` }, timeout: 20000
+    });
+    const up = await axios.post(`${base}/${version}/${session.data.id}`, bytes, {
+        headers: { Authorization: `OAuth ${token}`, file_offset: '0', 'Content-Type': 'application/octet-stream' },
+        timeout: 60000
+    });
+    pdfHandle = up.data.h;
+    console.log('Sample PDF uploaded.');
+    return pdfHandle;
+};
+
 const payloadFor = (t) => ({
     name: t.name,
     language,
@@ -73,6 +110,10 @@ const payloadFor = (t) => ({
          */
         ...(t.header === 'IMAGE' && imageHandle
             ? [{ type: 'HEADER', format: 'IMAGE', example: { header_handle: [imageHandle] } }]
+            : []),
+        // A document template (the event agenda) reviews against a sample PDF.
+        ...(t.header === 'DOCUMENT' && pdfHandle
+            ? [{ type: 'HEADER', format: 'DOCUMENT', example: { header_handle: [pdfHandle] } }]
             : []),
         {
             type: 'BODY',
@@ -125,6 +166,7 @@ const need = () => {
 
     need();
     await uploadSampleImage();
+    if (booking.some((t) => t.header === 'DOCUMENT')) await uploadSamplePdf();
     for (const t of booking) {
         try {
             const res = await axios.post(`${base}/${version}/${waba}/message_templates`, payloadFor(t), {

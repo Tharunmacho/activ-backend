@@ -446,6 +446,25 @@ const eventSchema = new mongoose.Schema({
     },
 
     /*
+     * THE EVENT'S FILES AND VIDEO — an agenda PDF, a brochure, slides, and a
+     * YouTube link. Shown on the event page, linked (and small files attached)
+     * in the booking email, and each document sent as a WhatsApp document
+     * message after the confirmation. `url` is the site-relative `/uploads/…`
+     * path the CMS uploader returns.
+     */
+    attachments: {
+        type: [{
+            _id: false,
+            name: { type: String, trim: true, default: '' },
+            url: { type: String, trim: true, default: '' },
+            type: { type: String, trim: true, default: '' },
+            size: { type: Number, default: 0 }
+        }],
+        default: []
+    },
+    videoUrl: { type: String, trim: true, default: '' },
+
+    /*
      * ======================================================================
      * RIDES THE HOME PAGE BANNER (the slideshow at the top of the site)
      * ======================================================================

@@ -157,7 +157,7 @@ class EmailService {
      * forgotten would turn a completed, terminal approval into a 500 the admin
      * retries against a status that refuses retries.
      */
-    async sendEmail({ to, subject, html, text, contact = null, replyTo = null, headers = {}, inlineImages = [] }) {
+    async sendEmail({ to, subject, html, text, contact = null, replyTo = null, headers = {}, inlineImages = [], files = [] }) {
         const recipient = String(to || '').trim();
         if (!recipient) {
             return { success: false, error: 'Recipient email address is required' };
@@ -215,7 +215,12 @@ class EmailService {
                             cid: img.cid,
                             contentType: img.contentType || 'image/png',
                             contentDisposition: 'inline'
-                        }))
+                        })),
+                    /* Ordinary attachments (an event's agenda PDF …): `path` is a
+                       URL the mailer downloads while composing. */
+                    ...(Array.isArray(files) ? files : [])
+                        .filter((file) => file && file.path)
+                        .map((file) => ({ filename: file.filename || 'document', path: file.path, contentType: file.contentType }))
                 ]
             });
 

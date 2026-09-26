@@ -131,7 +131,25 @@ class AuthService {
         ]);
 
         if (existingMember || existingAuth) {
-            throw ApiError.conflict('Email already registered');
+            const err = ApiError.conflict('Email already registered');
+            err.fields = { email: 'This email is already registered. Please sign in instead.' };
+            throw err;
+        }
+
+        /*
+         * ONE ACCOUNT PER MOBILE NUMBER, as per email. Compared on the last ten
+         * digits so "+91 90923 17264", "919092317264" and "9092317264" are one
+         * number whichever way it was typed or stored.
+         */
+        const phoneDigits = String(userData.phoneNumber || '').replace(/\D/g, '').slice(-10);
+        if (phoneDigits.length === 10) {
+            const anyFormat = new RegExp(`${phoneDigits.split('').join('\\D*')}$`);
+            const samePhone = await MemberDetails.findOne({ phoneNumber: anyFormat }).select('_id').lean();
+            if (samePhone) {
+                const err = ApiError.conflict('Mobile number already registered');
+                err.fields = { phoneNumber: 'This mobile number is already registered. Please sign in instead.' };
+                throw err;
+            }
         }
 
         // An applicant may only register into a region that has an active admin

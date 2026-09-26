@@ -87,7 +87,42 @@ const noteLinesOf = (ctx = {}) => String(ctx.attendeeNote || '')
  * the END of the email (`afterHtml`), after the details and the buttons: it is
  * read once the reader knows what they booked, not before.
  */
-const beforeYouComeHtml = (ctx = {}) => {
+/** "Agenda.pdf · 240 KB" */
+const fileSizeLabel = (bytes) => {
+    const n = Number(bytes) || 0;
+    if (!n) return '';
+    return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+};
+
+/** The event's documents, each a download link, and its video — for the email. */
+const documentsHtml = (ctx = {}) => {
+    const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];
+    if (!files.length && !ctx.videoUrl) return '';
+    const row = (icon, label, url, note) => `<tr>
+        <td width="30" valign="top" style="width:30px; padding:0 0 10px 0; font-size:17px;">${icon}</td>
+        <td valign="top" style="padding:0 0 10px 0; font-size:14px; line-height:1.5;">
+          <a href="${esc(url)}" target="_blank" style="color:#1d4ed8; font-weight:700; text-decoration:underline;">${esc(label)}</a>
+          ${note ? `<span style="color:#64748b;"> · ${esc(note)}</span>` : ''}</td></tr>`;
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                   style="background-color:#ffffff; border:1px solid #dbe4fb; border-radius:14px; border-collapse:separate; margin-bottom:16px;">
+        <tr><td style="padding:18px 20px 8px 20px;">
+          <div style="font-size:12px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:#1d4ed8; padding-bottom:10px;">
+            Event documents${ctx.videoUrl ? ' &amp; video' : ''}</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            ${files.map((a) => row('📎', a.name, a.url, fileSizeLabel(a.size) + (EMAIL_ATTACH_OK(a) ? ' · also attached' : ''))).join('')}
+            ${ctx.videoUrl ? row('🎥', 'Watch the event video', ctx.videoUrl, '') : ''}
+          </table>
+        </td></tr></table>`;
+};
+
+/** Files small enough to ride on the email itself (the rest are linked). */
+const EMAIL_ATTACH_OK = (a) => (Number(a && a.size) || 0) > 0 && Number(a.size) <= 8 * 1024 * 1024;
+const emailFiles = (ctx = {}) => (Array.isArray(ctx.attachments) ? ctx.attachments : [])
+    .filter(EMAIL_ATTACH_OK).slice(0, 3)
+    .map((a) => ({ filename: a.name, path: a.url, contentType: a.type || undefined }));
+
+const beforeYouComeHtml = (ctx = {}) => documentsHtml(ctx) + beforeYouComeInner(ctx);
+const beforeYouComeInner = (ctx = {}) => {
     const notes = noteLinesOf(ctx);
     // The same timed advice WhatsApp gives, so the two channels never disagree.
     const standing = standingTips(ctx).map((t) => `${t}.`);
@@ -187,7 +222,9 @@ const tipPair = (ctx = {}) => {
     const notes = noteLinesOf(ctx).map((n) => clause(n, 180));
     const standing = standingTips(ctx);
     const list = [...notes, ...standing].filter(Boolean);
-    return [list[0] || standing[0], notes.length > 1 ? notes.slice(1).join('; ') : (list[1] || standing[1])];
+    const second = notes.length > 1 ? notes.slice(1).join('; ') : (list[1] || standing[1]);
+    // An event video is worth more than a standing tip: it takes the second point.
+    return [list[0] || standing[0], ctx.videoUrl ? `Watch the event video: ${ctx.videoUrl}` : second];
 };
 
 /**
@@ -329,7 +366,8 @@ const customTemplates = (kind, ctx = {}) => {
             steps.push({
                 template: TPL.bookingWebinar,
                 params: [greetName(ctx), title, date, time, orDash(ctx.onlinePlatform, 'Online'), ref,
-                    head, orDash(link), orDash(how), cName, cPhone, cEmail]
+                    head, orDash(link), orDash(ctx.videoUrl ? `${how}. Watch the event video: ${ctx.videoUrl}` : how),
+                    cName, cPhone, cEmail]
             });
         }
         steps.push({
@@ -1321,6 +1359,23 @@ const TEMPLATES = {
  */
 const WHATSAPP_TEMPLATES = [
     {
+        /* One event DOCUMENT (agenda PDF …) as a real WhatsApp file, sent after the confirmation. */
+        name: 'activ_event_document_v1',
+        envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
+        category: 'Utility',
+        meta: true,
+        header: 'DOCUMENT',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*,\n\n'
+            + '📎 Here is *{{2}}* for *{{3}}*.\n\n'
+            + '🗓 *When:* {{4}}\n'
+            + '🔖 *Booking ID:* {{5}}\n\n'
+            + 'Please keep it handy for the event.',
+        params: ['name', 'document name', 'event', 'date & time', 'booking ID'],
+        samples: ['Tharun', 'Agenda.pdf', 'SCST Economic Liberty Conference', 'Saturday, 10 October 2026, 9:00 AM IST', 'ACTIVB-MUEE9IBU-445B']
+    },
+    {
         /* A PARTICIPANT, booked for by somebody else. Names the booker; shows their seat, never the fee. */
         name: 'activ_participant_seat_v1',
         envKey: 'BOTBEE_TPL_BOOKING_PARTICIPANT',
@@ -1673,10 +1728,20 @@ const FALLBACK_TEMPLATE = {
 };
 
 /** Render one event. Returns `null` for a name with no template. */
+const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER'];
 const render = (eventName, ctx = {}) => {
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
-    return builder(ctx);
+    const out = builder(ctx);
+    if (out && WITH_DOCUMENTS.includes(eventName)) {
+        if (out.email) out.email.fileAttachments = emailFiles(ctx);
+        const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];
+        if (out.whatsapp && out.whatsapp.text && files.length) {
+            out.whatsapp.text = out.whatsapp.text.replace(/\n\n(See you|We look forward|See you there)/,
+                `\n\n📎 *Event documents*\n${files.map((a) => `• ${a.name}: ${a.url}`).join('\n')}\n\n$1`);
+        }
+    }
+    return out;
 };
 
 module.exports = { TEMPLATES, WHATSAPP_TEMPLATES, FALLBACK_TEMPLATE, render, appUrl, oneLine, clause };

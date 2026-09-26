@@ -82,6 +82,18 @@ const uploadMedia = asyncHandler(async(req, res) => {
     }, 'Uploaded'));
 });
 
+/** An event document (agenda, brochure …) — see `attachmentUpload` in cms.routes. */
+const uploadAttachment = asyncHandler(async(req, res) => {
+    if (!req.file) return res.status(400).json(ApiResponse.error('No file uploaded', 400));
+    res.status(201).json(ApiResponse.created({
+        url: `/uploads/${req.file.filename}`,
+        // The name the editor gave the file, which is what a reader recognises.
+        name: String(req.file.originalname || req.file.filename).slice(0, 160),
+        type: req.file.mimetype || '',
+        size: req.file.size,
+    }, 'Uploaded'));
+});
+
 // ---------------------------------------------------------------- about
 
 const getAbout = asyncHandler(async(req, res) => {
@@ -634,7 +646,7 @@ module.exports = {
     getSiteSettings, updateSiteSettings,
     getEventsSettings, updateEventsSettings,
     getGallerySettings, updateGallerySettings,
-    getHome, updateHome, uploadMedia,
+    getHome, updateHome, uploadMedia, uploadAttachment,
     getAbout, updateAbout,
     getGallery, getGalleryItem, addGalleryItem, updateGalleryItem, deleteGalleryItem,
     getContactInfo, updateContactInfo,

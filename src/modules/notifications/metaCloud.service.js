@@ -130,7 +130,19 @@ class MetaCloudService {
          * The caller decides both by naming `headerImage` only for the
          * poster templates (see `bookingWhatsApp`).
          */
-        if (options && options.headerImage) {
+        if (options && options.headerDocument && options.headerDocument.link) {
+            // A DOCUMENT-header template (an event's agenda PDF): the file itself.
+            components.push({
+                type: 'header',
+                parameters: [{
+                    type: 'document',
+                    document: {
+                        link: String(options.headerDocument.link),
+                        filename: String(options.headerDocument.filename || 'document').slice(0, 240)
+                    }
+                }]
+            });
+        } else if (options && options.headerImage) {
             components.push({
                 type: 'header',
                 parameters: [{ type: 'image', image: { link: String(options.headerImage) } }]

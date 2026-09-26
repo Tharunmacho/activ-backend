@@ -109,6 +109,8 @@ const pickEventDetail = (event = {}) => ({
     showOnHome: event.showOnHome !== false,
     // The QR card on the event page. See the schema.
     showQrOnPage: event.showQrOnPage !== false,
+    attachments: Array.isArray(event.attachments) ? event.attachments : [],
+    videoUrl: event.videoUrl || '',
     /*
      * The home page BANNER, and the words over this event there — the
      * gallery's own banner fields, on an event. See the schema.
@@ -156,6 +158,22 @@ const eventDetailUpdates = (payload = {}) => {
     if (payload.agenda !== undefined) update.agenda = sanitizeAgenda(parseArray(payload.agenda));
     if (payload.days !== undefined) update.days = sanitizeDays(parseArray(payload.days));
     if (payload.speakers !== undefined) update.speakers = sanitizeSpeakers(parseArray(payload.speakers));
+    // Event documents (agenda PDF …) and the video link — see the schema.
+    if (payload.attachments !== undefined) {
+        update.attachments = parseArray(payload.attachments)
+            .filter((a) => a && typeof a === 'object' && /^(\/uploads\/|https?:\/\/)/.test(String(a.url || '')))
+            .slice(0, 10)
+            .map((a) => ({
+                name: String(a.name || '').trim().slice(0, 160) || 'Document',
+                url: String(a.url).trim().slice(0, 500),
+                type: String(a.type || '').trim().slice(0, 120),
+                size: Math.max(0, Number(a.size) || 0)
+            }));
+    }
+    if (payload.videoUrl !== undefined) {
+        const v = String(payload.videoUrl || '').trim();
+        update.videoUrl = /^https?:\/\//i.test(v) ? v.slice(0, 500) : '';
+    }
     if (payload.reminderOffsetsHours !== undefined) {
         update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));
     }

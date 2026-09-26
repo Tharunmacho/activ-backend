@@ -42,6 +42,32 @@ router.post(
 // GET so the reset page can check the link before rendering its form.
 router.get('/reset-password/verify', authLimiter, authController.verifyResetToken);
 
+/*
+ * POST /auth/check-availability { email, phoneNumber } -> { email: taken?, phoneNumber: taken? }
+ *
+ * Registration step 1 asks before moving on, so "already registered" appears
+ * under the box it belongs to instead of after the region step. Only booleans
+ * come back; rate-limited like sign-in.
+ */
+router.post('/check-availability', authLimiter, async(req, res, next) => {
+    try {
+        const MemberDetails = require('../members/memberdetails.model');
+        const MemberAuth = require('./auth.model');
+        const email = String((req.body && req.body.email) || '').toLowerCase().trim();
+        const digits = String((req.body && req.body.phoneNumber) || '').replace(/\D/g, '').slice(-10);
+        const [inDetails, inAuth, byPhone] = await Promise.all([
+            email ? MemberDetails.exists({ email }) : null,
+            email ? MemberAuth.exists({ email }) : null,
+            digits.length === 10
+                ? MemberDetails.exists({ phoneNumber: new RegExp(`${digits.split('').join('\\D*')}$`) })
+                : null
+        ]);
+        res.json({ success: true, data: { email: !!(inDetails || inAuth), phoneNumber: !!byPhone } });
+    } catch (error) {
+        next(error);
+    }
+});
+
 router.post(
     '/reset-password',
     authLimiter,

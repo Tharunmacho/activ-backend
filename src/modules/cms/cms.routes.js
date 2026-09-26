@@ -229,6 +229,28 @@ router.put('/events/:id', ...eventEditors, upload.single('image'), controller.up
 router.delete('/events/:id', ...eventEditors, controller.deleteEvent);
 router.put('/events-settings', ...eventEditors, controller.updateEventsSettings);
 router.post('/media', ...eventEditors, mediaUpload.single('file'), controller.uploadMedia);
+/*
+ * An EVENT DOCUMENT — agenda, brochure, slides, form: any common office,
+ * PDF, text, image or archive file up to 20 MB (the practical ceiling for an
+ * email attachment). Its own uploader so the image-and-video rule above stays
+ * as strict as it is for banners.
+ */
+const DOCUMENT_TYPES = /^(application\/(pdf|msword|vnd\.openxmlformats-officedocument\.[a-z.]+|vnd\.ms-(excel|powerpoint)|vnd\.oasis\.opendocument\.[a-z.]+|zip|x-zip-compressed|rtf)|text\/(plain|csv)|image\/)/i;
+const attachmentUpload = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => cb(null, uploadsDir),
+        filename: (req, file, cb) => {
+            const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+            cb(null, `doc-${unique}${path.extname(file.originalname) || ''}`);
+        },
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        const ok = DOCUMENT_TYPES.test(file.mimetype || '');
+        cb(ok ? null : new Error('That file type cannot be attached. Use PDF, Word, Excel, PowerPoint, text, image or ZIP.'), ok);
+    },
+});
+router.post('/attachments', ...eventEditors, attachmentUpload.single('file'), controller.uploadAttachment);
 
 /*
  * THE GALLERY, THE NEWSROOM AND THE SCHEMES — open to the events admin too,

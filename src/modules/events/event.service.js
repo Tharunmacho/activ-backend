@@ -270,6 +270,8 @@ const toEvent = (doc = {}, extras = {}) => ({
      */
     showOnHome: doc.showOnHome !== false,
     showQrOnPage: doc.showQrOnPage !== false,
+    attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+    videoUrl: doc.videoUrl || '',
     /*
      * The home page BANNER switch and its words — here for the reason
      * `showOnHome` is: the CMS lists map through this function, and a field

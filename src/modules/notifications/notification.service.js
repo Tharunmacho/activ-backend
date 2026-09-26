@@ -302,7 +302,8 @@ class NotificationService {
                         subject: rendered.email.subject,
                         html,
                         contact,
-                        inlineImages
+                        inlineImages,
+                        files: rendered.email.fileAttachments || []
                     });
 
                     result.channels.email = sent;

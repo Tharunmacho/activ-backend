@@ -458,8 +458,16 @@ const toBooking = (doc = {}, joining = null) => ({
  * absolute is returned as it is.
  */
 const absoluteMediaUrl = (value) => {
-    const raw = String(value || '').trim();
+    let raw = String(value || '').trim();
     if (!raw) return '';
+    /*
+     * An upload stored on a RETIRED deployment's host (the temporary
+     * `*.sslip.io` backend) is re-anchored on the current one: the file lives
+     * on under the same `/uploads/` name, the old host answers 404, and Meta
+     * drops a WhatsApp template whose header image it cannot fetch.
+     */
+    const i = raw.indexOf('/uploads/');
+    if (i > 0 && /^https?:\/\/[^/]*\.sslip\.io\//i.test(raw)) raw = raw.slice(i);
     if (/^https?:\/\//i.test(raw)) return raw;
     const base = String(require('../../config').backendUrl || '').replace(/\/+$/, '');
     if (!base || /localhost|127\.0\.0\.1/.test(base)) return '';
@@ -784,6 +792,64 @@ class EventBookingService {
      * the price or relaxes a check, because a member is not more trusted than a
      * guest about what a seat costs.
      */
+    /**
+     * ONE PLACE PER PERSON PER EVENT.
+     *
+     * An email or mobile number that already holds a place in THIS event — as
+     * the booker or as a participant, on a confirmed or waitlisted booking —
+     * cannot be booked again. An unpaid hold that was abandoned at the payment
+     * step does not count, so somebody can retry after a failed payment.
+     *
+     * Refused with a 409 carrying `fields`, so the form can say which box:
+     *   { email | phone | 'participants.N.email' | 'participants.N.phone': message }
+     */
+    async assertNotAlreadyBooked(event, bookedBy, participants = []) {
+        const existing = await EventBooking.find({
+            eventId: event._id || event.id,
+            $or: [
+                { status: 'waitlist' },
+                { status: 'active', 'payment.status': { $in: ['paid', 'not_required'] } }
+            ]
+        }).select('bookingRef bookedBy participants').lean();
+        if (!existing.length) return;
+
+        const emails = new Set();
+        const phones = new Set();
+        existing.forEach((b) => [b.bookedBy, ...(b.participants || [])].forEach((p) => {
+            if (p && p.email) emails.add(str(p.email).toLowerCase());
+            if (p && phoneKey(p.phone).length === 10) phones.add(phoneKey(p.phone));
+        }));
+
+        const fields = {};
+        const check = (person, emailKey, phoneKeyName, who) => {
+            const email = str(person && person.email).toLowerCase();
+            const phone = phoneKey(person && person.phone);
+            if (email && emails.has(email)) {
+                fields[emailKey] = `${who} email is already registered for this event.`;
+            }
+            if (phone.length === 10 && phones.has(phone)) {
+                fields[phoneKeyName] = `${who} mobile number is already registered for this event.`;
+            }
+        };
+        check(bookedBy, 'email', 'phone', 'This');
+        participants.forEach((p, i) => {
+            // Participant 1 is usually the booker; reported once, on the booker's boxes.
+            if (i === 0 && str(p.email).toLowerCase() === str(bookedBy.email).toLowerCase()
+                && phoneKey(p.phone) === phoneKey(bookedBy.phone)) return;
+            check(p, `participants.${i}.email`, `participants.${i}.phone`, `Participant ${i + 1}'s`);
+        });
+
+        if (Object.keys(fields).length) {
+            const err = ApiError.conflict(
+                fields.email || fields.phone
+                    ? 'You are already registered for this event with this email or mobile number.'
+                    : 'A participant is already registered for this event.'
+            );
+            err.fields = fields;
+            throw err;
+        }
+    }
+
     async createBooking(eventId, payload = {}, context = null, meta = {}) {
         const event = await this.resolveEvent(eventId, context);
 
@@ -859,6 +925,8 @@ class EventBookingService {
         if (participants.length && !participants[0].name) {
             participants[0] = { ...bookedBy };
         }
+
+        await this.assertNotAlreadyBooked(event, bookedBy, participants);
 
         // ---------------------------------------------------------- seats
 
@@ -1511,6 +1579,20 @@ class EventBookingService {
              * cannot resolve `/uploads/…`. Empty when the event has none.
              */
             posterUrl: absoluteMediaUrl(event.bannerUrl || b.eventBannerUrl || ''),
+            /*
+             * The event's documents (agenda PDF …) and video, as ABSOLUTE
+             * addresses: the email attaches and links them, WhatsApp sends each
+             * document as a document message. See the event schema.
+             */
+            attachments: (Array.isArray(event.attachments) ? event.attachments : [])
+                .map((a) => ({
+                    name: str(a && a.name) || 'Document',
+                    url: absoluteMediaUrl(a && a.url),
+                    type: str(a && a.type),
+                    size: Number(a && a.size) || 0
+                }))
+                .filter((a) => a.url),
+            videoUrl: str(event.videoUrl),
             seats,
             seatsLabel: `${seats} seat${seats === 1 ? '' : 's'}`,
             participantNames: (b.participants || []).map((p) => (p && p.name) || '').filter(Boolean),
@@ -1598,6 +1680,44 @@ class EventBookingService {
              * the same number or address listed twice is sent once. A
              * participant with neither an email nor a mobile has nowhere to go.
              */
+            /*
+             * THE EVENT'S DOCUMENTS as WhatsApp files, straight after the
+             * confirmation or reminder: one message per document (up to three),
+             * to the booker here and to each participant below. Only types
+             * WhatsApp opens as a document; the rest are linked in the email.
+             */
+            const DOC_TYPES = /\.(pdf|docx?|xlsx?|pptx?|txt|csv)(\?|$)/i;
+            const documents = ['confirmed', 'reminder'].includes(resolvedKind)
+                ? (ctx.attachments || []).filter((a) => DOC_TYPES.test(a.url) || /pdf|word|excel|powerpoint|spreadsheet|presentation|text\//i.test(a.type)).slice(0, 3)
+                : [];
+            const sendDocuments = async(toPhone, toName) => {
+                const template = require('../../config').botbee.templates.eventDocument;
+                if (!toPhone || !documents.length || !template || String(template).toLowerCase() === 'none') return;
+                const whatsappTemplate = require('../notifications/whatsappTemplate');
+                for (const doc of documents) {
+                    const sent = await whatsappTemplate.sendTemplateMessage(toPhone, template, [
+                        str(toName) || 'Member',
+                        doc.name,
+                        ctx.eventTitle || 'the event',
+                        ctx.whenLabel || 'Date to be confirmed',
+                        ctx.bookingRef || '-'
+                    ], 'en', '', { headerDocument: { link: doc.url, filename: doc.name } }).catch((e) => ({ success: false, error: e && e.message }));
+                    await notificationService.log({
+                        user: booking.userId || null,
+                        event: `EVENT_DOCUMENT_${resolvedKind.toUpperCase()}`,
+                        channel: 'whatsapp',
+                        recipient: sent.to || toPhone,
+                        templateId: template,
+                        subject: doc.name,
+                        status: sent.success ? 'sent' : 'failed',
+                        providerMessageId: sent.messageId,
+                        lastError: sent.error,
+                        data: { bookingRef: booking.bookingRef, document: doc.url }
+                    }).catch(() => {});
+                }
+            };
+            await sendDocuments(phone, (booking.bookedBy && booking.bookedBy.name) || '');
+
             if (!['confirmed', 'reminder', 'cancelled'].includes(resolvedKind)) return;
             const seen = new Set([phoneKey(phone), str(email).toLowerCase()].filter(Boolean));
             const people = (booking.participants || []).filter((p) => {
@@ -1628,6 +1748,7 @@ class EventBookingService {
                 }).catch((error) => logger.warn('Participant message not sent', {
                     bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
                 }));
+                await sendDocuments(str(person.phone), str(person.name));
             }
         })().catch((error) => {
             logger.warn('Event booking message not sent', {
