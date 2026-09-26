@@ -866,6 +866,52 @@ class EventBookingService {
             if (phone.length === 10 && !seenPhone.has(phone)) seenPhone.set(phone, i);
         });
 
+        /*
+         * ONE PERSON = ONE EMAIL + ONE MOBILE. Where an email or a mobile
+         * already belongs to a registered member, the other detail must be that
+         * same member's: an email registered to one person cannot be paired with
+         * a mobile registered to somebody else. Hints show only the last digits
+         * / the first letters, never the full detail of another member.
+         */
+        const people = [
+            { person: bookedBy, emailKey: 'email', phoneKeyName: 'phone', who: 'This' },
+            ...participants.map((p, i) => ({
+                person: p, emailKey: `participants.${i}.email`, phoneKeyName: `participants.${i}.phone`, who: `Participant ${i + 1}'s`
+            }))
+        ].filter(({ person, emailKey }) => str(person && person.email) && phoneKey(person && person.phone).length === 10
+            // Participant 1 carrying the booker's own details is reported once, on the booker's boxes.
+            && !(emailKey === 'participants.0.email'
+                && str(person.email).toLowerCase() === str(bookedBy && bookedBy.email).toLowerCase()
+                && phoneKey(person.phone) === phoneKey(bookedBy && bookedBy.phone)));
+
+        if (people.length) {
+            const MemberDetails = require('../members/memberdetails.model');
+            const emailList = [...new Set(people.map(({ person }) => str(person.email).toLowerCase()))];
+            const phoneList = [...new Set(people.map(({ person }) => phoneKey(person.phone)))];
+            const accounts = await MemberDetails.find({
+                $or: [
+                    { email: { $in: emailList } },
+                    ...phoneList.map((d) => ({ phoneNumber: new RegExp(`${d.split('').join('\\D*')}$`) }))
+                ]
+            }).select('email phoneNumber').lean().catch(() => []);
+
+            const maskPhone = (p) => `••••••${phoneKey(p).slice(-4)}`;
+            const maskEmail = (e) => { const [u, d] = String(e).split('@'); return `${u.slice(0, 2)}•••@${d || ''}`; };
+
+            people.forEach(({ person, emailKey, phoneKeyName, who }) => {
+                const email = str(person.email).toLowerCase();
+                const phone = phoneKey(person.phone);
+                const byEmail = accounts.find((a) => str(a.email).toLowerCase() === email);
+                const byPhone = accounts.find((a) => phoneKey(a.phoneNumber) === phone);
+                if (byEmail && phoneKey(byEmail.phoneNumber).length === 10 && phoneKey(byEmail.phoneNumber) !== phone && !fields[phoneKeyName]) {
+                    fields[phoneKeyName] = `${who} email is registered with a different mobile number (${maskPhone(byEmail.phoneNumber)}). Use that number.`;
+                }
+                if (byPhone && str(byPhone.email) && str(byPhone.email).toLowerCase() !== email && !fields[emailKey]) {
+                    fields[emailKey] = `${who} mobile number is registered with a different email (${maskEmail(byPhone.email)}). Use that email.`;
+                }
+            });
+        }
+
         if (Object.keys(fields).length) {
             const err = ApiError.conflict(
                 fields.email || fields.phone
