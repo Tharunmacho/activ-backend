@@ -230,13 +230,51 @@ router.delete('/events/:id', ...eventEditors, controller.deleteEvent);
 router.put('/events-settings', ...eventEditors, controller.updateEventsSettings);
 router.post('/media', ...eventEditors, mediaUpload.single('file'), controller.uploadMedia);
 
+/*
+ * THE GALLERY, THE NEWSROOM AND THE SCHEMES — open to the events admin too,
+ * and declared ABOVE the content gate for the same reason the event editor is.
+ *
+ * The events admin's portal mounts the CMS's own Gallery, News and Schemes
+ * screens (see `/events-admin/*` in the website's App.tsx), so a photograph,
+ * an article or a scheme is written through ONE path whichever portal saved
+ * it. Everything else under the gate — the site settings, home, about,
+ * legal, region pages, contact inbox — stays closed to that role.
+ */
+const contentEditors = [verifyToken, requireRole('super_admin', 'cms_admin', 'events_admin')];
+
+// `upload.single('image')` so the admin can attach a file instead of pasting a
+// URL; the controller prefers the upload when both are present.
+router.post('/gallery', ...contentEditors, upload.single('image'), controller.addGalleryItem);
+router.put('/gallery/:id', ...contentEditors, upload.single('image'), controller.updateGalleryItem);
+router.delete('/gallery/:id', ...contentEditors, controller.deleteGalleryItem);
+router.put('/gallery-settings', ...contentEditors, controller.updateGallerySettings);
+
+/* The newsroom's own screen. `/news-admin` and not `/news`, so no write
+   method here can be shadowed by the public parameter route above. */
+router.get('/news-admin', ...contentEditors, controller.listNewsAdmin);
+router.post('/news-admin/articles', ...contentEditors, controller.saveArticle);
+router.put('/news-admin/articles/:id', ...contentEditors, controller.saveArticle);
+router.delete('/news-admin/articles/:id', ...contentEditors, controller.deleteArticle);
+router.post('/news-admin/schemes', ...contentEditors, controller.saveScheme);
+router.put('/news-admin/schemes/:id', ...contentEditors, controller.saveScheme);
+router.delete('/news-admin/schemes/:id', ...contentEditors, controller.deleteScheme);
+router.put('/news-admin/settings', ...contentEditors, controller.saveNewsSettings);
+
+/* The Schemes screen. `/schemes-admin`, not `/schemes`, for the same reason
+   the newsroom's is `/news-admin`. The `/news-admin/schemes` routes above stay
+   for any older client, and write the same shape through the same cleaner. */
+router.get('/schemes-admin', ...contentEditors, controller.listSchemesAdmin);
+router.post('/schemes-admin/schemes', ...contentEditors, controller.saveSchemeAdmin);
+router.put('/schemes-admin/schemes/:id', ...contentEditors, controller.saveSchemeAdmin);
+router.delete('/schemes-admin/schemes/:id', ...contentEditors, controller.deleteSchemeAdmin);
+router.put('/schemes-admin/settings', ...contentEditors, controller.saveSchemeSettings);
+
 router.use(verifyToken, requireRole('super_admin', 'cms_admin'));
 
 router.get('/overview', controller.getOverview);
 
 router.put('/site', controller.updateSiteSettings);
 router.put('/home', controller.updateHome);
-router.put('/gallery-settings', controller.updateGallerySettings);
 
 /**
  * Media upload for every CMS screen.
@@ -247,13 +285,6 @@ router.put('/gallery-settings', controller.updateGallerySettings);
  */
 router.put('/about', controller.updateAbout);
 router.put('/contact-info', controller.updateContactInfo);
-
-// `upload.single('image')` so the admin can attach a file instead of pasting a
-// URL; the controller prefers the upload when both are present.
-router.post('/gallery', upload.single('image'), controller.addGalleryItem);
-router.put('/gallery/:id', upload.single('image'), controller.updateGalleryItem);
-router.delete('/gallery/:id', controller.deleteGalleryItem);
-
 
 /*
  * Editing a policy.
@@ -302,27 +333,8 @@ router.put('/region-pages/:slug', controller.saveRegionPage);
 router.put('/state-pages/:slug', controller.saveStatePage);
 router.delete('/state-pages/:slug', controller.deleteStatePage);
 
-/* The newsroom’s own screen. `/news-admin` and not `/news`, so no write
-   method here can be shadowed by the public parameter route above. */
 router.put('/membership', controller.saveMembership);
 
-router.get('/news-admin', controller.listNewsAdmin);
-router.post('/news-admin/articles', controller.saveArticle);
-router.put('/news-admin/articles/:id', controller.saveArticle);
-router.delete('/news-admin/articles/:id', controller.deleteArticle);
-router.post('/news-admin/schemes', controller.saveScheme);
-router.put('/news-admin/schemes/:id', controller.saveScheme);
-router.delete('/news-admin/schemes/:id', controller.deleteScheme);
-router.put('/news-admin/settings', controller.saveNewsSettings);
-
-/* The Schemes screen. `/schemes-admin`, not `/schemes`, for the same reason
-   the newsroom's is `/news-admin`. The `/news-admin/schemes` routes above stay
-   for any older client, and write the same shape through the same cleaner. */
-router.get('/schemes-admin', controller.listSchemesAdmin);
-router.post('/schemes-admin/schemes', controller.saveSchemeAdmin);
-router.put('/schemes-admin/schemes/:id', controller.saveSchemeAdmin);
-router.delete('/schemes-admin/schemes/:id', controller.deleteSchemeAdmin);
-router.put('/schemes-admin/settings', controller.saveSchemeSettings);
 
 router.get('/contact-messages', controller.listContactMessages);
 router.patch('/contact-messages/:id/status', controller.setMessageStatus);

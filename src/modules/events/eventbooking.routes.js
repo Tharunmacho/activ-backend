@@ -6,7 +6,12 @@ const { optionalAuth } = require('../../core/middleware/auth');
 const { createRateLimiter } = require('../../core/middleware/rateLimit');
 const logger = require('../../config/logger');
 
+const { resolveEventParam } = require('./eventSlug');
+
 const router = express.Router();
+
+// A booking taken on `/events/<slug>/book` is stored against the event's id.
+router.param('eventId', resolveEventParam);
 
 /**
  * "Book Now" — the public half of event bookings.

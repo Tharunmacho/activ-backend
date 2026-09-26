@@ -90,6 +90,12 @@ const eventSchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    /**
+     * The public address, `nlc-business-opportunities-2026-09-27`. Written on
+     * create and never changed after — see `eventSlug.js`. Sparse because rows
+     * written before it existed have none until the backfill runs.
+     */
+    slug: { type: String, trim: true, lowercase: true },
     description: {
         type: String,
         trim: true,
@@ -428,6 +434,30 @@ const eventSchema = new mongoose.Schema({
         index: true
     },
 
+    /*
+     * ======================================================================
+     * RIDES THE HOME PAGE BANNER (the slideshow at the top of the site)
+     * ======================================================================
+     *
+     * A FOURTH surface, and not `showOnHome`: that one is the events strip
+     * further down the page. This is the gallery's banner switch, given to
+     * events — the same On / Off, and the same banner words over the picture,
+     * spelled exactly as on a gallery item so the two read as one control.
+     *
+     * TRUE by default, as on a gallery item: an event goes into the banner
+     * the moment it is posted, with no checkbox on the form. The On / Off in
+     * CMS -> Home Page is how an editor takes one OUT. Read `!== false`, so
+     * events written before the field existed are in the banner too.
+     *
+     * Only an event the public may read reaches the banner — the slideshow is
+     * built from the public event list, which `onboardingVisibility` filters.
+     */
+    showInBanner: { type: Boolean, default: true },
+    bannerHeadline: { type: String, trim: true, default: '' },
+    bannerHighlight: { type: String, trim: true, default: '' },
+    bannerSubheadline: { type: String, trim: true, default: '' },
+    bannerAlign: { type: String, enum: ['left', 'right'], default: 'left' },
+
     // ---- the detail an event page needs (EVT-001)
     agenda: { type: [agendaItemSchema], default: [] },
     /**
@@ -461,6 +491,14 @@ const eventSchema = new mongoose.Schema({
     /** 0 means unlimited. A cap of zero attendees is not a thing anyone means. */
     capacity: { type: Number, min: 0, default: 0 },
     registrationNote: { type: String, trim: true, default: '' },
+    /*
+     * WHAT IT IS ABOUT, AND IN WHICH LANGUAGE — both printed in the booking
+     * email and WhatsApp message, and on nothing else yet. Free text: a topic
+     * is a phrase ("Government procurement for MSMEs"), a language may be two
+     * ("Tamil & English").
+     */
+    topic: { type: String, trim: true, default: '' },
+    language: { type: String, trim: true, default: '' },
 
     /**
      * What a seat costs, in rupees. 0 is a free event (EVT-002).
@@ -587,5 +625,19 @@ eventSchema.index({ status: 1, audience: 1, startAt: 1 });
  * matches" answerable without reading the collection.
  */
 eventSchema.index({ 'targets.state': 1, 'targets.district': 1 });
+
+// A scalar, so unique means what it says (one event per slug).
+eventSchema.index({ slug: 1 }, { unique: true, sparse: true });
+
+/*
+ * Every new event gets its public address on its first save. Both create paths
+ * (`cms.service.createEvent`, `event.service.createEvent`) go through
+ * `Event.create`, which is a save.
+ */
+eventSchema.pre('save', async function assignSlug() {
+    if (this.slug) return;
+    const { uniqueSlug } = require('./eventSlug');
+    this.slug = await uniqueSlug(this.constructor, this);
+});
 
 module.exports = mongoose.model('Event', eventSchema);

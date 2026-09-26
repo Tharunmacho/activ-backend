@@ -74,26 +74,56 @@ const eventLink = (ctx = {}) => {
     return appUrl(`/events/${encodeURIComponent(id)}${ref ? `/book?ref=${encodeURIComponent(ref)}` : ''}`);
 };
 
-/** The practical notes before an in-person event, as a tinted box. */
+/** The organiser's note, one point per line — typed on the event form. */
+const noteLinesOf = (ctx = {}) => String(ctx.attendeeNote || '')
+    .split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 12);
+
+/**
+ * THE LAST THING IN A BOOKING EMAIL: what to do before the event.
+ *
+ * The organiser's own note ("Please note" on the event page) leads, because it
+ * is the part written for THIS event. A short standing list follows, worded
+ * for a webinar or for a hall — a webinar has no registration desk. Placed at
+ * the END of the email (`afterHtml`), after the details and the buttons: it is
+ * read once the reader knows what they booked, not before.
+ */
 const beforeYouComeHtml = (ctx = {}) => {
-    const items = ctx.isOnline
+    const notes = noteLinesOf(ctx);
+    const standing = ctx.isOnline
         ? [
-            'The joining link will reach you by email before the event starts.',
-            'Join a few minutes early so you do not miss the opening.',
-            'Keep your booking reference handy in case the organiser asks for it.'
+            'Join 5–10 minutes early to check your audio and video.',
+            'A laptop or phone with a stable connection works best.'
         ]
         : [
-            'Please arrive 15 to 30 minutes early for registration.',
-            `Carry this email or your booking reference${ctx.bookingRef ? ` (${ctx.bookingRef})` : ''}.`,
-            'Bring a photo ID for each participant.',
-            'Fees are non-refundable, but you may change the names of the participants.'
+            'Arrive 15–30 minutes early for registration.',
+            'Carry a photo ID for each participant.'
         ];
-    return `<table width="100%" cellpadding="0" cellspacing="0" border="0"
-                   style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; margin:6px 0 4px 0;">
-        <tr><td style="padding:14px 18px;">
-          <div style="font-size:13px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#1d4ed8;
-                      padding-bottom:6px;">Before you come</div>
-          ${items.map((i) => `<div style="font-size:14px; line-height:1.6; color:#1e3a8a;">&#10003;&nbsp; ${esc(i)}</div>`).join('')}
+    if (ctx.settledVia && ctx.settledVia !== 'free') {
+        standing.push('Fees are non-refundable; participant names can be changed.');
+    }
+    /*
+     * NEVER SAY IT TWICE. A standing tip the organiser's own note already
+     * covers ("Carry a government photo ID" and "Carry a photo ID for each
+     * participant") is dropped — the organiser's wording wins.
+     */
+    const TOPICS = [/\b(photo\s*)?id\b/i, /\b(early|arrive|join\s+\d)/i, /\b(refund|fee)/i, /\b(audio|video|connection)/i];
+    const covered = (tip) => TOPICS.some((re) => re.test(tip) && notes.some((n) => re.test(n)));
+    const items = [...notes, ...standing.filter((tip) => !covered(tip))];
+    const heading = notes.length ? 'Please note' : (ctx.isOnline ? 'Before the webinar' : 'Before you come');
+
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                   style="background-color:#f5f8ff; border:1px solid #dbe4fb; border-radius:14px; border-collapse:separate;">
+        <tr><td style="padding:18px 20px 12px 20px;">
+          <div style="font-size:12px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:#1d4ed8;
+                      padding-bottom:10px;">${heading}</div>
+          ${items.map((i, n) => `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+            <td width="28" valign="top" style="width:28px; padding:0 0 8px 0;">
+              <div style="width:20px; height:20px; border-radius:10px; background-color:${n < notes.length ? '#1d4ed8' : '#dbeafe'};
+                          color:${n < notes.length ? '#ffffff' : '#1d4ed8'};
+                          font-size:11px; line-height:20px; font-weight:800; text-align:center;">&#10003;</div></td>
+            <td valign="top" style="font-size:14px; line-height:1.55; color:#1e293b; padding:0 0 8px 0;
+                                    ${n < notes.length ? 'font-weight:600;' : ''}">${esc(i)}</td>
+          </tr></table>`).join('')}
         </td></tr>
       </table>`;
 };
@@ -102,25 +132,272 @@ const beforeYouComeHtml = (ctx = {}) => {
  * A booking message's WhatsApp template: the DETAILED one when it has been
  * approved and named in the environment, the generic event template otherwise.
  *
- * `fallback` rides along so that a detailed template which Meta refuses (still
- * in review, renamed, parameter count changed) is retried once through the
- * generic one by `notification.service` — the booker hears something either way.
+ * The detailed templates carry the event POSTER as an image header, so
+ * `headerImage` rides with them — and ONLY with them: the generic template has
+ * no header, and Meta refuses a header parameter on a template without one.
+ * `fallback` is retried once by `notification.service` if the detailed send
+ * fails (still in review, renamed), so the booker hears something either way.
  */
-const bookingWhatsApp = (dedicatedName, dedicatedParams, eventParams) => (dedicatedName
-    ? { template: dedicatedName, params: dedicatedParams, fallback: { template: TPL.event, params: eventParams } }
+const bookingWhatsApp = (dedicatedName, dedicatedParams, eventParams, poster = '') => (dedicatedName
+    ? {
+        template: dedicatedName,
+        params: dedicatedParams,
+        headerImage: poster || DEFAULT_WHATSAPP_POSTER(),
+        fallback: { template: TPL.event, params: eventParams }
+    }
     : { template: TPL.event, params: eventParams });
+
+/** The association, as it signs a message — never "ACTIV Platform". */
+const ORG_SIGNATURE = 'Adidravidar Confederation of Trade & Industrial Vision (ACTIV)';
+
+/** A template name from config, with `none` meaning "switched off". */
+const tplOn = (name) => (name && String(name).toLowerCase() !== 'none' ? name : '');
+
+/** "₹1,500" -> "1,500"; the in-person template prints its own ₹. */
+const amountDigits = (ctx = {}) => String(ctx.amountLabel || '').replace(/[^\d.,]/g, '');
+
+/**
+ * The link an online booker needs: the event's REGISTRATION link (Zoom's own
+ * form — the booker enters their name and email there and Zoom emails the
+ * joining link). Until the organiser has added one, the booking page.
+ */
+const registerLink = (ctx = {}) => ctx.registerUrl
+    || `${ctx.viewUrl || ctx.eventUrl || appUrl('/events')} (the registration link will be added here soon)`;
+
+/** "Dear Tharun" — the full name the booker gave, first name as a fallback. */
+const greetName = (ctx = {}) => oneLine(ctx.bookerName || ctx.name || ctx.firstName, 60) || 'Member';
+
+/**
+ * THE CUSTOM TEMPLATES (`WHATSAPP_TEMPLATES` below, `_v2`), one per kind of
+ * message and per format — a webinar registration and a hall booking are
+ * different messages, not one message with blanks. Each returns the ordered
+ * values for its own body.
+ */
+const customTemplate = (kind, ctx = {}) => {
+    const title = clause(ctx.eventTitle, 120) || 'the event';
+    const org = orDash(ctx.contactLine, 'the ACTIV office, +91 82201 12188');
+    const tips = orDash(noteLinesOf(ctx).join('; ') || standingTips(ctx).join('; '));
+
+    if (kind === 'confirmed' && ctx.isOnline) {
+        const template = tplOn(TPL.bookingWebinar);
+        return template && {
+            template,
+            params: [
+                greetName(ctx),
+                title,
+                orDash(ctx.dateLabel, 'Date to be confirmed'),
+                orDash(ctx.timeLabel, 'Time to be confirmed'),
+                orDash(ctx.onlinePlatform || ctx.formatLabel, 'Online'),
+                ctx.bookingRef || 'See your email',
+                registerLink(ctx),
+                oneLine(ctx.bookerEmail, 120) || 'the email address you register with',
+                org
+            ]
+        };
+    }
+    if (kind === 'confirmed') {
+        const template = tplOn(TPL.booking);
+        return template && {
+            template,
+            params: [
+                greetName(ctx),
+                title,
+                orDash(ctx.dateLabel, 'Date to be confirmed'),
+                orDash(ctx.timeLabel, 'Time to be confirmed'),
+                orDash(ctx.venueLabel, 'Venue to be announced'),
+                orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
+                orDash(`${seatsLine(ctx)} | ${feeLine(ctx, 'Rs ')}`),
+                ctx.bookingRef || 'See your email',
+                tips,
+                org
+            ]
+        };
+    }
+    if (kind === 'reminder') {
+        const template = tplOn(TPL.bookingReminder);
+        return template && {
+            template,
+            params: [
+                greetName(ctx),
+                title,
+                ctx.startsInLabel || 'soon',
+                orDash(ctx.dateLabel, 'Date to be confirmed'),
+                orDash(ctx.timeLabel, 'Time to be confirmed'),
+                orDash(whereLine(ctx)),
+                ctx.isOnline
+                    ? `${registerLink(ctx)} - register here if you have not yet; your joining link comes by email`
+                    : orDash(ctx.mapUrl || ctx.viewUrl, 'See your booking email'),
+                ctx.bookingRef || 'See your email',
+                tips,
+                org
+            ]
+        };
+    }
+    return null;
+};
+
+/**
+ * THE POSTER TEMPLATES ALREADY APPROVED ON THE ACCOUNT — the stop-gap while
+ * the custom ones are in Meta review. Their wording is fixed; only the values
+ * are ours:
+ *
+ *   in person (`cnfrm`, 13 slots) registrant name, mobile, email; event
+ *     (category), venue (+ map), date, time from/to, tickets, amount paid.
+ *   online (`ccmsg`, 4 slots) name, event + date + platform, link, email. Its
+ *     fixed text calls the link a "Join Link", so the value itself says it is
+ *     the registration form.
+ */
+const posterTemplate = (ctx = {}) => {
+    const title = clause(ctx.eventTitle, 110) || 'the event';
+    const name = greetName(ctx);
+    const email = oneLine(ctx.bookerEmail, 120);
+    const names = (Array.isArray(ctx.participantNames) ? ctx.participantNames : []).filter(Boolean);
+
+    if (ctx.isOnline) {
+        const template = tplOn(TPL.bookingOnline);
+        return template && {
+            template,
+            params: [
+                name,
+                `${title} | ${ctx.whenLabel || 'Date to be confirmed'}${ctx.onlinePlatform ? ` | on ${ctx.onlinePlatform}` : ''}`,
+                `${registerLink(ctx)} - open this to REGISTER; your personal joining link then arrives by email`,
+                email || 'on your booking'
+            ]
+        };
+    }
+
+    const template = tplOn(TPL.bookingInPerson);
+    return template && {
+        template,
+        params: [
+            name,
+            title,
+            names.length ? names.join(', ') : name,
+            oneLine(ctx.bookerPhone, 30) || 'Not given',
+            email || 'Not given',
+            ctx.category ? `${title} (${clause(ctx.category, 40)})` : title,
+            orDash([ctx.venueLabel, ctx.mapUrl ? `Map: ${ctx.mapUrl}` : ''].filter(Boolean).join(' | '), 'Venue to be announced'),
+            orDash(ctx.dateLabel, 'Date to be confirmed'),
+            ctx.startTimeLabel || 'To be confirmed',
+            ctx.endTimeLabel || 'the close of the programme',
+            `${ctx.seats || 1}${names.length ? ` (${names.join(', ')})` : ''}`,
+            ctx.settledVia === 'free' ? '0 (Free entry)' : `${amountDigits(ctx) || '0'} (${ctx.paymentLabel || 'Paid'})`,
+            email || 'on your booking'
+        ]
+    };
+};
+
+/**
+ * Which template a confirmation / reminder goes out on, as a CHAIN walked by
+ * `notification.service`: the custom `_v2` template first, the approved poster
+ * template if Meta refuses it (still in review), the generic notice last. Once
+ * the custom one is approved it is the only one ever sent — no redeploy.
+ */
+const richBookingWhatsApp = (kind, eventParams, ctx = {}) => {
+    const image = ctx.posterUrl || DEFAULT_WHATSAPP_POSTER();
+    const steps = [customTemplate(kind, ctx), posterTemplate(ctx)]
+        .filter(Boolean)
+        .map((s) => ({ ...s, headerImage: image }));
+    steps.push({ template: TPL.event, params: eventParams });
+    return steps.reduceRight((next, step) => (next ? { ...step, fallback: next } : step), null);
+};
+
+/**
+ * An image-header template cannot be sent WITHOUT an image, so an event with no
+ * poster of its own gets the ACTIV logo from the website instead.
+ */
+const DEFAULT_WHATSAPP_POSTER = () => process.env.WHATSAPP_DEFAULT_POSTER_URL
+    || appUrl('/logo_ACTIVian-removebg-preview.png');
 
 /** A parameter value that is never empty — Meta refuses an empty one. */
 const orDash = (value, dash = 'Not specified') => oneLine(value, 300) || dash;
 
-/** "Who is coming", as a short list in a booking email. Empty when nobody is named. */
-const participantsHtml = (names = []) => {
-    const list = (Array.isArray(names) ? names : []).filter(Boolean);
-    if (!list.length) return '';
-    return `<p style="margin:0 0 6px 0;"><strong>Participants</strong></p>
-        <ol style="margin:0 0 12px 0; padding-left:20px;">
-          ${list.map((n) => `<li style="margin-bottom:4px;">${esc(n)}</li>`).join('')}
-        </ol>`;
+/** "1 seat · Tharun, Ravi" — the seats, with the names when there are any. */
+const seatsLine = (ctx = {}) => {
+    const names = (Array.isArray(ctx.participantNames) ? ctx.participantNames : []).filter(Boolean);
+    return [ctx.seatsLabel, names.join(', ')].filter(Boolean).join(' · ');
+};
+
+/** "Free", or "₹500 · Paid online". Free events carry no payment line at all. */
+const feeLine = (ctx = {}, rupee = '₹') => {
+    if (ctx.settledVia === 'free') return 'Free';
+    const amount = String(ctx.amountLabel || '').replace('₹', rupee);
+    return [amount, ctx.paymentLabel].filter(Boolean).join(' · ');
+};
+
+/**
+ * The Details card of a booking email — ONE place for every fact, so the
+ * sentences above it do not have to repeat them. Empty rows are dropped by the
+ * email shell, so an event without a topic or a language simply has no row.
+ */
+const bookingFacts = (ctx = {}, { payment = true, seatsLabel = 'Seats' } = {}) => [
+    { label: 'Date', value: ctx.dateLabel },
+    { label: 'Time', value: ctx.timeLabel },
+    { label: 'Format', value: ctx.formatLabel },
+    ctx.isOnline
+        ? { label: 'Registration link', value: ctx.registerUrl || (ctx.kind === 'confirmed' || ctx.kind === 'reminder'
+            ? 'Shared with you soon' : '') }
+        : { label: 'Venue', value: ctx.venueLabel || 'To be announced' },
+    { label: 'Topic', value: ctx.topic },
+    { label: 'Language', value: ctx.language },
+    { label: seatsLabel, value: seatsLine(ctx) },
+    // ONE row for the money: "Free", or "₹500 · Paid online".
+    ...(payment ? [{ label: ctx.settledVia === 'free' ? 'Entry' : 'Fee', value: feeLine(ctx) }] : []),
+    { label: 'Organiser', value: ctx.contactLine }
+];
+
+/** The one sentence about money in a confirmation — none for a free event. */
+const settledSentence = (ctx = {}) => {
+    if (ctx.settledVia === 'online') return ` Payment of <strong>${esc(ctx.amountLabel)}</strong> received.`;
+    if (ctx.settledVia === 'offline') {
+        return ` The organiser has received your payment of <strong>${esc(ctx.amountLabel)}</strong>`
+            + `${ctx.paymentModeLabel ? ` (${esc(ctx.paymentModeLabel)})` : ''}.`;
+    }
+    return '';
+};
+
+/** A WhatsApp free-text block, one fact per line, blank facts skipped. */
+const waLines = (rows) => rows.filter(([, v]) => v).map(([icon, v]) => `${icon} ${v}`).join('\n');
+
+/** Where to be: "Online webinar on Zoom", or the venue and its address. */
+const whereLine = (ctx = {}) => (ctx.isOnline
+    ? (ctx.formatLabel || 'Online webinar')
+    : (ctx.venueLabel || 'Venue to be announced'));
+
+
+/** The standing advice, worded for a webinar or for a hall. */
+const standingTips = (ctx = {}) => (ctx.isOnline
+    ? ['Join 5-10 minutes early to check your audio and video', 'A laptop or phone with a stable connection works best']
+    : ['Arrive 15-30 minutes early for registration', 'Carry a photo ID for each participant']);
+
+/**
+ * The written-out WhatsApp message (session window / text fallback) for a
+ * confirmation or reminder: heading, one line of lead, then one fact per line
+ * with an icon, the organiser's notes, and a contact. Crisp on a phone screen.
+ */
+const bookingText = (ctx = {}, { heading, lead, closing }) => {
+    const online = !!ctx.isOnline;
+    const notes = noteLinesOf(ctx);
+    const tips = notes.length ? notes : standingTips(ctx);
+    return `${heading}\n\n`
+        + `Dear ${greetName(ctx)}, Jaibhim! 🙏\n${lead}\n\n`
+        + waLines([
+            ['🗓', ctx.dateLabel],
+            ['⏰', ctx.timeLabel],
+            [online ? '💻' : '📍', whereLine(ctx)],
+            ['📝', online ? `Register here: ${registerLink(ctx)}` : ''],
+            ['📧', online && ctx.registerUrl ? 'Your personal joining link is emailed to you once you register' : ''],
+            ['🗺', !online && ctx.mapUrl ? `Directions: ${ctx.mapUrl}` : ''],
+            ['🏷', [ctx.topic, ctx.language].filter(Boolean).join(' · ')],
+            ['🎟', seatsLine(ctx)],
+            ['💳', ctx.kind === 'reminder' ? '' : feeLine(ctx)],
+            ['🔖', ctx.bookingRef ? `Booking ID: ${ctx.bookingRef}` : '']
+        ])
+        + `\n\n📌 *${notes.length ? 'Please note' : (online ? 'Before the webinar' : 'Before you come')}*\n`
+        + tips.map((n) => `• ${n}`).join('\n')
+        + (ctx.contactLine ? `\n\n📞 Organiser: ${ctx.contactLine}` : '')
+        + (ctx.viewUrl ? `\n🔎 Your booking: ${ctx.viewUrl}` : '')
+        + `\n\n${closing}\n— ${ORG_SIGNATURE}`;
 };
 
 /**
@@ -457,7 +734,6 @@ const TEMPLATES = {
                 <p style="margin:0 0 12px 0;">Your registration for
                 <strong>${ctx.eventTitleHtml || 'this event'}</strong> is confirmed.</p>`,
             facts: [
-                { label: 'Event', value: ctx.eventTitle },
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
@@ -501,7 +777,6 @@ const TEMPLATES = {
             preheader: `${ctx.eventTitle || 'ACTIV event'}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''}`,
             bodyHtml: `<p style="margin:0 0 12px 0;">This is a reminder about an event you are registered for.</p>`,
             facts: [
-                { label: 'Event', value: ctx.eventTitle },
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
@@ -540,90 +815,62 @@ const TEMPLATES = {
      */
     EVENT_BOOKING_CONFIRMED: (ctx) => {
         const title = ctx.eventTitle || 'the event';
-        const settled = ctx.settledVia === 'online'
-            ? `We have received your payment of <strong>${esc(ctx.amountLabel)}</strong> online`
-                + ' and your booking is confirmed.'
-            : ctx.settledVia === 'offline'
-                ? `The organiser has received your payment of <strong>${esc(ctx.amountLabel)}</strong>`
-                    + `${ctx.paymentModeLabel ? ` (${esc(ctx.paymentModeLabel)})` : ''} and confirmed your booking.`
-                : 'Your booking is confirmed. No payment is required for this event.';
+        const online = !!ctx.isOnline;
 
         return {
             inApp: {
-                title: 'Booking confirmed',
+                title: online ? 'Registered for the webinar' : 'Booking confirmed',
                 message: `${ctx.seatsLabel} booked for ${title}${ctx.whenLabel ? ` on ${ctx.whenLabel}` : ''}. `
-                    + `Reference ${ctx.bookingRef}.`,
+                    + `Booking ID ${ctx.bookingRef}.`,
                 type: 'success'
             },
+            /*
+             * SAID ONCE. The subject says "confirmed", the hero names the event
+             * and the format, the one sentence says what to do next, and every
+             * fact lives in the Details card. No badge repeating the subject,
+             * no poster (the email is a ticket, not a flyer).
+             */
             email: {
-                subject: `Booking confirmed — ${title} (${ctx.bookingRef})`,
-                title: 'Your booking is confirmed',
-                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''} · ${ctx.seatsLabel}`,
+                subject: online ? `Webinar registration confirmed: ${title}` : `Booking confirmed: ${title}`,
+                title,
+                preheader: [online ? "You're registered" : 'Your seat is confirmed', ctx.formatLabel]
+                    .filter(Boolean).join(' · '),
                 tone: 'success',
-                badge: 'Booking confirmed',
                 highlight: {
-                    label: 'Your booking reference',
+                    label: 'Booking ID',
                     value: ctx.bookingRef,
-                    note: ctx.isOnline ? 'Keep this — it is how we find your booking.'
-                        : 'Show this at the registration desk.'
+                    note: online ? 'Keep this for any question about your registration.' : 'Show this at the registration desk.'
                 },
-                bodyHtml: `
-                    <p style="margin:0 0 12px 0;">Thank you for booking
-                    <strong>${ctx.eventTitleHtml || 'this event'}</strong>. ${settled}</p>
-                    ${ctx.whenLabel ? `<p style="margin:0 0 12px 0;">We look forward to seeing you on
-                    <strong>${esc(ctx.whenLabel)}</strong>${ctx.venueLabel && !ctx.isOnline
-                        ? ` at <strong>${esc(ctx.venueLabel)}</strong>` : ''}.</p>` : ''}
-                    ${participantsHtml(ctx.participantNames)}
-                    ${beforeYouComeHtml(ctx)}`,
-                facts: [
-                    { label: 'Event', value: ctx.eventTitle },
-                    { label: 'Date', value: ctx.dateLabel },
-                    { label: 'Time', value: ctx.timeLabel },
-                    { label: ctx.isOnline ? 'Attend' : 'Venue', value: ctx.venueLabel },
-                    { label: 'Seats', value: String(ctx.seats || '') },
-                    { label: 'Amount', value: ctx.settledVia === 'free' ? 'Free' : ctx.amountLabel },
-                    { label: 'Payment', value: ctx.paymentLabel },
-                    { label: 'Payment ID', value: ctx.paymentId },
-                    { label: 'Booked by', value: ctx.bookedByLine },
-                    { label: 'Booked on', value: ctx.bookedOnLabel },
-                    { label: 'Organiser contact', value: ctx.contactLine }
-                ],
-                actionButton: ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined,
-                secondaryButton: ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined
+                bodyHtml: online
+                    ? `<p style="margin:0;">Thank you for registering for our webinar.${settledSentence(ctx)}</p>`
+                        + (ctx.registerUrl
+                            ? '<p style="margin:12px 0 0 0;"><strong>One last step:</strong> complete your registration'
+                                + `${ctx.onlinePlatform ? ` on ${esc(ctx.onlinePlatform)}` : ''} with the button below.`
+                                + ' Your personal joining link will then be emailed to you.</p>'
+                            : '<p style="margin:12px 0 0 0;">The registration link will reach you soon.</p>')
+                    : `<p style="margin:0;">Thank you for booking.${settledSentence(ctx)} We look forward to welcoming you.</p>`,
+                facts: bookingFacts(ctx),
+                actionButton: online && ctx.registerUrl
+                    ? { label: `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}`, url: ctx.registerUrl }
+                    : (ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined),
+                secondaryButton: online
+                    ? (ctx.registerUrl && ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined)
+                    : (ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined),
+                afterHtml: beforeYouComeHtml(ctx)
             },
             whatsapp: {
-                ...bookingWhatsApp(TPL.booking, [
+                ...richBookingWhatsApp('confirmed', [
                     ctx.firstName || 'Member',
-                    clause(title, 120) || 'the event',
-                    orDash(ctx.whenLabel, 'Date to be confirmed'),
-                    orDash(ctx.venueLabel, 'To be announced'),
-                    orDash(ctx.participantNames && ctx.participantNames.length
-                        ? `${ctx.seatsLabel} (${ctx.participantNames.join(', ')})` : ctx.seatsLabel),
-                    ctx.settledVia === 'free' ? 'Free event, no payment required'
-                        : orDash(`${ctx.amountLabel} ${ctx.paymentLabel ? `- ${ctx.paymentLabel}` : ''}`),
-                    ctx.bookingRef || 'See your email'
-                ], [
-                    ctx.firstName || 'Member',
-                    `your confirmed booking ${ctx.bookingRef} (${ctx.seatsLabel}) for ${clause(title, 110)}`,
+                    `your confirmed booking for ${clause(title, 110)} (${whereLine(ctx)}, ID ${ctx.bookingRef})`,
                     ctx.whenLabel || 'the scheduled date'
-                ]),
-                text: `ACTIV: Booking confirmed ✅`
-                    + `\n\nHello ${ctx.firstName || 'Member'},`
-                    + `\nYour booking for *${title}* is confirmed.`
-                    + `\n\nReference: ${ctx.bookingRef}`
-                    + (ctx.dateLabel ? `\nDate: ${ctx.dateLabel}` : '')
-                    + (ctx.timeLabel ? `\nTime: ${ctx.timeLabel}` : '')
-                    + (ctx.venueLabel ? `\n${ctx.isOnline ? 'Attend' : 'Venue'}: ${ctx.venueLabel}` : '')
-                    + (ctx.mapUrl ? `\nMap: ${ctx.mapUrl}` : '')
-                    + `\nSeats: ${ctx.seats}`
-                    + (ctx.participantNames && ctx.participantNames.length
-                        ? `\nParticipants: ${ctx.participantNames.join(', ')}` : '')
-                    + (ctx.settledVia === 'free'
-                        ? '\nAmount: Free'
-                        : `\nAmount: ${ctx.amountLabel}\nPayment: ${ctx.paymentLabel}`
-                            + (ctx.paymentId ? ` (ID ${ctx.paymentId})` : ''))
-                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
-                    + (ctx.viewUrl ? `\nYour booking: ${ctx.viewUrl}` : '')
+                ], ctx),
+                text: bookingText(ctx, {
+                    heading: online ? '✅ *Webinar registration confirmed*' : '✅ *Booking confirmed*',
+                    lead: online
+                        ? `Thank you for registering for our webinar *${title}*${/[.?!]$/.test(title) ? '' : '.'}`
+                        : `Your seat for *${title}* is confirmed.`,
+                    closing: online ? 'See you online!' : 'We look forward to welcoming you!'
+                })
             }
         };
     },
@@ -637,34 +884,32 @@ const TEMPLATES = {
                 type: 'warning'
             },
             email: {
-                subject: `Booking cancelled — ${title} (${ctx.bookingRef})`,
+                subject: `Booking cancelled: ${title}`,
                 title: 'Your booking has been cancelled',
-                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''}`,
+                preheader: [title, ctx.whenLabel].filter(Boolean).join(' · '),
                 tone: 'danger',
-                badge: 'Booking cancelled',
                 highlight: { label: 'Cancelled booking', value: ctx.bookingRef },
                 actionButton: ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined,
-                bodyHtml: `
-                    <p style="margin:0 0 12px 0;">Your booking <strong>${esc(ctx.bookingRef)}</strong> for
-                    <strong>${ctx.eventTitleHtml || 'this event'}</strong> has been cancelled by the organiser,
-                    and the ${esc(ctx.seatsLabel)} it held ${ctx.seats === 1 ? 'has' : 'have'} been released.</p>
+                bodyHtml: `<p style="margin:0 0 12px 0;">The organiser has cancelled this booking and released
+                    the ${esc(ctx.seatsLabel)} it held.</p>
                     ${ctx.reason ? `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${esc(ctx.reason)}</p>` : ''}
-                    <p style="margin:0 0 12px 0;">If you think this is a mistake, or you have a question about
-                    a payment you made, please contact the organiser${ctx.contactLine
-                        ? ` — ${esc(ctx.contactLine)}` : ''}.</p>`,
+                    <p style="margin:0;">Think this is a mistake, or have a question about a payment? Reply to this
+                    email${ctx.contactLine ? ' or contact the organiser below' : ''}.</p>`,
                 facts: [
-                    { label: 'Booking reference', value: ctx.bookingRef },
-                    { label: 'Event', value: ctx.eventTitle },
                     { label: 'Date', value: ctx.dateLabel },
                     { label: 'Time', value: ctx.timeLabel },
-                    { label: 'Seats released', value: String(ctx.seats || '') },
-                    { label: 'Amount', value: ctx.settledVia === 'free' ? '' : ctx.amountLabel },
-                    { label: 'Payment', value: ctx.paymentLabel }
+                    { label: 'Format', value: ctx.formatLabel },
+                    { label: 'Seats released', value: seatsLine(ctx) },
+                    ...(ctx.settledVia === 'free' ? [] : [
+                        { label: 'Amount', value: ctx.amountLabel },
+                        { label: 'Payment', value: ctx.paymentLabel }
+                    ]),
+                    { label: 'Organiser', value: ctx.contactLine }
                 ]
             },
             whatsapp: {
                 ...bookingWhatsApp(TPL.bookingCancel, [
-                    ctx.firstName || 'Member',
+                    greetName(ctx),
                     ctx.bookingRef || 'your booking',
                     clause(title, 120) || 'the event',
                     orDash(ctx.whenLabel, 'Date to be confirmed'),
@@ -674,14 +919,18 @@ const TEMPLATES = {
                     ctx.firstName || 'Member',
                     `the CANCELLATION of your booking ${ctx.bookingRef} for ${clause(title, 110)}`,
                     ctx.whenLabel || 'the scheduled date'
-                ]),
-                text: `ACTIV: Booking cancelled`
-                    + `\n\nHello ${ctx.firstName || 'Member'},`
-                    + `\nYour booking ${ctx.bookingRef} for *${title}*`
-                    + (ctx.whenLabel ? ` (${ctx.whenLabel})` : '')
-                    + ` has been cancelled by the organiser.`
-                    + (ctx.reason ? `\nReason: ${oneLine(ctx.reason)}` : '')
+                ], ctx.posterUrl),
+                text: '*Booking cancelled*\n\n'
+                    + `Hello ${ctx.firstName || 'Member'},\n`
+                    + `Your booking for *${title}* has been cancelled by the organiser.\n\n`
+                    + waLines([
+                        ['🗓', ctx.whenLabel],
+                        ['🔖', `Booking ID: ${ctx.bookingRef}`],
+                        ['🎟', ctx.seatsLabel ? `${ctx.seatsLabel} released` : ''],
+                        ['📝', ctx.reason ? `Reason: ${oneLine(ctx.reason)}` : '']
+                    ])
                     + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+                    + `\n\n— ${ORG_SIGNATURE}`
             }
         };
     },
@@ -695,26 +944,16 @@ const TEMPLATES = {
                 type: 'info'
             },
             email: {
-                subject: `Waitlist — ${title} (${ctx.bookingRef})`,
-                title: 'You are on the waitlist',
-                preheader: `${title}${ctx.whenLabel ? ` · ${ctx.whenLabel}` : ''}`,
+                subject: `Waitlisted: ${title}`,
+                title: "You're on the waitlist",
+                preheader: [title, ctx.whenLabel].filter(Boolean).join(' · '),
                 tone: 'warning',
-                badge: 'Waitlist',
                 highlight: { label: 'Waitlist reference', value: ctx.bookingRef },
                 actionButton: ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined,
-                bodyHtml: `
-                    <p style="margin:0 0 12px 0;"><strong>${ctx.eventTitleHtml || 'This event'}</strong> is fully
-                    booked, so your request for ${esc(ctx.seatsLabel)} has been placed on the waitlist.
-                    <strong>No seat is held and nothing has been charged.</strong></p>
-                    <p style="margin:0 0 12px 0;">The organiser will contact you if seats become available.</p>`,
-                facts: [
-                    { label: 'Reference', value: ctx.bookingRef },
-                    { label: 'Event', value: ctx.eventTitle },
-                    { label: 'Date', value: ctx.dateLabel },
-                    { label: 'Time', value: ctx.timeLabel },
-                    { label: 'Seats requested', value: String(ctx.seats || '') },
-                    { label: 'Organiser contact', value: ctx.contactLine }
-                ]
+                bodyHtml: `<p style="margin:0;">This event is fully booked, so your request is on the waitlist.
+                    <strong>No seat is held and nothing has been charged</strong> — the organiser will contact
+                    you if a place opens up.</p>`,
+                facts: bookingFacts(ctx, { payment: false, seatsLabel: 'Seats requested' })
             },
             whatsapp: {
                 template: TPL.event,
@@ -723,72 +962,67 @@ const TEMPLATES = {
                     `your WAITLIST request ${ctx.bookingRef} for ${clause(title, 110)} (event full, nothing charged)`,
                     ctx.whenLabel || 'the scheduled date'
                 ],
-                text: `ACTIV: You are on the waitlist`
-                    + `\n\nHello ${ctx.firstName || 'Member'},`
-                    + `\n*${title}* is fully booked. Your request for ${ctx.seatsLabel} is on the waitlist`
-                    + ` (${ctx.bookingRef}). No seat is held and nothing has been charged.`
+                text: "*You're on the waitlist*\n\n"
+                    + `Hello ${ctx.firstName || 'Member'},\n`
+                    + `*${title}* is fully booked, so your request is on the waitlist. `
+                    + 'No seat is held and nothing has been charged.\n\n'
+                    + waLines([
+                        ['🗓', ctx.whenLabel],
+                        ['🎟', ctx.seatsLabel ? `${ctx.seatsLabel} requested` : ''],
+                        ['🔖', `Reference: ${ctx.bookingRef}`]
+                    ])
                     + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+                    + `\n\n— ${ORG_SIGNATURE}`
             }
         };
     },
 
     EVENT_BOOKING_REMINDER: (ctx) => {
         const title = ctx.eventTitle || 'your event';
+        const online = !!ctx.isOnline;
+        const when = ctx.startsInLabel || 'soon';
         return {
             inApp: {
-                title: 'Event reminder',
-                message: `${title} starts ${ctx.startsInLabel}${ctx.whenLabel ? ` — ${ctx.whenLabel}` : ''}.`,
+                title: online ? 'Webinar reminder' : 'Event reminder',
+                message: `${title} starts ${when}${ctx.whenLabel ? ` — ${ctx.whenLabel}` : ''}.`,
                 type: 'info'
             },
             email: {
-                subject: `Reminder: ${title} starts ${ctx.startsInLabel}`,
-                title: `${title} starts ${ctx.startsInLabel}`,
-                preheader: `${ctx.whenLabel || ''}${ctx.venueLabel ? ` · ${ctx.venueLabel}` : ''}`,
+                subject: `Reminder: ${title} starts ${when}`,
+                title,
+                preheader: `${online ? 'Your webinar' : 'Your event'} starts ${when}`,
                 tone: 'info',
-                badge: 'Event reminder',
-                highlight: { label: 'Your booking reference', value: ctx.bookingRef, note: 'Show this at the registration desk.' },
-                bodyHtml: `
-                    <p style="margin:0 0 12px 0;">This is a reminder that
-                    <strong>${ctx.eventTitleHtml || 'your event'}</strong> starts
-                    <strong>${esc(ctx.startsInLabel)}</strong>. Your ${esc(ctx.seatsLabel)}
-                    ${ctx.seats === 1 ? 'is' : 'are'} confirmed under booking
-                    <strong>${esc(ctx.bookingRef)}</strong>.</p>
-                    ${participantsHtml(ctx.participantNames)}
-                    ${beforeYouComeHtml(ctx)}`,
-                facts: [
-                    { label: 'Booking reference', value: ctx.bookingRef },
-                    { label: 'Date', value: ctx.dateLabel },
-                    { label: 'Time', value: ctx.timeLabel },
-                    { label: ctx.isOnline ? 'Attend' : 'Venue', value: ctx.venueLabel },
-                    { label: 'Seats', value: String(ctx.seats || '') },
-                    { label: 'Organiser contact', value: ctx.contactLine }
-                ],
-                actionButton: ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined,
-                secondaryButton: ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined
+                highlight: {
+                    label: 'Booking ID',
+                    value: ctx.bookingRef,
+                    note: online ? 'Keep this for any question about your registration.' : 'Show this at the registration desk.'
+                },
+                bodyHtml: online
+                    ? `<p style="margin:0;">${ctx.registerUrl
+                        ? 'Your place is reserved. Not registered on the platform yet? Do it now with the button below —'
+                            + ' your personal joining link is then emailed to you.'
+                        : 'Your place is reserved. The registration link will reach you shortly.'}</p>`
+                    : '<p style="margin:0;">Your seat is reserved — we look forward to seeing you.</p>',
+                facts: bookingFacts(ctx, { payment: false }),
+                actionButton: online && ctx.registerUrl
+                    ? { label: `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}`, url: ctx.registerUrl }
+                    : (ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined),
+                secondaryButton: online
+                    ? undefined
+                    : (ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined),
+                afterHtml: beforeYouComeHtml(ctx)
             },
             whatsapp: {
-                ...bookingWhatsApp(TPL.bookingReminder, [
+                ...richBookingWhatsApp('reminder', [
                     ctx.firstName || 'Member',
-                    clause(title, 120) || 'your event',
-                    ctx.startsInLabel || 'soon',
-                    orDash(ctx.whenLabel, 'Date to be confirmed'),
-                    orDash(ctx.venueLabel, 'To be announced'),
-                    ctx.bookingRef || 'See your email',
-                    orDash(ctx.seatsLabel)
-                ], [
-                    ctx.firstName || 'Member',
-                    `${clause(title, 110)} (booking ${ctx.bookingRef}, ${ctx.seatsLabel})`,
-                    ctx.whenLabel || 'the scheduled date'
-                ]),
-                text: `ACTIV reminder ⏰`
-                    + `\n\nHello ${ctx.firstName || 'Member'},`
-                    + `\n*${title}* starts ${ctx.startsInLabel}.`
-                    + (ctx.dateLabel ? `\nDate: ${ctx.dateLabel}` : '')
-                    + (ctx.timeLabel ? `\nTime: ${ctx.timeLabel}` : '')
-                    + (ctx.venueLabel ? `\n${ctx.isOnline ? 'Attend' : 'Venue'}: ${ctx.venueLabel}` : '')
-                    + (ctx.mapUrl ? `\nMap: ${ctx.mapUrl}` : '')
-                    + `\nBooking: ${ctx.bookingRef} (${ctx.seatsLabel})`
-                    + (ctx.contactLine ? `\n\nQuestions? ${ctx.contactLine}` : '')
+                    `${clause(title, 110)} (${whereLine(ctx)}, booking ${ctx.bookingRef})`,
+                    `${ctx.whenLabel || 'the scheduled date'} - it starts ${when}`
+                ], ctx),
+                text: bookingText(ctx, {
+                    heading: `⏰ *${online ? 'Webinar' : 'Event'} reminder*`,
+                    lead: `*${title}* starts *${when}*!`,
+                    closing: online ? 'See you online!' : 'See you there!'
+                })
             }
         };
     }
@@ -846,64 +1080,110 @@ const TEMPLATES = {
  */
 const WHATSAPP_TEMPLATES = [
     /*
-     * THE DETAILED BOOKING TEMPLATES — Meta Cloud API ({{n}} placeholders).
+     * THE DETAILED BOOKING TEMPLATES — Meta Cloud API ({{n}} placeholders),
+     * each with the event POSTER as an IMAGE header and "ACTIV" as the footer.
      *
      * Sent only once their names are set (BOTBEE_TPL_BOOKING, _CANCEL,
-     * _REMINDER). `scripts/whatsapp-booking-templates.js --submit` creates them
-     * on the WhatsApp Business Account for review; the samples are what Meta's
-     * reviewers see. Emoji are fine in a Utility body; every variable has text
-     * on both sides, which review requires.
+     * _REMINDER). Until then the booking goes out through the generic approved
+     * event template. Create them in BotBee -> WhatsApp -> Message Templates
+     * (Header: Image, with any sample picture; Category: Utility; Language:
+     * English), or with `scripts/whatsapp-booking-templates.js --submit` once
+     * META_WABA_ID holds the real WhatsApp Business Account id. Every variable
+     * has text on both sides, which review requires; values never contain a
+     * newline, which Meta refuses.
      */
     {
-        name: 'activ_booking_confirmed',
+        /* ONLINE event, confirmed: register on the platform, link arrives by email. */
+        name: 'activ_webinar_registration_v2',
+        envKey: 'BOTBEE_TPL_BOOKING_WEBINAR',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '✅ Thank you for registering for our webinar *{{2}}*.\n\n'
+            + '🗓 *Date:* {{3}}\n'
+            + '⏰ *Time:* {{4}}\n'
+            + '💻 *Platform:* {{5}}\n'
+            + '🔖 *Booking ID:* {{6}}\n\n'
+            + '👉 *One last step - register here:*\n{{7}}\n\n'
+            + '📧 Once you register, your personal joining link will be emailed to {{8}}.\n\n'
+            + '⏱ Please join 5 minutes before the start.\n'
+            + '📞 Need help? Contact {{9}}.\n\n'
+            + 'We look forward to seeing you online!',
+        params: ['full name', 'event', 'date', 'time', 'platform', 'booking ID', 'registration link',
+            'email', 'organiser contact'],
+        samples: ['Tharun', 'How to get business opportunities at NLC', 'Sunday, 27 September 2026',
+            '3:00 PM - 6:00 PM IST', 'Zoom', 'ACTIVB-MUHCP7NA-710D', 'https://zoom.us/meeting/register/abc123',
+            'tharun@example.com', 'Rajesh - +91 82201 12188']
+    },
+    {
+        /* IN-PERSON event, confirmed. */
+        name: 'activ_event_booking_v2',
         envKey: 'BOTBEE_TPL_BOOKING',
         category: 'Utility',
         meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
         body: '(Meta template with variables - submit bodyWithVariables below)',
-        bodyWithVariables: 'Hello {{1}}, your booking for *{{2}}* is confirmed! 🎉\n\n'
-            + '📅 Date & time: {{3}}\n'
-            + '📍 Venue: {{4}}\n'
-            + '🎟️ Seats: {{5}}\n'
-            + '💳 Payment: {{6}}\n'
-            + '🔖 Booking reference: {{7}}\n\n'
-            + 'Please arrive 15 to 30 minutes early and show your booking reference at the registration desk. '
-            + 'A detailed confirmation has also been sent to your email.\n\n'
-            + 'We look forward to welcoming you! Reply EVENTS to see your bookings and upcoming ACTIV events.',
-        params: ['first name', 'event', 'date & time', 'venue', 'seats', 'payment', 'booking reference'],
-        samples: ['Tharun', 'SCST Economic Liberty Conference', 'Saturday, 10 October 2026, 9:00 AM - 5:30 PM IST',
-            'DNC Vijay Mahal, Dharmapuri', '2 seats (Tharun, Ravi)', 'Rs 2,000 - Paid online', 'ACTIVB-MUEE9IBU-445B']
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '✅ Your seat is confirmed for *{{2}}*.\n\n'
+            + '🗓 *Date:* {{3}}\n'
+            + '⏰ *Time:* {{4}}\n'
+            + '📍 *Venue:* {{5}}\n'
+            + '🗺 *Directions:* {{6}}\n'
+            + '🎟 *Seats & fee:* {{7}}\n'
+            + '🔖 *Booking ID:* {{8}}\n\n'
+            + '📌 *Please note:* {{9}}\n\n'
+            + '📞 Need help? Contact {{10}}.\n\n'
+            + 'We look forward to welcoming you!',
+        params: ['full name', 'event', 'date', 'time', 'venue', 'map link', 'seats & fee', 'booking ID',
+            'note for attendees', 'organiser contact'],
+        samples: ['Tharun', 'Entrepreneurs Awareness Programme', 'Friday, 23 October 2026', '9:00 AM - 5:00 PM IST',
+            'Annamalai University, Chidambaram', 'https://maps.app.goo.gl/abc123', '1 seat - Tharun | Free',
+            'ACTIVB-MUHAF0VR-2EA6', 'Arrive 15-30 minutes early and carry a photo ID', 'Rajesh - +91 82201 12188']
     },
     {
-        name: 'activ_booking_cancelled',
-        envKey: 'BOTBEE_TPL_BOOKING_CANCEL',
-        category: 'Utility',
-        meta: true,
-        body: '(Meta template with variables - submit bodyWithVariables below)',
-        bodyWithVariables: 'Hello {{1}}, your booking {{2}} for *{{3}}* on {{4}} has been cancelled by the organiser.\n\n'
-            + '📝 Reason: {{5}}\n\n'
-            + 'The seats held by this booking have been released. If you think this is a mistake or have a '
-            + 'question about a payment, please contact {{6}}.\n\n'
-            + 'Reply EVENTS to see other upcoming ACTIV events.',
-        params: ['first name', 'booking reference', 'event', 'date & time', 'reason', 'organiser contact'],
-        samples: ['Tharun', 'ACTIVB-MUEE9IBU-445B', 'SCST Economic Liberty Conference',
-            'Saturday, 10 October 2026, 9:00 AM IST', 'Duplicate booking', 'ACTIV Events, +91 82201 12188']
-    },
-    {
-        name: 'activ_booking_reminder',
+        /* Either format, a day or so before. */
+        name: 'activ_booking_reminder_v2',
         envKey: 'BOTBEE_TPL_BOOKING_REMINDER',
         category: 'Utility',
         meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
         body: '(Meta template with variables - submit bodyWithVariables below)',
-        bodyWithVariables: 'Hello {{1}}, a friendly reminder that *{{2}}* starts {{3}}! ⏰\n\n'
-            + '📅 Date & time: {{4}}\n'
-            + '📍 Venue: {{5}}\n'
-            + '🔖 Booking reference: {{6}} ({{7}})\n\n'
-            + 'Please arrive 15 to 30 minutes early for registration and carry your booking reference. '
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '⏰ Friendly reminder: *{{2}}* starts *{{3}}*.\n\n'
+            + '🗓 *Date:* {{4}}\n'
+            + '⏰ *Time:* {{5}}\n'
+            + '📍 *Where:* {{6}}\n'
+            + '🔗 *Link:* {{7}}\n'
+            + '🔖 *Booking ID:* {{8}}\n\n'
+            + '📌 *Please note:* {{9}}\n\n'
+            + '📞 Need help? Contact {{10}}.\n\n'
             + 'See you there!',
-        params: ['first name', 'event', 'starts in', 'date & time', 'venue', 'booking reference', 'seats'],
-        samples: ['Tharun', 'SCST Economic Liberty Conference', 'tomorrow',
-            'Saturday, 10 October 2026, 9:00 AM - 5:30 PM IST', 'DNC Vijay Mahal, Dharmapuri',
-            'ACTIVB-MUEE9IBU-445B', '2 seats']
+        params: ['full name', 'event', 'starts in', 'date', 'time', 'venue, or online + platform',
+            'registration link / map', 'booking ID', 'note for attendees', 'organiser contact'],
+        samples: ['Tharun', 'SCST Economic Liberty Conference', 'tomorrow', 'Saturday, 10 October 2026',
+            '9:00 AM - 5:30 PM IST', 'DNC Vijay Mahal, Dharmapuri', 'https://maps.app.goo.gl/abc123',
+            'ACTIVB-MUEE9IBU-445B', 'Arrive 15-30 minutes early and carry a photo ID', 'Rajesh - +91 82201 12188']
+    },
+    {
+        name: 'activ_booking_cancelled_v2',
+        envKey: 'BOTBEE_TPL_BOOKING_CANCEL',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '❌ Your booking *{{2}}* for *{{3}}* on {{4}} has been cancelled by the organiser.\n\n'
+            + '📝 *Reason:* {{5}}\n\n'
+            + 'Your seats have been released. For any questions, please contact {{6}}.',
+        params: ['full name', 'booking ID', 'event', 'date & time', 'reason', 'organiser contact'],
+        samples: ['Tharun', 'ACTIVB-MUEE9IBU-445B', 'SCST Economic Liberty Conference',
+            'Saturday, 10 October 2026, 9:00 AM IST', 'Duplicate booking', 'Rajesh, +91 82201 12188']
     },
     {
         name: TPL.welcome,

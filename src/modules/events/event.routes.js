@@ -3,15 +3,31 @@ const controller = require('./event.controller');
 const upload = require('../../core/middleware/upload');
 const { verifyToken, requireRole } = require('../../core/middleware/auth');
 
+const { resolveEventParam } = require('./eventSlug');
+
 const router = express.Router();
+
+// `/events/<slug>` and `/events/<id>` are the same event; every handler sees the id.
+router.param('id', resolveEventParam);
 
 /**
  * Who manages the programme: the super admin, and the EVENTS ADMIN — a
- * separate account whose whole portal is events, categories and bookings.
- * Every write and every booking screen below is open to both, and to nobody
- * else; the events admin reaches no other module.
+ * separate account that runs the programme. Every event and category write
+ * below is open to both, and to nobody else. Bookings are NOT — see
+ * BOOKING_VIEWERS.
  */
 const EVENT_MANAGERS = ['super_admin', 'events_admin'];
+
+/*
+ * BOOKINGS ARE THE SUPER ADMIN'S ALONE.
+ *
+ * The events admin writes the programme — events, categories, the gallery,
+ * news and schemes — but does not see who booked or what was paid: the
+ * booking screens carry every attendee's contact details and the takings.
+ * Every booking and attendee endpoint below reads this list, not
+ * EVENT_MANAGERS; the website hides the Bookings section for that role too.
+ */
+const BOOKING_VIEWERS = ['super_admin'];
 
 router.use(verifyToken);
 
@@ -39,7 +55,7 @@ router.get('/reach', requireRole(...EVENT_MANAGERS), controller.reach);
  * gives twice: registered after `/:id` it is read as the event id "bookings"
  * and answers 400 on a screen that would simply look broken.
  */
-router.get('/bookings/overview', requireRole(...EVENT_MANAGERS), controller.bookingOverview);
+router.get('/bookings/overview', requireRole(...BOOKING_VIEWERS), controller.bookingOverview);
 
 /*
  * The contact book: everyone who has booked anything, and one person's history.
@@ -49,8 +65,8 @@ router.get('/bookings/overview', requireRole(...EVENT_MANAGERS), controller.book
  * in a path segment is a fight with every proxy that thinks `.com` is a file
  * extension, so the address travels as a query parameter.
  */
-router.get('/bookings/people', requireRole(...EVENT_MANAGERS), controller.listBookingPeople);
-router.get('/bookings/person', requireRole(...EVENT_MANAGERS), controller.getBookingPerson);
+router.get('/bookings/people', requireRole(...BOOKING_VIEWERS), controller.listBookingPeople);
+router.get('/bookings/person', requireRole(...BOOKING_VIEWERS), controller.getBookingPerson);
 
 /*
  * CATEGORIES — the chips an event is filed under.
@@ -83,7 +99,7 @@ router.post('/:id/register/pay', controller.payRegistration);
 router.delete('/:id/register', controller.cancelRegistration);
 
 // The attendee list is the organiser's, not the attendees'.
-router.get('/:id/registrations', requireRole(...EVENT_MANAGERS), controller.listRegistrations);
+router.get('/:id/registrations', requireRole(...BOOKING_VIEWERS), controller.listRegistrations);
 
 /*
  * The BOOKING list — the guest "Book Now" flow's other end.
@@ -98,7 +114,7 @@ router.get('/:id/registrations', requireRole(...EVENT_MANAGERS), controller.list
  * an id — `/:id/bookings/:ref` cannot collide with anything above it because
  * the literal `bookings` segment sits between the two parameters.
  */
-router.get('/:id/bookings', requireRole(...EVENT_MANAGERS), controller.listBookings);
+router.get('/:id/bookings', requireRole(...BOOKING_VIEWERS), controller.listBookings);
 /*
  * The spreadsheet, and the door list.
  *
@@ -107,11 +123,11 @@ router.get('/:id/bookings', requireRole(...EVENT_MANAGERS), controller.listBooki
  * declaration order — registered after it, "export" is read as a booking
  * reference and the download answers "booking not found".
  */
-router.get('/:id/bookings/export', requireRole(...EVENT_MANAGERS), controller.exportBookings);
-router.get('/:id/attendees', requireRole(...EVENT_MANAGERS), controller.listAttendees);
-router.get('/:id/bookings/:ref', requireRole(...EVENT_MANAGERS), controller.getBooking);
-router.post('/:id/bookings/:ref/record-payment', requireRole(...EVENT_MANAGERS), controller.recordBookingPayment);
-router.post('/:id/bookings/:ref/cancel', requireRole(...EVENT_MANAGERS), controller.cancelBooking);
+router.get('/:id/bookings/export', requireRole(...BOOKING_VIEWERS), controller.exportBookings);
+router.get('/:id/attendees', requireRole(...BOOKING_VIEWERS), controller.listAttendees);
+router.get('/:id/bookings/:ref', requireRole(...BOOKING_VIEWERS), controller.getBooking);
+router.post('/:id/bookings/:ref/record-payment', requireRole(...BOOKING_VIEWERS), controller.recordBookingPayment);
+router.post('/:id/bookings/:ref/cancel', requireRole(...BOOKING_VIEWERS), controller.cancelBooking);
 
 // Write: super admin only.
 router.post('/', requireRole(...EVENT_MANAGERS), upload.single('banner'), controller.createEvent);

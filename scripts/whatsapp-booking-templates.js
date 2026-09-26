@@ -29,18 +29,56 @@ const base = (process.env.META_BASE_URL || 'https://graph.facebook.com').replace
 const language = process.env.META_TEMPLATE_LANGUAGE || 'en_US';
 
 const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta);
+let imageHandle = process.env.META_TEMPLATE_IMAGE_HANDLE || '';
+
+/**
+ * Meta reviews an image-header template against a SAMPLE image, uploaded first
+ * through the resumable-upload API. Without META_TEMPLATE_IMAGE_HANDLE this
+ * uploads the ACTIV logo from src/assets/email-logo.png and uses its handle.
+ */
+const uploadSampleImage = async() => {
+    if (imageHandle) return imageHandle;
+    const fs = require('fs');
+    const file = require('path').join(__dirname, '..', 'src', 'assets', 'email-logo.png');
+    const bytes = fs.readFileSync(file);
+    const dbg = await axios.get(`${base}/${version}/debug_token`, {
+        params: { input_token: token }, headers: { Authorization: `Bearer ${token}` }, timeout: 20000
+    });
+    const appId = dbg.data.data.app_id;
+    const session = await axios.post(`${base}/${version}/${appId}/uploads`, null, {
+        params: { file_length: bytes.length, file_type: 'image/png', file_name: 'activ-sample.png' },
+        headers: { Authorization: `Bearer ${token}` }, timeout: 20000
+    });
+    const up = await axios.post(`${base}/${version}/${session.data.id}`, bytes, {
+        headers: { Authorization: `OAuth ${token}`, file_offset: '0', 'Content-Type': 'application/octet-stream' },
+        timeout: 60000, maxBodyLength: Infinity
+    });
+    imageHandle = up.data.h;
+    console.log('Sample header image uploaded.');
+    return imageHandle;
+};
 
 const payloadFor = (t) => ({
     name: t.name,
     language,
     category: 'UTILITY',
     components: [
+        /*
+         * The event POSTER. Meta needs a sample image for review, uploaded
+         * first through its resumable-upload API; its handle goes in
+         * META_TEMPLATE_IMAGE_HANDLE. Without one the template is submitted
+         * with no header — create it in BotBee instead, which uploads the
+         * sample for you.
+         */
+        ...(t.header === 'IMAGE' && imageHandle
+            ? [{ type: 'HEADER', format: 'IMAGE', example: { header_handle: [imageHandle] } }]
+            : []),
         {
             type: 'BODY',
             text: t.bodyWithVariables,
             example: { body_text: [t.samples] }
         },
-        { type: 'FOOTER', text: 'ACTIV Platform' }
+        { type: 'FOOTER', text: t.footer || 'ACTIV' }
     ]
 });
 
@@ -85,6 +123,7 @@ const need = () => {
     }
 
     need();
+    await uploadSampleImage();
     for (const t of booking) {
         try {
             const res = await axios.post(`${base}/${version}/${waba}/message_templates`, payloadFor(t), {

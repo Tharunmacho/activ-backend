@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../../config/logger');
+const { persistFile } = require('../storage/uploadStore');
 
 /**
  * Keep base64 images out of the database.
@@ -63,7 +64,13 @@ const persistInlineImage = (value, prefix = 'upload') => {
         // downstream.
         const ext = EXTENSIONS[mime] || '.jpg';
         const name = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-        fs.writeFileSync(path.join(UPLOADS_DIR, name), buffer);
+        const filePath = path.join(UPLOADS_DIR, name);
+        fs.writeFileSync(filePath, buffer);
+
+        // Not a multer upload, so `persistUploadsMiddleware` never sees it —
+        // without this the file lives only on the container's disk and is
+        // gone after the next deploy.
+        persistFile(filePath, { contentType: mime });
 
         logger.info(`Converted an inline base64 image to ${name} (${(buffer.length / 1024).toFixed(1)} KB)`);
         return `/uploads/${name}`;

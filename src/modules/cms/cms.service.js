@@ -77,6 +77,8 @@ const pickEventDetail = (event = {}) => ({
     registrationClosesAt: event.registrationClosesAt,
     capacity: event.capacity,
     registrationNote: event.registrationNote,
+    topic: event.topic,
+    language: event.language,
     reminderOffsetsHours: event.reminderOffsetsHours,
     // What a seat costs, and every region the event was aimed at. Both have to
     // reach the editor or it cannot show back what was just saved.
@@ -105,6 +107,15 @@ const pickEventDetail = (event = {}) => ({
      * page". True unless somebody turned it off — see the schema.
      */
     showOnHome: event.showOnHome !== false,
+    /*
+     * The home page BANNER, and the words over this event there — the
+     * gallery's own banner fields, on an event. See the schema.
+     */
+    showInBanner: event.showInBanner !== false,
+    bannerHeadline: event.bannerHeadline || '',
+    bannerHighlight: event.bannerHighlight || '',
+    bannerSubheadline: event.bannerSubheadline || '',
+    bannerAlign: event.bannerAlign === 'right' ? 'right' : 'left',
     // The first of the two audience boxes. Sent back with `targets`, not in
     // place of it — the form restores both or it restores neither.
     reachEveryone: event.reachEveryone,
@@ -160,7 +171,7 @@ const eventDetailUpdates = (payload = {}) => {
     }
 
     ['category', 'venueAddress', 'venueMapUrl', 'contactName', 'contactPhone', 'contactEmail', 'registrationNote',
-        'onlinePlatform', 'onlineUrl']
+        'onlinePlatform', 'onlineUrl', 'topic', 'language']
         .forEach((key) => {
             if (payload[key] !== undefined) update[key] = str(payload[key]);
         });
@@ -198,6 +209,19 @@ const eventDetailUpdates = (payload = {}) => {
     if (payload.showOnHome !== undefined) {
         update.showOnHome = payload.showOnHome === true || payload.showOnHome === 'true';
     }
+
+    /*
+     * The home page banner — the switch and the words, as on a gallery item
+     * (`updateGalleryItem`), with the same lengths. Absent means untouched:
+     * the Home screen sends only the switch, or only the words.
+     */
+    if (payload.showInBanner !== undefined) {
+        update.showInBanner = payload.showInBanner === true || payload.showInBanner === 'true';
+    }
+    [['bannerHeadline', 120], ['bannerHighlight', 60], ['bannerSubheadline', 280]].forEach(([field, max]) => {
+        if (payload[field] !== undefined) update[field] = String(payload[field] || '').trim().slice(0, max);
+    });
+    if (payload.bannerAlign !== undefined) update.bannerAlign = payload.bannerAlign === 'right' ? 'right' : 'left';
 
     // "Everyone in the association" — see the schema. Absent means untouched,
     // like every other flag here.
@@ -2033,6 +2057,7 @@ class CmsService {
     mapEvents(list = [], { privileged = false } = {}) {
         return (list || []).map(e => ({
             id: String(e._id),
+            slug: e.slug || '',
             title: e.title || '',
             description: e.description || '',
             startAt: e.startAt || null,

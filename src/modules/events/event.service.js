@@ -176,6 +176,8 @@ const registrationClosesAt = (doc = {}) => {
 
 const toEvent = (doc = {}, extras = {}) => ({
     id: doc._id ? doc._id.toString() : '',
+    // The public address; see eventSlug.js. Links use it, the API accepts either.
+    slug: doc.slug || '',
     title: doc.title || '',
     description: doc.description || '',
     startAt: doc.startAt || null,
@@ -267,6 +269,20 @@ const toEvent = (doc = {}, extras = {}) => ({
      * every event, so a switch an editor had just turned off came back on.
      */
     showOnHome: doc.showOnHome !== false,
+    /*
+     * The home page BANNER switch and its words — here for the reason
+     * `showOnHome` is: the CMS lists map through this function, and a field
+     * added only to the CMS mapper reads back `undefined`.
+     */
+    showInBanner: doc.showInBanner !== false,
+    // The subject and the language — see the schema. Mapped here for the
+    // reason the banner fields are: the CMS lists read through this function.
+    topic: doc.topic || '',
+    language: doc.language || '',
+    bannerHeadline: doc.bannerHeadline || '',
+    bannerHighlight: doc.bannerHighlight || '',
+    bannerSubheadline: doc.bannerSubheadline || '',
+    bannerAlign: doc.bannerAlign === 'right' ? 'right' : 'left',
     channel: doc.channel || 'public',
     /*
      * Whether this goes to everyone regardless of `targets`.

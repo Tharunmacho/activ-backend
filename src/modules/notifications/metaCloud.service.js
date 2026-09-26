@@ -88,7 +88,7 @@ class MetaCloudService {
      * request" behaviour, and inventing one here would send a second message the
      * caller did not ask for.
      */
-    async sendTemplateMessage(phoneNumber, templateName, templateParams = [], languageCode = 'en_US', textFallback = '') { // eslint-disable-line no-unused-vars
+    async sendTemplateMessage(phoneNumber, templateName, templateParams = [], languageCode = 'en_US', textFallback = '', options = {}) { // eslint-disable-line no-unused-vars
         const phone = this.normalizePhoneNumber(phoneNumber);
         if (!phone) return { success: false, error: 'No usable WhatsApp number' };
         if (!templateName) return { success: false, error: 'Template name is required' };
@@ -121,12 +121,28 @@ class MetaCloudService {
          * The distinction is between "no parameters" and "a parameter list that
          * happens to be empty", and Meta treats them as different requests.
          */
+        const components = [];
+        /*
+         * THE EVENT POSTER, as the template's IMAGE header. Only sent when the
+         * caller has one AND the template was created with an image header —
+         * Meta refuses a header parameter on a template that has none, and
+         * refuses a template with an image header that is sent without one.
+         * The caller decides both by naming `headerImage` only for the
+         * poster templates (see `bookingWhatsApp`).
+         */
+        if (options && options.headerImage) {
+            components.push({
+                type: 'header',
+                parameters: [{ type: 'image', image: { link: String(options.headerImage) } }]
+            });
+        }
         if (params.length) {
-            template.components = [{
+            components.push({
                 type: 'body',
                 parameters: params.map((text) => ({ type: 'text', text }))
-            }];
+            });
         }
+        if (components.length) template.components = components;
 
         const body = {
             messaging_product: 'whatsapp',

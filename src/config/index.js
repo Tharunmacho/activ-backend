@@ -110,7 +110,7 @@ module.exports = {
                 ? String(process.env.EMAIL_SECURE).toLowerCase() === 'true'
                 : port === 465,
 
-            fromName: real(process.env.EMAIL_FROM_NAME) || 'ACTIV Platform',
+            fromName: real(process.env.EMAIL_FROM_NAME) || 'ACTIV',
             /** The envelope address every message is actually sent from. */
             defaultFrom,
             /** Legacy composite value, still read by `core/utils/mailer.js`. */
@@ -320,9 +320,29 @@ module.exports = {
                  * approved it (scripts/whatsapp-booking-templates.js submits them),
                  * and a send that still fails falls back to `event` on its own.
                  */
-                booking: real(process.env.BOTBEE_TPL_BOOKING) || '',
-                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || '',
-                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || ''
+                /*
+                 * The CUSTOM templates (`_v2` in notificationTemplates.js) are
+                 * named by default and tried FIRST. While one is still in Meta
+                 * review Meta refuses it and the send falls through the chain to
+                 * the approved poster template, so nothing is lost; the day it is
+                 * approved it becomes the only one sent, with no redeploy.
+                 */
+                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v2',
+                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v2',
+                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || 'activ_booking_cancelled_v2',
+                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v2',
+                /*
+                 * Two ALREADY-APPROVED templates on the account, both with the
+                 * event poster as an image header and the association's full
+                 * name as the footer. Used for a confirmation and a reminder
+                 * whenever the dedicated one above is not set:
+                 *   cnfrm  in person — 13 variables: attendee, venue, date,
+                 *          time from/to, seats, amount
+                 *   ccmsg  online    — 4 variables: attendee, event, link, email
+                 * Set either to `none` to fall back to the generic template.
+                 */
+                bookingInPerson: real(process.env.BOTBEE_TPL_BOOKING_INPERSON) || 'cnfrm',
+                bookingOnline: real(process.env.BOTBEE_TPL_BOOKING_ONLINE) || 'ccmsg'
             },
 
             /*
@@ -371,6 +391,24 @@ module.exports = {
     upload: {
         maxFileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 5 * 1024 * 1024,
         uploadDir: process.env.UPLOAD_DIR || './uploads'
+    },
+
+    /**
+     * S3-compatible bucket (Garage) that holds every upload — see
+     * `core/storage/objectStore.js`. Unset, uploads fall back to GridFS.
+     */
+    objectStorage: {
+        region: process.env.AWS_REGION || 'garage',
+        bucket: process.env.AWS_BUCKET_NAME || '',
+        endpoint: process.env.AWS_ENDPOINT_URL || '',
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+        /** Key prefix inside the bucket; a file is `<prefix>/<filename>`. */
+        prefix: (process.env.AWS_UPLOAD_PREFIX || 'uploads').replace(/^\/+|\/+$/g, ''),
+
+        get isConfigured() {
+            return !!(this.bucket && this.accessKeyId && this.secretAccessKey);
+        }
     },
 
     log: {

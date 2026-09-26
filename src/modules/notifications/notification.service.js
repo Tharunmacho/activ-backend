@@ -270,6 +270,8 @@ class NotificationService {
                         tone: rendered.email.tone,
                         badge: rendered.email.badge,
                         highlight: rendered.email.highlight,
+                        poster: rendered.email.poster,
+                        afterHtml: rendered.email.afterHtml,
                         contact
                     });
 
@@ -354,7 +356,10 @@ class NotificationService {
                         rendered.whatsapp.template,
                         rendered.whatsapp.params,
                         'en',
-                        rendered.whatsapp.text
+                        rendered.whatsapp.text,
+                        // The poster, for a template created with an image
+                        // header. The generic fallback below has none.
+                        { headerImage: rendered.whatsapp.headerImage || '' }
                     );
 
                     /*
@@ -364,18 +369,30 @@ class NotificationService {
                      * `fallback`. The failure is kept on the result so the log
                      * row still says the detailed template is broken.
                      */
-                    const fb = rendered.whatsapp.fallback;
-                    if (!sent.success && fb && fb.template && fb.template !== rendered.whatsapp.template) {
-                        const firstError = sent.error;
-                        logger.warn('Detailed WhatsApp template failed; retrying with the generic one', {
-                            event: eventName, template: rendered.whatsapp.template, error: firstError
-                        });
-                        const retry = await whatsappTemplate.sendTemplateMessage(
-                            phone, fb.template, fb.params, 'en', rendered.whatsapp.text
-                        );
-                        sent = retry.success
-                            ? { ...retry, error: `Detailed template "${rendered.whatsapp.template}" failed: ${firstError}` }
-                            : retry;
+                    /*
+                     * The fallback is a CHAIN (custom -> approved poster ->
+                     * generic), each step carrying its own poster header or
+                     * none. Walked until one is accepted.
+                     */
+                    let tried = rendered.whatsapp.template;
+                    let fb = rendered.whatsapp.fallback;
+                    const refused = [];
+                    while (!sent.success && fb && fb.template) {
+                        if (fb.template !== tried) {
+                            refused.push(`"${tried}": ${sent.error}`);
+                            logger.warn('WhatsApp template refused; trying the next one', {
+                                event: eventName, template: tried, next: fb.template, error: sent.error
+                            });
+                            sent = await whatsappTemplate.sendTemplateMessage(
+                                phone, fb.template, fb.params, 'en', rendered.whatsapp.text,
+                                { headerImage: fb.headerImage || '' }
+                            );
+                            tried = fb.template;
+                        }
+                        fb = fb.fallback;
+                    }
+                    if (sent.success && refused.length) {
+                        sent = { ...sent, error: `Sent on "${tried}" after ${refused.join('; ')}` };
                     }
 
                     /*
@@ -417,8 +434,8 @@ class NotificationService {
                         event: eventName,
                         channel: 'whatsapp',
                         recipient: sent.to || phone,
-                        templateId: rendered.whatsapp.template,
-                        subject: rendered.whatsapp.template,
+                        templateId: sent.template || rendered.whatsapp.template,
+                        subject: sent.template || rendered.whatsapp.template,
                         status: sent.success ? 'sent' : 'failed',
                         mock: !!sent.mock,
                         providerMessageId: sent.messageId,

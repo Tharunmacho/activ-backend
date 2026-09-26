@@ -124,6 +124,32 @@ const startServer = async() => {
             logger.warn('Event reminder scheduler not started', { error: error && error.message });
         }
 
+        /*
+         * Upload bucket. Checked at boot so a key without permission on the
+         * bucket is reported once, here, instead of once per upload. Then
+         * copy across anything uploaded while the bucket was unavailable —
+         * off the startup path, since it can take a while.
+         */
+        const objectStore = require('./core/storage/objectStore');
+        if (objectStore.isEnabled()) {
+            const probe = await objectStore.probe();
+            if (probe.ok) {
+                logger.info('S3 upload bucket is writable', { bucket: config.objectStorage.bucket });
+                require('./core/storage/uploadStore').syncToBucket()
+                    .then((r) => { if (r.copied || r.failed) logger.info('Synced pending uploads to the S3 bucket', r); })
+                    .catch((err) => logger.warn('Upload sync to S3 failed', { error: err && err.message }));
+            } else {
+                logger.error('S3 upload bucket is NOT usable — uploads are going to GridFS instead', {
+                    bucket: config.objectStorage.bucket,
+                    endpoint: config.objectStorage.endpoint,
+                    status: probe.status,
+                    reason: probe.reason,
+                });
+            }
+        } else {
+            logger.warn('No S3 upload bucket configured (AWS_BUCKET_NAME / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) — uploads go to GridFS');
+        }
+
         // Start listening
         server.listen(config.port, '0.0.0.0', () => {
             logger.info(`

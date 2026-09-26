@@ -1,3 +1,4 @@
+const { resolveEventId } = require('../events/eventSlug');
 const cmsService = require('./cms.service');
 const regionPages = require('./cms.regionPages.service');
 const news = require('./cms.news.service');
@@ -107,9 +108,11 @@ const canSeeDrafts = (req) =>
     !!(req.user && ['super_admin', 'cms_admin'].includes(req.user.role));
 
 /**
- * Events only: the content editors, plus the EVENTS ADMIN, whose portal is the
- * programme and nothing else. Kept apart from `canSeeDrafts` so that role never
- * sees a draft policy, gallery item or region page.
+ * Events and the gallery: the content editors, plus the EVENTS ADMIN, whose
+ * portal is the programme, the gallery, the news and the schemes. Kept apart
+ * from `canSeeDrafts` so that role never sees a draft policy or region page.
+ * (News and schemes need nothing here — they show drafts to any signed-in
+ * reader already.)
  */
 const canSeeEventDrafts = (req) =>
     canSeeDrafts(req) || !!(req.user && req.user.role === 'events_admin');
@@ -119,7 +122,7 @@ const canSeeEventDrafts = (req) =>
 const getGallery = asyncHandler(async(req, res) => {
     // Only a signed-in content admin may see hidden images; the public grid
     // must not be able to ask for them.
-    const includeHidden = canSeeDrafts(req) && String(req.query.includeHidden || '') === 'true';
+    const includeHidden = canSeeEventDrafts(req) && String(req.query.includeHidden || '') === 'true';
 
     // `?home=true` is the landing page's strip: only what an editor flagged for
     // it, newest first, without the long fields no card on that page reads.
@@ -137,7 +140,7 @@ const getGallery = asyncHandler(async(req, res) => {
  */
 const getGalleryItem = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(
-        await cmsService.getGalleryItem(req.params.id, { includeHidden: canSeeDrafts(req) }),
+        await cmsService.getGalleryItem(req.params.id, { includeHidden: canSeeEventDrafts(req) }),
     ));
 });
 
@@ -286,7 +289,7 @@ const getEvents = asyncHandler(async(req, res) => {
 const getEvent = asyncHandler(async(req, res) => {
     const editor = canSeeEventDrafts(req);
     res.json(ApiResponse.success(
-        await cmsService.listEvent(req.params.id, { includeDrafts: editor, privileged: editor }),
+        await cmsService.listEvent(await resolveEventId(req.params.id), { includeDrafts: editor, privileged: editor }),
     ));
 });
 

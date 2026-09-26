@@ -206,7 +206,7 @@ class BotBeeService {
      * as a failed row rather than swallowed, because it is fixed on their
      * dashboard and not in this code.
      */
-    async sendTemplateMessage(phoneNumber, templateName, templateParams = [], languageCode = 'en', textFallback = '') {
+    async sendTemplateMessage(phoneNumber, templateName, templateParams = [], languageCode = 'en', textFallback = '', options = {}) {
         const phone = this.normalizePhoneNumber(phoneNumber);
         if (!phone) return { success: false, error: 'No usable WhatsApp number' };
         if (!templateName) return { success: false, error: 'Template name is required' };
@@ -406,6 +406,21 @@ class BotBeeService {
 
         if (textFallback) {
             payload.message = textFallback;
+        }
+
+        /*
+         * The poster for an image-header template. BotBee documents no field
+         * for it, so it goes under each name its API has been seen to read;
+         * unknown keys are ignored. Meta Cloud (metaCloud.service) is the
+         * documented path and the one in use whenever META_ACCESS_TOKEN is set.
+         */
+        if (options && options.headerImage) {
+            const link = String(options.headerImage);
+            payload.media_url = link;
+            payload.header_url = link;
+            payload.header_media_url = link;
+            payload.image_url = link;
+            payload.media_type = 'image';
         }
 
         const result = await this.dispatch('template', phone, payload, usedTemplate);

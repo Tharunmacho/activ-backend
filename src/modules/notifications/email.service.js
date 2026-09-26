@@ -1,6 +1,13 @@
+const fs = require('fs');
+const path = require('path');
 const nodemailer = require('nodemailer');
 const config = require('../../config');
 const logger = require('../../config/logger');
+
+/** The logo, attached inline to every message whose HTML refers to it. */
+const LOGO_CID = 'activ-logo';
+const LOGO_PATH = path.join(__dirname, '../../assets/email-logo.png');
+const EMBEDDED_LOGO = fs.existsSync(LOGO_PATH);
 
 /**
  * Lifecycle email, addressed from the applicant's own regional office.
@@ -189,7 +196,10 @@ class EmailService {
                 // clients render nothing at all for HTML-only mail.
                 text: text || this.htmlToText(html),
                 html,
-                headers
+                headers,
+                attachments: EMBEDDED_LOGO && String(html || '').includes(`cid:${LOGO_CID}`)
+                    ? [{ filename: 'activ-logo.png', path: LOGO_PATH, cid: LOGO_CID, contentDisposition: 'inline' }]
+                    : undefined
             });
 
             logger.info('Notification email sent', { ...envelope, messageId: info.messageId });
@@ -246,23 +256,32 @@ class EmailService {
     /**
      * The one branded HTML shell.
      *
-     * Table-based and inline-styled on purpose: every mail client of consequence
-     * still discards `<style>` blocks and most of flexbox, so a layout that
-     * renders in a browser is not evidence it renders in Outlook.
+     * Table-based and inline-styled on purpose: most mail clients discard or
+     * rewrite `<style>` blocks and ignore flexbox, so every rule that matters
+     * for layout is inline. The `<style>` block carries only progressive extras
+     * — the phone-width stacking — which a client that drops it simply renders
+     * at the (still readable) desktop layout.
      *
-     * THE REAL ACTIV LOGO, from an absolute public URL. An email cannot carry a
-     * relative path, so it is `${FRONTEND_URL}/logo_ACTIVian-removebg-preview.png`
-     * — the same file the website header shows — or `EMAIL_LOGO_URL` when set.
-     * The logo sits on WHITE because the PNG is dark-on-transparent; on the old
-     * navy band it would vanish. `alt` text keeps the header readable in a
-     * client that blocks images until the reader allows them.
+     * THE LOGO IS EMBEDDED, NOT FETCHED. `cid:activ-logo` refers to
+     * `src/assets/email-logo.png`, which `sendEmail` attaches inline whenever
+     * the HTML mentions it. A remote logo was invisible in exactly the places
+     * it mattered: Gmail hides every remote image in a message it has filed as
+     * spam, and many clients block them until the reader opts in. It also
+     * depended on the website being up and serving the right path.
+     * `EMAIL_LOGO_URL` still overrides it for a deployment that wants a hosted
+     * logo. `alt` text keeps the header readable if both fail.
      *
      * Optional extras, all backwards compatible (every older caller passes none):
-     *   tone        'success' | 'info' | 'warning' | 'danger' — colours the badge
+     *   tone        'success' | 'info' | 'warning' | 'danger' — colours the hero
+     *               icon and the badge
      *   badge       short status label above the title ("BOOKING CONFIRMED")
      *   highlight   { label, value, note } — the one thing to keep, e.g. a
-     *               booking reference, printed large in a ticket-style box
+     *               booking reference, printed as a ticket stub
      *   secondaryButton  { label, url } — a quieter second action
+     *   poster      absolute image URL — the event's own poster, full width
+     *               under the hero
+     *   afterHtml   markup placed AFTER the details and buttons — the notes a
+     *               reader needs last ("Before you come"), not first
      *
      * A REAL POSTAL ADDRESS AND CONTACT IN THE FOOTER. Transactional mail that
      * names who sent it and where they are is both what the reader needs and one
@@ -273,90 +292,148 @@ class EmailService {
      */
     buildHtmlTemplate({
         title, recipientName, preheader, bodyHtml, actionButton, contact = null, facts = [],
-        tone = 'info', badge = '', highlight = null, secondaryButton = null
+        tone = 'info', badge = '', highlight = null, secondaryButton = null, poster = '', afterHtml = ''
     }) {
         const esc = (v) => this.escape(v);
-        const font = "font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;";
+        const font = "font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;";
+        const mono = "font-family:'SFMono-Regular',Consolas,'Liberation Mono','Courier New',monospace;";
 
-        const base = String(config.frontendUrl || 'https://activ.org.in').replace(/\/+$/, '');
-        const logoUrl = process.env.EMAIL_LOGO_URL || `${base}/logo_ACTIVian-removebg-preview.png`;
+        const logoSrc = process.env.EMAIL_LOGO_URL || (EMBEDDED_LOGO ? `cid:${LOGO_CID}` : '');
         const siteUrl = process.env.EMAIL_SITE_URL || 'https://activ.org.in';
+        const orgName = 'Adidravidar Confederation of Trade and Industrial Vision';
         const orgPhone = process.env.EMAIL_ORG_PHONE || '+91 82201 12188';
         const orgEmail = process.env.EMAIL_ORG_EMAIL || 'enquiry@activ.org.in';
-        const orgAddress = process.env.EMAIL_ORG_ADDRESS
-            || '6&7, Hayagreeva Apartments, 121, Velachery Road, Guindy, Chennai, Tamil Nadu 600032, India';
+        // The address is often configured with the organisation's name in front
+        // of it; the footer already prints the name, so it is not said twice.
+        const orgAddress = String(process.env.EMAIL_ORG_ADDRESS
+            || '6&7, Hayagreeva Apartments, 121, Velachery Road, Guindy, Chennai, Tamil Nadu 600032, India')
+            .replace(new RegExp(`^\\s*${orgName}\\s*,?\\s*`, 'i'), '');
 
         const TONES = {
-            success: { fg: '#047857', bg: '#ecfdf5', border: '#a7f3d0', icon: '&#10004;' },
-            info: { fg: '#1d4ed8', bg: '#eff6ff', border: '#bfdbfe', icon: '&#9432;' },
-            warning: { fg: '#b45309', bg: '#fffbeb', border: '#fde68a', icon: '&#9888;' },
-            danger: { fg: '#b91c1c', bg: '#fef2f2', border: '#fecaca', icon: '&#10006;' }
+            success: { fg: '#047857', bg: '#d1fae5', ring: '#a7f3d0', icon: '&#10003;' },
+            info: { fg: '#1d4ed8', bg: '#dbeafe', ring: '#bfdbfe', icon: 'i' },
+            warning: { fg: '#b45309', bg: '#fef3c7', ring: '#fde68a', icon: '!' },
+            danger: { fg: '#b91c1c', bg: '#fee2e2', ring: '#fecaca', icon: '&#10005;' }
         };
         const t = TONES[tone] || TONES.info;
 
-        const badgeHtml = badge ? `
-            <tr><td style="padding-bottom:14px;">
-              <span style="display:inline-block; ${font} font-size:12px; font-weight:700; letter-spacing:1.2px;
-                           text-transform:uppercase; color:${t.fg}; background:${t.bg}; border:1px solid ${t.border};
-                           border-radius:999px; padding:6px 14px;">${t.icon}&nbsp; ${esc(badge)}</span>
-            </td></tr>` : '';
+        const NAVY = '#1e3a8a';
+        const INK = '#0f172a';
+        const MUTED = '#64748b';
+        const LINE = '#e6ebf3';
+        const PAGE = '#eef2f9';
 
+        /* ------------------------------------------------------------ hero */
+        const heroHtml = `
+        <tr><td class="px" align="center" bgcolor="${NAVY}"
+                style="background-color:${NAVY}; background-image:linear-gradient(135deg,#172554 0%,#1e3a8a 45%,#2563eb 100%);
+                       padding:40px 36px 44px 36px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center">
+            <tr><td align="center" width="64" height="64"
+                    style="width:64px; height:64px; border-radius:32px; background-color:#ffffff;
+                           box-shadow:0 8px 24px rgba(15,23,42,0.25); ${font} font-size:30px; line-height:64px;
+                           font-weight:800; color:${t.fg}; text-align:center;">${t.icon}</td></tr>
+          </table>
+          ${badge ? `
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin-top:20px;">
+            <tr><td style="background-color:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.28);
+                           border-radius:999px; padding:6px 16px; ${font} font-size:11px; font-weight:700;
+                           letter-spacing:1.6px; text-transform:uppercase; color:#ffffff;">${esc(badge)}</td></tr>
+          </table>` : ''}
+          <div class="h1" style="${font} font-size:28px; line-height:1.25; font-weight:800; color:#ffffff;
+                      padding-top:${badge ? 14 : 22}px; letter-spacing:-0.3px;">${esc(title)}</div>
+          ${preheader && preheader !== title ? `
+          <div style="${font} font-size:15px; line-height:1.6; color:#c7d7fe; padding-top:10px;">${esc(preheader)}</div>` : ''}
+        </td></tr>`;
+
+        /* ------------------------------------------------------ ticket stub */
+        // The tear line of the ticket: a half-circle bitten out of each edge,
+        // with the dashed rule running between them at the same height.
+        const tearHtml = `
+                <tr><td style="padding:0; font-size:0; line-height:0;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+                    <td width="14" valign="middle" style="width:14px; padding:0;">
+                      <div style="width:14px; height:28px; background-color:#ffffff; border:1px solid ${LINE}; border-left:0;
+                                  border-radius:0 14px 14px 0; margin-left:-1px;"></div></td>
+                    <td valign="middle" style="padding:0 8px;">
+                      <div style="height:0; border-top:2px dashed #c9d5f0; font-size:0; line-height:0;">&nbsp;</div></td>
+                    <td width="14" valign="middle" style="width:14px; padding:0;">
+                      <div style="width:14px; height:28px; background-color:#ffffff; border:1px solid ${LINE}; border-right:0;
+                                  border-radius:14px 0 0 14px; margin-right:-1px;"></div></td>
+                  </tr></table>
+                </td></tr>`;
         const highlightHtml = highlight && highlight.value ? `
-            <tr><td style="padding: 18px 0 6px 0;">
-              <table width="100%" cellpadding="0" cellspacing="0" border="0"
-                     style="background:#f5f7ff; border:2px dashed #93a5e8; border-radius:14px;">
-                <tr><td align="center" style="padding:18px 16px;">
-                  <div style="${font} font-size:12px; font-weight:700; letter-spacing:1.5px; text-transform:uppercase;
-                              color:#64748b;">${esc(highlight.label || 'Reference')}</div>
-                  <div style="font-family: 'Courier New', Courier, monospace; font-size:24px; font-weight:700;
-                              letter-spacing:2px; color:#1e3a8a; padding-top:6px; word-break:break-all;">
-                    ${esc(highlight.value)}</div>
-                  ${highlight.note ? `<div style="${font} font-size:13px; color:#64748b; padding-top:6px;">
-                    ${esc(highlight.note)}</div>` : ''}
+            <tr><td style="padding:26px 0 0 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="background-color:#f5f8ff; border:1px solid ${LINE}; border-radius:16px; border-collapse:separate;">
+                <tr><td align="center" style="padding:22px 20px 18px 20px;">
+                  <div style="${font} font-size:11px; font-weight:700; letter-spacing:1.8px; text-transform:uppercase;
+                              color:${MUTED};">${esc(highlight.label || 'Reference')}</div>
+                  <div style="${mono} font-size:28px; font-weight:700; letter-spacing:3px; color:${NAVY};
+                              padding-top:8px; word-break:break-all;">${esc(highlight.value)}</div>
                 </td></tr>
+                ${highlight.note ? `${tearHtml}
+                <tr><td align="center" style="padding:14px 20px 20px 20px; ${font} font-size:13px;
+                               line-height:1.5; color:${MUTED};">${esc(highlight.note)}</td></tr>` : ''}
               </table>
             </td></tr>` : '';
 
+        /* ------------------------------------------------------------ facts */
         const shown = (facts || []).filter((f) => f && f.value);
         const factsHtml = shown.length ? `
-            <tr><td style="padding: 18px 0 0 0;">
-              <table width="100%" cellpadding="0" cellspacing="0" border="0"
-                     style="border:1px solid #e2e8f0; border-radius:12px; border-collapse:separate; overflow:hidden;">
-                <tr><td colspan="2" style="background:#1e3a8a; padding:11px 18px; ${font} font-size:12px;
-                               font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:#ffffff;">
-                  Details</td></tr>
+            <tr><td style="padding:26px 0 0 0;">
+              <div style="${font} font-size:12px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase;
+                          color:${MUTED}; padding:0 0 10px 2px;">Details</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="border:1px solid ${LINE}; border-radius:14px; border-collapse:separate;">
                 ${shown.map((f, i) => `
-                  <tr style="background:${i % 2 ? '#ffffff' : '#f8fafc'};">
-                    <td valign="top" style="padding:12px 18px; ${font} font-size:13px; color:#64748b;
-                               width:38%; border-top:1px solid #eef2f7;">${esc(f.label)}</td>
-                    <td valign="top" style="padding:12px 18px; ${font} font-size:14px; color:#0f172a;
-                               font-weight:600; border-top:1px solid #eef2f7;">${esc(f.value)}</td>
+                  <tr>
+                    <td class="stack lbl" valign="top" width="36%"
+                        style="width:36%; padding:13px 12px 13px 20px; ${font} font-size:13px; line-height:1.5;
+                               color:${MUTED}; ${i ? `border-top:1px solid ${LINE};` : ''}">${esc(f.label)}</td>
+                    <td class="stack val" valign="top"
+                        style="padding:13px 20px 13px 12px; ${font} font-size:14px; line-height:1.5; color:${INK};
+                               font-weight:600; word-break:break-word; ${i ? `border-top:1px solid ${LINE};` : ''}">${esc(f.value)}</td>
                   </tr>`).join('')}
               </table>
             </td></tr>` : '';
 
+        /* ---------------------------------------------------------- buttons */
         const btn = (b, primary) => `
-              <td align="center" bgcolor="${primary ? '#1e3a8a' : '#ffffff'}"
-                  style="border-radius:10px; ${primary ? '' : 'border:1px solid #cbd5e1;'}">
-                <a href="${esc(b.url)}" target="_blank"
-                   style="display:inline-block; padding:14px 28px; ${font} font-size:15px; font-weight:700;
-                          color:${primary ? '#ffffff' : '#1e3a8a'}; text-decoration:none; border-radius:10px;">
-                  ${esc(b.label)}</a>
+              <td class="stack btn" align="center" style="padding:6px;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                  <tr><td align="center" bgcolor="${primary ? NAVY : '#ffffff'}"
+                          style="border-radius:12px; ${primary
+        ? `background-color:${NAVY}; background-image:linear-gradient(135deg,#1e3a8a,#2563eb); box-shadow:0 6px 16px rgba(37,99,235,0.28);`
+        : 'border:1.5px solid #c7d2fe;'}">
+                    <a href="${esc(b.url)}" target="_blank"
+                       style="display:block; padding:15px 30px; ${font} font-size:15px; font-weight:700; line-height:1.2;
+                              color:${primary ? '#ffffff' : NAVY}; text-decoration:none; border-radius:12px; white-space:nowrap;">
+                      ${esc(b.label)}</a>
+                  </td></tr>
+                </table>
               </td>`;
         const buttons = [actionButton, secondaryButton].filter((b) => b && b.url);
         const buttonHtml = buttons.length ? `
-            <tr><td align="center" style="padding: 26px 0 4px 0;">
-              <table cellpadding="0" cellspacing="0" border="0" align="center">
-                <tr>${buttons.map((b, i) => (i ? '<td width="12"></td>' : '') + btn(b, i === 0)).join('')}</tr>
+            <tr><td align="center" style="padding:28px 0 0 0;">
+              <table role="presentation" class="full" cellpadding="0" cellspacing="0" border="0" align="center">
+                <tr>${buttons.map((b, i) => btn(b, i === 0)).join('')}</tr>
               </table>
             </td></tr>` : '';
 
+        /* ------------------------------------------------------------- help */
         const office = contact && contact.nearest
             ? `Replying to this email reaches your
-               <strong>${esc([contact.nearest.regionName, contact.nearest.tierLabel].filter(Boolean).join(' '))}
+               <strong style="color:${INK};">${esc([contact.nearest.regionName, contact.nearest.tierLabel].filter(Boolean).join(' '))}
                Admin</strong>${contact.nearest.name ? ` (${esc(contact.nearest.name)})` : ''} directly.
                ${contact.nearest.phone ? `<br />Phone: ${esc(contact.nearest.phone)}` : ''}`
-            : 'Questions? Just reply to this email and it reaches the ACTIV support desk.';
+            : `<strong style="color:${INK};">Need help?</strong> Just reply to this email and it reaches the ACTIV support desk.`;
+
+        const logoHtml = logoSrc
+            ? `<img src="${esc(logoSrc)}" width="180" alt="ACTIV"
+                    style="display:block; width:180px; max-width:180px; height:auto; border:0; outline:none; text-decoration:none;
+                           ${font} font-size:26px; font-weight:800; color:${NAVY};" />`
+            : `<span style="${font} font-size:26px; font-weight:800; letter-spacing:2px; color:${NAVY};">ACTIV</span>`;
 
         return `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
@@ -364,65 +441,92 @@ class EmailService {
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light" />
+  <meta name="supported-color-schemes" content="light" />
   <title>${esc(title)}</title>
+  <style type="text/css">
+    body { margin:0 !important; padding:0 !important; width:100% !important; }
+    a { text-decoration:none; }
+    @media only screen and (max-width:620px) {
+      .shell { width:100% !important; border-radius:0 !important; }
+      .outer { padding:0 !important; }
+      .px { padding-left:22px !important; padding-right:22px !important; }
+      .h1 { font-size:24px !important; }
+      .stack { display:block !important; width:100% !important; box-sizing:border-box; }
+      .lbl { padding:12px 18px 0 18px !important; }
+      .val { padding:2px 18px 12px 18px !important; border-top:0 !important; }
+      .full { width:100% !important; }
+      .btn { padding:6px 0 !important; }
+    }
+  </style>
 </head>
-<body style="margin:0; padding:0; background-color:#eef2f7;">
-  <div style="display:none; font-size:1px; color:#eef2f7; line-height:1px; max-height:0; max-width:0; opacity:0; overflow:hidden;">
-    ${esc(preheader || title)}
+<body style="margin:0; padding:0; background-color:${PAGE};">
+  <div style="display:none; font-size:1px; color:${PAGE}; line-height:1px; max-height:0; max-width:0; opacity:0; overflow:hidden;">
+    ${esc(preheader || title)}&#8199;&#65279;&#847;&#8199;&#65279;&#847;&#8199;&#65279;&#847;&#8199;&#65279;&#847;
   </div>
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#eef2f7;">
-    <tr><td align="center" style="padding: 28px 12px;">
-      <table width="600" cellpadding="0" cellspacing="0" border="0"
-             style="max-width:600px; width:100%; background-color:#ffffff; border-radius:18px; overflow:hidden;
-                    border:1px solid #e2e8f0; box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${PAGE}" style="background-color:${PAGE};">
+    <tr><td class="outer" align="center" style="padding:32px 12px;">
+      <table role="presentation" class="shell" width="600" cellpadding="0" cellspacing="0" border="0"
+             style="width:600px; max-width:600px; background-color:#ffffff; border-radius:22px; overflow:hidden;
+                    border:1px solid #dde4f0; box-shadow:0 18px 50px rgba(30,58,138,0.12);">
 
-        <!-- Brand: the real logo on white, then the navy-to-blue accent rule -->
-        <tr><td align="center" style="padding:26px 30px 20px 30px; background:#ffffff;">
-          <a href="${esc(siteUrl)}" target="_blank" style="text-decoration:none;">
-            <img src="${esc(logoUrl)}" width="200" alt="ACTIV — Adidravidar Confederation of Trade and Industrial Vision"
-                 style="display:block; width:200px; max-width:70%; height:auto; border:0; outline:none;
-                        ${font} font-size:20px; font-weight:800; color:#1e3a8a;" />
-          </a>
+        <!-- Brand bar -->
+        <tr><td class="px" align="center" style="padding:24px 36px 22px 36px; background-color:#ffffff;">
+          <a href="${esc(siteUrl)}" target="_blank" style="display:inline-block; text-decoration:none;">${logoHtml}</a>
         </td></tr>
-        <tr><td style="height:5px; line-height:5px; font-size:0; background:#1e3a8a;
-                       background-image:linear-gradient(90deg,#1e3a8a,#2563eb,#38bdf8);">&nbsp;</td></tr>
 
-        <tr><td style="padding: 30px 32px 10px 32px;">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0">
-            ${badgeHtml}
-            <tr><td style="${font} font-size:24px; line-height:1.3; font-weight:800; color:#0f172a;
-                           padding-bottom:14px;">${esc(title)}</td></tr>
-            <tr><td style="${font} font-size:15px; color:#334155; padding-bottom:10px;">
+        ${heroHtml}
+${poster ? `
+        <!-- The event's own poster -->
+        <tr><td style="padding:0; font-size:0; line-height:0; background-color:#0f172a;">
+          <img src="${esc(poster)}" width="600" alt="${esc(title)}"
+               style="display:block; width:100%; max-width:600px; height:auto; border:0; outline:none;" />
+        </td></tr>` : ''}
+
+        <!-- Body -->
+        <tr><td class="px" style="padding:34px 36px 8px 36px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="${font} font-size:16px; line-height:1.6; color:${INK}; font-weight:600; padding-bottom:12px;">
               Dear ${esc(recipientName || 'Member')},</td></tr>
-            <tr><td style="${font} font-size:15px; line-height:1.7; color:#334155;">${bodyHtml}</td></tr>
+            <tr><td style="${font} font-size:15px; line-height:1.75; color:#334155;">${bodyHtml}</td></tr>
             ${highlightHtml}
             ${factsHtml}
             ${buttonHtml}
+            ${afterHtml ? `<tr><td style="padding:26px 0 0 0; ${font} font-size:15px; line-height:1.7; color:#334155;">${afterHtml}</td></tr>` : ''}
           </table>
         </td></tr>
 
-        <tr><td style="padding: 22px 32px 26px 32px;">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0"
-                 style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px;">
-            <tr><td style="padding:14px 18px; ${font} font-size:13px; line-height:1.6; color:#475569;">
-              ${office}
-            </td></tr>
+        <!-- Help -->
+        <tr><td class="px" style="padding:26px 36px 34px 36px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background-color:#f8fafc; border:1px solid ${LINE}; border-radius:14px; border-collapse:separate;">
+            <tr>
+              <td width="52" valign="top" style="width:52px; padding:16px 0 16px 18px;">
+                <div style="width:34px; height:34px; border-radius:17px; background-color:#e0e7ff; text-align:center;
+                            ${font} font-size:16px; line-height:34px; font-weight:800; color:${NAVY};">?</div>
+              </td>
+              <td valign="middle" style="padding:16px 18px 16px 12px; ${font} font-size:13px; line-height:1.65; color:#475569;">
+                ${office}
+              </td>
+            </tr>
           </table>
         </td></tr>
 
-        <tr><td style="background-color:#1e3a8a; padding:24px 32px; text-align:center;">
-          <div style="${font} font-size:14px; font-weight:700; color:#ffffff; letter-spacing:0.5px;">
-            Adidravidar Confederation of Trade and Industrial Vision</div>
-          <div style="${font} font-size:12px; line-height:1.7; color:#c7d2fe; padding-top:8px;">
-            ${esc(orgAddress)}<br />
+        <!-- Footer -->
+        <tr><td class="px" align="center" bgcolor="#0f1b4d"
+                style="background-color:#0f1b4d; padding:30px 36px 32px 36px; text-align:center;">
+          <div style="${font} font-size:15px; font-weight:800; letter-spacing:3px; color:#ffffff;">ACTIV</div>
+          <div style="${font} font-size:12px; line-height:1.6; color:#a5b4fc; padding-top:4px;">${orgName}</div>
+          <div style="height:1px; line-height:1px; font-size:0; background-color:rgba(255,255,255,0.12); margin:18px auto; width:64px;">&nbsp;</div>
+          <div style="${font} font-size:12px; line-height:1.7; color:#c7d2fe;">${esc(orgAddress)}</div>
+          <div style="${font} font-size:12px; line-height:1.9; padding-top:8px;">
             <a href="tel:${esc(orgPhone.replace(/\s+/g, ''))}" style="color:#ffffff; text-decoration:none;">${esc(orgPhone)}</a>
-            &nbsp;&middot;&nbsp;
+            <span style="color:#6d7fc4;">&nbsp;&nbsp;|&nbsp;&nbsp;</span>
             <a href="mailto:${esc(orgEmail)}" style="color:#ffffff; text-decoration:none;">${esc(orgEmail)}</a>
-            &nbsp;&middot;&nbsp;
+            <span style="color:#6d7fc4;">&nbsp;&nbsp;|&nbsp;&nbsp;</span>
             <a href="${esc(siteUrl)}" target="_blank" style="color:#ffffff; text-decoration:none;">${esc(siteUrl.replace(/^https?:\/\//, ''))}</a>
           </div>
-          <div style="${font} font-size:11px; color:#a5b4fc; padding-top:12px;">
-            You are receiving this because of an action on your ACTIV account or booking.
+          <div style="${font} font-size:11px; line-height:1.6; color:#7f8fd1; padding-top:16px;">
+            You are receiving this because of an action on your ACTIV account or booking.<br />
             &copy; ${new Date().getFullYear()} ACTIV. All rights reserved.
           </div>
         </td></tr>

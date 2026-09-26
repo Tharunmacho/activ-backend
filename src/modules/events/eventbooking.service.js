@@ -114,6 +114,44 @@ const describeSchedule = (startAt, endAt) => {
     return { dateLabel: s.day, timeLabel, whenLabel: timeLabel ? `${s.day}, ${timeLabel}` : s.day };
 };
 
+/**
+ * Is this event attended online, and on what?
+ *
+ * `mode` is the organiser's answer, but it defaults to `offline`, and an
+ * organiser running a Zoom session will often record that by picking "ZOOM" as
+ * the CATEGORY and leaving `mode` alone. Trusting `mode` alone told a webinar's
+ * bookers it was an "In-person event" with no venue.
+ *
+ * So an event also counts as online when it names no physical address AND
+ * something on it says online: a joining link, a platform, or an online word
+ * in the category or in a venue field like "Zoom". A real venue always wins.
+ */
+const ONLINE_WORDS = /\b(zoom|webinar|online|virtual|google\s*meet|g-?meet|teams|webex|youtube|live\s*stream)\b/i;
+const PLATFORMS = [
+    [/zoom/i, 'Zoom'],
+    [/google\s*meet|g-?meet|meet\.google/i, 'Google Meet'],
+    [/teams/i, 'Microsoft Teams'],
+    [/webex/i, 'Webex'],
+    [/youtu/i, 'YouTube Live']
+];
+const attendanceOf = (event = {}, b = {}) => {
+    const venue = str(event.venue || b.eventVenue);
+    const address = str(event.venueAddress);
+    const url = str(event.onlineUrl);
+    const category = str(event.category);
+    const hints = [event.onlinePlatform, category, url, venue].map(str).join(' ');
+
+    const isOnline = event.mode === 'online'
+        || (!address && (!venue || ONLINE_WORDS.test(venue)) && (!!url || ONLINE_WORDS.test(hints)));
+    const found = PLATFORMS.find(([re]) => re.test(hints));
+    const platform = isOnline ? (str(event.onlinePlatform) || (found ? found[1] : '')) : '';
+    // A category that is nothing but a format word ("ZOOM", "Online webinar").
+    const formatWordCategory = isOnline && !!category
+        && category.split(/\s+/).every((w) => ONLINE_WORDS.test(w) || /^(event|session|meeting|webinar)s?$/i.test(w));
+
+    return { isOnline, platform, formatWordCategory };
+};
+
 /** "tomorrow", "in 2 hours", "in 3 days" — for a reminder's headline. */
 const startsIn = (ms) => {
     const hours = Math.max(0, Math.round(ms / (60 * 60 * 1000)));
@@ -403,6 +441,24 @@ const toBooking = (doc = {}, joining = null) => ({
      * from there into the manage link in their confirmation email.
      */
 });
+
+
+/**
+ * An uploaded file's path as a full URL on this server's public address.
+ *
+ * `/uploads/x.png` means nothing to Gmail or to Meta, which fetch the image
+ * themselves. `BACKEND_URL` is the address the world reaches this API on — the
+ * same origin that serves `/uploads` (see app.js). A URL that is already
+ * absolute is returned as it is.
+ */
+const absoluteMediaUrl = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = String(require('../../config').backendUrl || '').replace(/\/+$/, '');
+    if (!base || /localhost|127\.0\.0\.1/.test(base)) return '';
+    return `${base}${raw.startsWith('/') ? raw : `/${raw}`}`;
+};
 
 class EventBookingService {
     // ==================================================================
@@ -1349,10 +1405,12 @@ class EventBookingService {
         const startAt = event.startAt || b.eventStartAt || null;
         const endAt = event.endAt || null;
         const { dateLabel, timeLabel, whenLabel } = describeSchedule(startAt, endAt);
+        const startParts = startAt ? istParts(startAt) : null;
+        const endParts = endAt ? istParts(endAt) : null;
 
-        const isOnline = event.mode === 'online';
+        const { isOnline, platform, formatWordCategory } = attendanceOf(event, b);
         const venueLabel = isOnline
-            ? (event.onlinePlatform ? `Online (${event.onlinePlatform})` : 'Online')
+            ? (platform ? `Online (${platform})` : 'Online')
             : [event.venue || b.eventVenue, event.venueAddress].filter(Boolean).join(', ');
 
         const seats = Number(b.noOfPersons || 1);
@@ -1374,6 +1432,8 @@ class EventBookingService {
             .filter(Boolean).join(' · ');
 
         const eventId = String(b.eventId || '');
+        // The readable address (eventSlug.js) in every link a booker is sent.
+        const publicId = encodeURIComponent(event.slug || eventId);
         const { appUrl } = require('../notifications/notificationTemplates');
 
         return {
@@ -1387,7 +1447,54 @@ class EventBookingService {
             venueLabel,
             mapUrl: isOnline ? '' : (event.venueMapUrl || b.eventMapUrl || ''),
             isOnline,
-            onlinePlatform: event.onlinePlatform || '',
+            onlinePlatform: platform,
+            // The start and end on their own, for a template that prints
+            // "Time: {from} to {to}".
+            startTimeLabel: startParts && !(startParts.midnight && !endParts) ? `${startParts.time} IST` : '',
+            endTimeLabel: endParts ? `${endParts.time} IST` : '',
+            bookerName: (b.bookedBy && b.bookedBy.name) || '',
+            bookerPhone: (b.bookedBy && b.bookedBy.phone) || '',
+            bookerEmail: (b.bookedBy && b.bookedBy.email) || '',
+            // The organiser's "Please note" — printed first in the emails'
+            // "Before you come" box. See `beforeYouComeHtml`.
+            attendeeNote: event.registrationNote || '',
+            /*
+             * WHAT KIND OF EVENT, said the way a professional invitation
+             * says it: an online event is a WEBINAR, an offline one an
+             * in-person event. `category` is the organiser's own filing
+             * ("Conference", "Workshop") and rides beside it.
+             */
+            formatLabel: isOnline
+                ? `Online webinar${platform ? ` on ${platform}` : ''}`
+                : 'In-person event',
+            // "ZOOM" filed as the category is the format, already said above.
+            category: formatWordCategory ? '' : (event.category || ''),
+            topic: event.topic || '',
+            language: event.language || '',
+            /*
+             * THE JOINING LINK, for a booking that holds a place — confirmed
+             * or reminded — and never on a waitlist or cancellation message.
+             * It is sent to the booker because it is theirs: the public page
+             * withholds it (`withJoinLink`) for exactly this reason.
+             */
+            /*
+             * THE LINK ON AN ONLINE EVENT IS THE REGISTRATION LINK, not a join
+             * link. The booker opens it, fills in their name and email on the
+             * platform's own form (Zoom), and the platform emails them their
+             * personal joining link. So every message says "register here" and
+             * never "join here".
+             *
+             * `joinUrl` stays empty: it is reserved for the joining link a
+             * platform webhook will hand back per attendee later.
+             */
+            registerUrl: isOnline && (kind === 'confirmed' || kind === 'reminder') ? (event.onlineUrl || '') : '',
+            joinUrl: '',
+            /*
+             * The event's own poster, as an ABSOLUTE address — an email and a
+             * WhatsApp header are fetched by somebody else's server, which
+             * cannot resolve `/uploads/…`. Empty when the event has none.
+             */
+            posterUrl: absoluteMediaUrl(event.bannerUrl || b.eventBannerUrl || ''),
             seats,
             seatsLabel: `${seats} seat${seats === 1 ? '' : 's'}`,
             participantNames: (b.participants || []).map((p) => (p && p.name) || '').filter(Boolean),
@@ -1398,9 +1505,9 @@ class EventBookingService {
             paymentId: settledVia === 'online' ? (payment.gatewayPaymentId || '') : '',
             contactLine,
             viewUrl: eventId && b.bookingRef
-                ? appUrl(`/events/${eventId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
+                ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
                 : '',
-            eventUrl: eventId ? appUrl(`/events/${eventId}`) : '',
+            eventUrl: eventId ? appUrl(`/events/${publicId}`) : '',
             bookedByLine: [b.bookedBy && b.bookedBy.name, b.bookedBy && b.bookedBy.phone]
                 .filter(Boolean).join(' · '),
             bookedOnLabel: b.createdAt
