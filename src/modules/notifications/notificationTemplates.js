@@ -165,7 +165,8 @@ const registerLink = (ctx = {}) => ctx.registerUrl
     || `${ctx.viewUrl || ctx.eventUrl || appUrl('/events')} (the registration link will be added here soon)`;
 
 /** "Dear Tharun" — the full name the booker gave, first name as a fallback. */
-const greetName = (ctx = {}) => oneLine(ctx.bookerName || ctx.name || ctx.firstName, 60) || 'Member';
+// A participant's own name first: their message is about THEIR seat, not the booker's.
+const greetName = (ctx = {}) => oneLine(ctx.participantName || ctx.bookerName || ctx.name || ctx.firstName, 60) || 'Member';
 
 /** "+918220112188" -> "+91 82201 12188"; anything else as typed. */
 const prettyPhone = (value) => {
@@ -231,6 +232,39 @@ const webinarLinkLines = (ctx = {}) => {
     ];
 };
 
+/** The fee, or — to a participant, who did not pay — who booked the seat for them. */
+const feeOrBooker = (ctx = {}, rupee = 'Rs ') => (ctx.forParticipant
+    ? `Booked for you by ${oneLine(ctx.bookerName, 60) || 'your organisation'}`
+    : orDash(feeLine(ctx, rupee)));
+
+/**
+ * A booking's context, as ONE PARTICIPANT sees it: their own seat and name,
+ * no payment (the booker paid, and a fee line would read as a bill), and their
+ * own email where the webinar template names one.
+ */
+const asParticipant = (ctx = {}) => ({
+    ...ctx,
+    seats: 1,
+    seatsLabel: '1 seat',
+    participantNames: [ctx.participantName].filter(Boolean),
+    firstName: String(ctx.participantName || '').split(/\s+/).filter(Boolean)[0] || ctx.firstName,
+    bookerEmail: ctx.participantEmail || '',
+    viewUrl: '',
+    forParticipant: true
+});
+
+/**
+ * The one link in a participant's message, with a short label for "🔗 *label:* link":
+ * the map in person; online, "Register here" / "Join link" by what was pasted.
+ */
+const participantLink = (ctx = {}) => {
+    if (!ctx.isOnline) return ['Directions', ctx.mapUrl || ctx.eventUrl || ctx.viewUrl || ''];
+    const kind = onlineLinkKind(ctx.registerUrl);
+    if (kind === 'register') return ['Register here', ctx.registerUrl];
+    if (kind === 'join') return ['Join link', ctx.registerUrl];
+    return ['Event page', ctx.eventUrl || ctx.viewUrl || ''];
+};
+
 /**
  * THE CUSTOM TEMPLATES, newest first. Each kind returns the `_v3` step (every
  * tip and every contact detail on its own line) and the approved `_v2` step
@@ -253,6 +287,22 @@ const customTemplates = (kind, ctx = {}) => {
     const orgLine = orDash(ctx.contactLine, 'the ACTIV office, +91 82201 12188');
     const steps = [];
 
+    /*
+     * A PARTICIPANT's seat, booked by somebody else. Their own template first
+     * (it names the booker), then the ordinary confirmation for the event's format.
+     */
+    if (kind === 'participant') {
+        const [label, plink] = participantLink(ctx);
+        if (tplOn(TPL.bookingParticipant)) {
+            steps.push({
+                template: TPL.bookingParticipant,
+                params: [greetName(ctx), oneLine(ctx.bookerName, 60) || 'Your organisation', title, date, time,
+                    orDash(whereLine(ctx)), label, orDash(plink, 'See your email'), ref, tip1, tip2, cName, cPhone, cEmail]
+            });
+        }
+        return [...steps, ...customTemplates('confirmed', ctx)];
+    }
+
     if (kind === 'confirmed' && ctx.isOnline) {
         const [head, link, how] = webinarLinkLines(ctx);
         if (tplOn(TPL.bookingWebinar)) {
@@ -274,7 +324,7 @@ const customTemplates = (kind, ctx = {}) => {
                 params: [greetName(ctx), title, date, time,
                     orDash(ctx.venueLabel, 'Venue to be announced'),
                     orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
-                    orDash(seatsLine(ctx)), orDash(feeLine(ctx, 'Rs ')), ref,
+                    orDash(seatsLine(ctx)), feeOrBooker(ctx), ref,
                     tip1, tip2, cName, cPhone, cEmail]
             });
         }
@@ -283,7 +333,7 @@ const customTemplates = (kind, ctx = {}) => {
             params: [greetName(ctx), title, date, time,
                 orDash(ctx.venueLabel, 'Venue to be announced'),
                 orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
-                orDash(`${seatsLine(ctx)} | ${feeLine(ctx, 'Rs ')}`), ref, `${tip1}; ${tip2}`, orgLine]
+                orDash(`${seatsLine(ctx)} | ${feeOrBooker(ctx)}`), ref, `${tip1}; ${tip2}`, orgLine]
         });
     } else if (kind === 'reminder') {
         const [head, link] = ctx.isOnline ? webinarLinkLines(ctx) : ['Directions', ctx.mapUrl || ctx.viewUrl];
@@ -459,7 +509,7 @@ const bookingText = (ctx = {}, { heading, lead, closing }) => {
             ['🗺', !online && ctx.mapUrl ? `Directions: ${ctx.mapUrl}` : ''],
             ['🏷', [ctx.topic, ctx.language].filter(Boolean).join(' · ')],
             ['🎟', seatsLine(ctx)],
-            ['💳', ctx.kind === 'reminder' ? '' : feeLine(ctx)],
+            ['💳', ctx.kind === 'reminder' ? '' : feeOrBooker(ctx, '₹')],
             ['🔖', ctx.bookingRef ? `Booking ID: ${ctx.bookingRef}` : '']
         ])
         + `\n\n📌 *${notes.length ? 'Please note' : (online ? 'Before the webinar' : 'Before you come')}*\n`
@@ -1094,6 +1144,85 @@ const TEMPLATES = {
                 })
             }
         };
+    },
+
+    /*
+     * ======================================================================
+     * PARTICIPANTS — a seat booked FOR somebody (a company head booking for
+     * the team). Sent to each participant with an email or mobile of their
+     * own, besides the booker. It names who booked, shows THEIR seat and the
+     * event, and never the booker's payment.
+     * ======================================================================
+     */
+    EVENT_PARTICIPANT_CONFIRMED: (raw) => {
+        const ctx = asParticipant(raw);
+        const title = ctx.eventTitle || 'the event';
+        const online = !!ctx.isOnline;
+        const booker = ctx.bookerName || 'Your organisation';
+        return {
+            email: {
+                subject: `${booker} booked a seat for you: ${title}`,
+                title,
+                preheader: [`${booker} reserved a seat for you`, ctx.formatLabel].filter(Boolean).join(' · '),
+                tone: 'success',
+                highlight: {
+                    label: 'Booking ID',
+                    value: ctx.bookingRef,
+                    note: online ? 'Keep this for any question about your seat.' : 'Show this at the registration desk.'
+                },
+                bodyHtml: `<p style="margin:0;"><strong>${esc(booker)}</strong> has reserved a seat for you at this `
+                    + `${online ? 'webinar' : 'event'}. Everything you need is below.</p>`
+                    + (online && ctx.registerUrl
+                        ? (onlineLinkKind(ctx.registerUrl) === 'register'
+                            ? '<p style="margin:12px 0 0 0;"><strong>One step for you:</strong> register with the button below'
+                                + ' — your personal joining link appears as soon as you submit the form.</p>'
+                            : '<p style="margin:12px 0 0 0;">Join with the button below, 5–10 minutes before the start.</p>')
+                        : ''),
+                facts: [
+                    ...bookingFacts(ctx, { payment: false, seatsLabel: 'Your seat' }),
+                    { label: 'Booked by', value: booker }
+                ],
+                actionButton: online && ctx.registerUrl
+                    ? { label: onlineLinkKind(ctx.registerUrl) === 'register'
+                        ? `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}` : 'Join the webinar',
+                    url: ctx.registerUrl }
+                    : (ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined),
+                secondaryButton: !online && ctx.mapUrl ? { label: 'Get directions', url: ctx.mapUrl } : undefined,
+                afterHtml: beforeYouComeHtml(ctx)
+            },
+            whatsapp: {
+                ...richBookingWhatsApp('participant', [
+                    ctx.firstName || 'Member',
+                    `your seat at ${clause(title, 100)}, booked for you by ${clause(booker, 40)} (ID ${ctx.bookingRef})`,
+                    ctx.whenLabel || 'the scheduled date'
+                ], ctx),
+                text: bookingText(ctx, {
+                    heading: '🎟 *A seat has been booked for you*',
+                    lead: `*${booker}* has reserved a seat for you at *${title}*${/[.?!]$/.test(title) ? '' : '.'}`,
+                    closing: online ? 'See you online!' : 'We look forward to welcoming you!'
+                })
+            }
+        };
+    },
+
+    // The reminder is the booker's, worded for one seat and greeting the participant.
+    EVENT_PARTICIPANT_REMINDER: (raw) => {
+        const out = TEMPLATES.EVENT_BOOKING_REMINDER(asParticipant(raw));
+        delete out.inApp;
+        return out;
+    },
+
+    // The cancellation too, without the booker's amount and payment rows.
+    EVENT_PARTICIPANT_CANCELLED: (raw) => {
+        const ctx = asParticipant(raw);
+        const out = TEMPLATES.EVENT_BOOKING_CANCELLED({ ...ctx, settledVia: 'free' });
+        delete out.inApp;
+        out.email.bodyHtml = `<p style="margin:0 0 12px 0;">The booking <strong>${esc(ctx.bookingRef)}</strong> that `
+            + `${esc(ctx.bookerName || 'your organisation')} made for you has been cancelled by the organiser, `
+            + 'so your seat is released.</p>'
+            + (ctx.reason ? `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${esc(ctx.reason)}</p>` : '')
+            + '<p style="margin:0;">Questions? Reply to this email or contact the organiser below.</p>';
+        return out;
     }
 };
 
@@ -1148,6 +1277,37 @@ const TEMPLATES = {
  * `scripts/test-notifications.js --templates` prints both versions.
  */
 const WHATSAPP_TEMPLATES = [
+    {
+        /* A PARTICIPANT, booked for by somebody else. Names the booker; shows their seat, never the fee. */
+        name: 'activ_participant_seat_v1',
+        envKey: 'BOTBEE_TPL_BOOKING_PARTICIPANT',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '🎟 *{{2}}* has reserved a seat for you at *{{3}}*\n\n'
+            + '🗓 *Date:* {{4}}\n'
+            + '⏰ *Time:* {{5}}\n'
+            + '📍 *Where:* {{6}}\n'
+            + '🔗 *{{7}}:* {{8}}\n'
+            + '🔖 *Booking ID:* {{9}}\n\n'
+            + '📌 *Please note*\n'
+            + '• {{10}}\n'
+            + '• {{11}}\n\n'
+            + '📞 *Need help? Contact the organiser*\n'
+            + '👤 *Name:* {{12}}\n'
+            + '📱 *Phone:* {{13}}\n'
+            + '📧 *Email:* {{14}}\n\n'
+            + 'We look forward to seeing you there!',
+        params: ['participant name', 'booked by', 'event', 'date', 'time', 'venue, or online + platform',
+            'link label', 'link', 'booking ID', 'note 1', 'note 2', 'organiser name', 'organiser phone', 'organiser email'],
+        samples: ['Priya', 'Tharun', 'SCST Economic Liberty Conference', 'Saturday, 10 October 2026',
+            '9:00 AM - 5:00 PM IST', 'DNC Vijay Mahal, Dharmapuri', 'Directions', 'https://maps.app.goo.gl/abc123',
+            'ACTIVB-MUEE9IBU-445B', 'Please arrive 15 to 30 minutes before the start time for registration',
+            'Carry a valid photo ID for each participant', 'Rajesh', '+91 82201 12188', 'events@activ.org.in']
+    },
     /*
      * THE DETAILED BOOKING TEMPLATES — Meta Cloud API ({{n}} placeholders),
      * each with the event POSTER as an IMAGE header and "ACTIV" as the footer.

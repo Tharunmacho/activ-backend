@@ -54,6 +54,11 @@ const logger = require('../../config/logger');
 
 /** Trim anything into a string. `null` and `undefined` become `''`. */
 const str = (value) => String(value === null || value === undefined ? '' : value).trim();
+/** The last 10 digits of a phone number, so "+91 90923 17264" and "9092317264" are one person. */
+const phoneKey = (value) => {
+    const d = str(value).replace(/\D/g, '');
+    return d.length >= 10 ? d.slice(-10) : d;
+};
 
 /* ---------------------------------------------------- message formatting */
 
@@ -1566,6 +1571,50 @@ class EventBookingService {
                 email,
                 phone
             }, ctx);
+
+            /*
+             * EVERY PARTICIPANT HEARS TOO, in their own words.
+             *
+             * A company head books five seats for their team: each of the five is
+             * the person who has to turn up, so each gets a message naming who
+             * booked for them, THEIR seat and the event details — never the
+             * booker's payment. Not on a waitlist (nothing is held for them).
+             *
+             * One message per person: participant 1 defaults to the booker, and
+             * the same number or address listed twice is sent once. A
+             * participant with neither an email nor a mobile has nowhere to go.
+             */
+            if (!['confirmed', 'reminder', 'cancelled'].includes(resolvedKind)) return;
+            const seen = new Set([phoneKey(phone), str(email).toLowerCase()].filter(Boolean));
+            const people = (booking.participants || []).filter((p) => {
+                const keys = [phoneKey(p && p.phone), str(p && p.email).toLowerCase()].filter(Boolean);
+                if (!keys.length || keys.some((k) => seen.has(k))) return false;
+                keys.forEach((k) => seen.add(k));
+                return true;
+            });
+            const participantEvent = {
+                confirmed: 'EVENT_PARTICIPANT_CONFIRMED',
+                reminder: 'EVENT_PARTICIPANT_REMINDER',
+                cancelled: 'EVENT_PARTICIPANT_CANCELLED'
+            }[resolvedKind];
+            for (const person of people) {
+                await notificationService.dispatchLifecycleEvent(participantEvent, {
+                    id: '',
+                    name: str(person.name),
+                    email: str(person.email),
+                    phone: str(person.phone)
+                }, {
+                    ...ctx,
+                    // The message is about THEIR seat, booked by somebody else.
+                    participantName: str(person.name),
+                    participantEmail: str(person.email),
+                    participantPhone: str(person.phone),
+                    bookerName: (booking.bookedBy && booking.bookedBy.name) || '',
+                    bookerEmail: str(person.email)
+                }).catch((error) => logger.warn('Participant message not sent', {
+                    bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
+                }));
+            }
         })().catch((error) => {
             logger.warn('Event booking message not sent', {
                 bookingRef: booking && booking.bookingRef, kind: resolvedKind, error: error && error.message
