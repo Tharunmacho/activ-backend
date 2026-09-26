@@ -811,7 +811,6 @@ class EventBookingService {
                 { status: 'active', 'payment.status': { $in: ['paid', 'not_required'] } }
             ]
         }).select('bookingRef bookedBy participants').lean();
-        if (!existing.length) return;
 
         const emails = new Set();
         const phones = new Set();
@@ -832,18 +831,46 @@ class EventBookingService {
             }
         };
         check(bookedBy, 'email', 'phone', 'This');
+
+        /*
+         * ONE PERSON, ONE SEAT, INSIDE THIS BOOKING TOO. Participant 1 may be
+         * the booker (that is the default); nobody else may repeat the booker's
+         * or an earlier participant's email or mobile.
+         */
+        const seenEmail = new Map();
+        const seenPhone = new Map();
+        const bookerEmail = str(bookedBy && bookedBy.email).toLowerCase();
+        const bookerPhone = phoneKey(bookedBy && bookedBy.phone);
+
         participants.forEach((p, i) => {
-            // Participant 1 is usually the booker; reported once, on the booker's boxes.
-            if (i === 0 && str(p.email).toLowerCase() === str(bookedBy.email).toLowerCase()
-                && phoneKey(p.phone) === phoneKey(bookedBy.phone)) return;
+            const email = str(p && p.email).toLowerCase();
+            const phone = phoneKey(p && p.phone);
+            const isBooker = i === 0 && (!email || email === bookerEmail) && (!phone || phone === bookerPhone);
+            if (isBooker) return; // reported once, on the booker's boxes
+
             check(p, `participants.${i}.email`, `participants.${i}.phone`, `Participant ${i + 1}'s`);
+
+            if (email && !fields[`participants.${i}.email`]) {
+                if (email === bookerEmail || seenEmail.has(email)) {
+                    fields[`participants.${i}.email`] = `Each participant needs their own email — this one is already used by ${
+                        seenEmail.has(email) ? `participant ${seenEmail.get(email) + 1}` : 'you'} in this booking.`;
+                }
+            }
+            if (phone.length === 10 && !fields[`participants.${i}.phone`]) {
+                if (phone === bookerPhone || seenPhone.has(phone)) {
+                    fields[`participants.${i}.phone`] = `Each participant needs their own mobile number — this one is already used by ${
+                        seenPhone.has(phone) ? `participant ${seenPhone.get(phone) + 1}` : 'you'} in this booking.`;
+                }
+            }
+            if (email && !seenEmail.has(email)) seenEmail.set(email, i);
+            if (phone.length === 10 && !seenPhone.has(phone)) seenPhone.set(phone, i);
         });
 
         if (Object.keys(fields).length) {
             const err = ApiError.conflict(
                 fields.email || fields.phone
                     ? 'You are already registered for this event with this email or mobile number.'
-                    : 'A participant is already registered for this event.'
+                    : 'Each person can hold only one seat for this event — please check the highlighted boxes.'
             );
             err.fields = fields;
             throw err;

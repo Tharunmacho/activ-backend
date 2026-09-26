@@ -147,6 +147,26 @@ router.post('/event/:eventId', writeLimiter, optionalAuth, asyncHandler(async(re
 }));
 
 /**
+ * POST /api/v1/event-bookings/event/:eventId/check
+ * Body: { email, phone, participants: [{ email, phone }] }
+ *
+ * The same "already registered / entered twice" rule the booking applies, asked
+ * WITHOUT writing anything — the form calls it on Continue so the message sits
+ * under the box before the visitor reaches the review or the payment.
+ * 200 { ok: true }, or 409 with `fields` naming each box.
+ */
+router.post('/event/:eventId/check', writeLimiter, optionalAuth, asyncHandler(async(req, res) => {
+    const body = req.body || {};
+    const event = await bookingService.resolveEvent(req.params.eventId, await callerOrNull(req));
+    await bookingService.assertNotAlreadyBooked(
+        event,
+        { email: body.email, phone: body.phone },
+        Array.isArray(body.participants) ? body.participants.slice(0, 50) : []
+    );
+    res.json(ApiResponse.success({ ok: true }));
+}));
+
+/**
  * GET /api/v1/event-bookings/:bookingRef
  *
  * The reference IS the credential, and that is a deliberate trade rather than
