@@ -107,6 +107,8 @@ const pickEventDetail = (event = {}) => ({
      * page". True unless somebody turned it off — see the schema.
      */
     showOnHome: event.showOnHome !== false,
+    // The QR card on the event page. See the schema.
+    showQrOnPage: event.showQrOnPage !== false,
     /*
      * The home page BANNER, and the words over this event there — the
      * gallery's own banner fields, on an event. See the schema.
@@ -208,6 +210,10 @@ const eventDetailUpdates = (payload = {}) => {
      */
     if (payload.showOnHome !== undefined) {
         update.showOnHome = payload.showOnHome === true || payload.showOnHome === 'true';
+    }
+    // The QR card on the event page; same string-boolean rule, absent = untouched.
+    if (payload.showQrOnPage !== undefined) {
+        update.showQrOnPage = payload.showQrOnPage === true || payload.showQrOnPage === 'true';
     }
 
     /*

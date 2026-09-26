@@ -327,10 +327,10 @@ module.exports = {
                  * the approved poster template, so nothing is lost; the day it is
                  * approved it becomes the only one sent, with no redeploy.
                  */
-                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v2',
-                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v2',
+                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v3',
+                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v3',
                 bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || 'activ_booking_cancelled_v2',
-                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v2',
+                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v3',
                 /*
                  * Two ALREADY-APPROVED templates on the account, both with the
                  * event poster as an image header and the association's full

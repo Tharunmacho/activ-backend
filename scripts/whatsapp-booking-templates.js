@@ -28,7 +28,8 @@ const version = process.env.META_API_VERSION || 'v21.0';
 const base = (process.env.META_BASE_URL || 'https://graph.facebook.com').replace(/\/+$/, '');
 const language = process.env.META_TEMPLATE_LANGUAGE || 'en_US';
 
-const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta);
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7);
+const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && (!only || t.name === only));
 let imageHandle = process.env.META_TEMPLATE_IMAGE_HANDLE || '';
 
 /**

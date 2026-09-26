@@ -144,7 +144,8 @@ const attendanceOf = (event = {}, b = {}) => {
     const isOnline = event.mode === 'online'
         || (!address && (!venue || ONLINE_WORDS.test(venue)) && (!!url || ONLINE_WORDS.test(hints)));
     const found = PLATFORMS.find(([re]) => re.test(hints));
-    const platform = isOnline ? (str(event.onlinePlatform) || (found ? found[1] : '')) : '';
+    // The canonical spelling when the platform is recognised ("zoom" -> "Zoom").
+    const platform = isOnline ? ((found ? found[1] : '') || str(event.onlinePlatform)) : '';
     // A category that is nothing but a format word ("ZOOM", "Online webinar").
     const formatWordCategory = isOnline && !!category
         && category.split(/\s+/).every((w) => ONLINE_WORDS.test(w) || /^(event|session|meeting|webinar)s?$/i.test(w));
@@ -1504,6 +1505,9 @@ class EventBookingService {
             paymentLabel,
             paymentId: settledVia === 'online' ? (payment.gatewayPaymentId || '') : '',
             contactLine,
+            contactName: event.contactName || '',
+            contactPhone: event.contactPhone || '',
+            contactEmail: event.contactEmail || '',
             viewUrl: eventId && b.bookingRef
                 ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
                 : '',

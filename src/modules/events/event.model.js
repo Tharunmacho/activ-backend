@@ -435,6 +435,17 @@ const eventSchema = new mongoose.Schema({
     },
 
     /*
+     * The event's QR code (it encodes the public `/events/<slug>` address) is
+     * shown on the event page, for a visitor to scan onto their phone or save.
+     * On by default and read `!== false`, so older events show it too; the
+     * editor turns it off per event.
+     */
+    showQrOnPage: {
+        type: Boolean,
+        default: true
+    },
+
+    /*
      * ======================================================================
      * RIDES THE HOME PAGE BANNER (the slideshow at the top of the site)
      * ======================================================================

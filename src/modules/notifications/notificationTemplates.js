@@ -167,73 +167,140 @@ const registerLink = (ctx = {}) => ctx.registerUrl
 /** "Dear Tharun" — the full name the booker gave, first name as a fallback. */
 const greetName = (ctx = {}) => oneLine(ctx.bookerName || ctx.name || ctx.firstName, 60) || 'Member';
 
+/** "+918220112188" -> "+91 82201 12188"; anything else as typed. */
+const prettyPhone = (value) => {
+    const raw = oneLine(value, 40);
+    const m = raw.replace(/[\s-]/g, '').match(/^(?:\+?91)?(\d{5})(\d{5})$/);
+    return m ? `+91 ${m[1]} ${m[2]}` : raw;
+};
+
+/** The organiser, as three separate values — name, phone, email — each on its own line. */
+const contactParts = (ctx = {}) => [
+    oneLine(ctx.contactName, 80) || 'ACTIV Office',
+    prettyPhone(ctx.contactPhone) || '+91 82201 12188',
+    oneLine(ctx.contactEmail, 120) || 'enquiry@activ.org.in'
+];
+
+/** Exactly two "Please note" points: the organiser's own first, the standing advice after. */
+const tipPair = (ctx = {}) => {
+    const notes = noteLinesOf(ctx).map((n) => clause(n, 180));
+    const standing = standingTips(ctx);
+    const list = [...notes, ...standing].filter(Boolean);
+    return [list[0] || standing[0], notes.length > 1 ? notes.slice(1).join('; ') : (list[1] || standing[1])];
+};
+
 /**
- * THE CUSTOM TEMPLATES (`WHATSAPP_TEMPLATES` below, `_v2`), one per kind of
- * message and per format — a webinar registration and a hall booking are
- * different messages, not one message with blanks. Each returns the ordered
- * values for its own body.
+ * WHAT KIND OF ONLINE LINK THE ORGANISER PASTED, because the instructions differ:
+ *
+ *   register  a registration form (zoom.us/meeting/register/…, /webinar/register/…,
+ *             forms, Meet with a "register" path). The booker submits it and the
+ *             platform shows their personal joining link on the spot.
+ *   join      a direct meeting link (zoom.us/j/…, meet.google.com/…, teams …/l/meetup-join).
+ *   none      nothing yet.
  */
-const customTemplate = (kind, ctx = {}) => {
+const onlineLinkKind = (url) => {
+    const u = String(url || '').toLowerCase();
+    if (!u) return 'none';
+    if (/register|registration|forms\.|\/form|lu\.ma|eventbrite/.test(u)) return 'register';
+    return 'join';
+};
+
+/** The three pieces of the webinar message that depend on the link kind. */
+const webinarLinkLines = (ctx = {}) => {
+    const platform = ctx.onlinePlatform || 'webinar';
+    const kind = onlineLinkKind(ctx.registerUrl);
+    if (kind === 'register') {
+        return [
+            `Final step: complete your ${platform} registration`,
+            ctx.registerUrl,
+            'As soon as you submit that form, your personal joining link appears on the screen. '
+                + 'Save it, and join 5-10 minutes before the start'
+        ];
+    }
+    if (kind === 'join') {
+        return [
+            `Your ${platform} joining link`,
+            ctx.registerUrl,
+            'Tap the link 5-10 minutes before the start to check your audio and video. Please keep it to yourself'
+        ];
+    }
+    return [
+        'Your joining link',
+        'The organiser will share it here before the webinar starts',
+        `Your seat is saved. Keep your booking ID handy: ${ctx.bookingRef || ''}`.trim()
+    ];
+};
+
+/**
+ * THE CUSTOM TEMPLATES, newest first. Each kind returns the `_v3` step (every
+ * tip and every contact detail on its own line) and the approved `_v2` step
+ * behind it, so a `_v3` still in Meta review falls back to `_v2`, not to the
+ * old poster templates.
+ */
+const V2 = {
+    webinar: 'activ_webinar_registration_v2',
+    inPerson: 'activ_event_booking_v2',
+    reminder: 'activ_booking_reminder_v2'
+};
+
+const customTemplates = (kind, ctx = {}) => {
     const title = clause(ctx.eventTitle, 120) || 'the event';
-    const org = orDash(ctx.contactLine, 'the ACTIV office, +91 82201 12188');
-    const tips = orDash(noteLinesOf(ctx).join('; ') || standingTips(ctx).join('; '));
+    const date = orDash(ctx.dateLabel, 'Date to be confirmed');
+    const time = orDash(ctx.timeLabel, 'Time to be confirmed');
+    const ref = ctx.bookingRef || 'See your email';
+    const [tip1, tip2] = tipPair(ctx);
+    const [cName, cPhone, cEmail] = contactParts(ctx);
+    const orgLine = orDash(ctx.contactLine, 'the ACTIV office, +91 82201 12188');
+    const steps = [];
 
     if (kind === 'confirmed' && ctx.isOnline) {
-        const template = tplOn(TPL.bookingWebinar);
-        return template && {
-            template,
-            params: [
-                greetName(ctx),
-                title,
-                orDash(ctx.dateLabel, 'Date to be confirmed'),
-                orDash(ctx.timeLabel, 'Time to be confirmed'),
-                orDash(ctx.onlinePlatform || ctx.formatLabel, 'Online'),
-                ctx.bookingRef || 'See your email',
-                registerLink(ctx),
-                oneLine(ctx.bookerEmail, 120) || 'the email address you register with',
-                org
-            ]
-        };
-    }
-    if (kind === 'confirmed') {
-        const template = tplOn(TPL.booking);
-        return template && {
-            template,
-            params: [
-                greetName(ctx),
-                title,
-                orDash(ctx.dateLabel, 'Date to be confirmed'),
-                orDash(ctx.timeLabel, 'Time to be confirmed'),
+        const [head, link, how] = webinarLinkLines(ctx);
+        if (tplOn(TPL.bookingWebinar)) {
+            steps.push({
+                template: TPL.bookingWebinar,
+                params: [greetName(ctx), title, date, time, orDash(ctx.onlinePlatform, 'Online'), ref,
+                    head, orDash(link), orDash(how), cName, cPhone, cEmail]
+            });
+        }
+        steps.push({
+            template: V2.webinar,
+            params: [greetName(ctx), title, date, time, orDash(ctx.onlinePlatform, 'Online'), ref,
+                registerLink(ctx), oneLine(ctx.bookerEmail, 120) || 'the email address you register with', orgLine]
+        });
+    } else if (kind === 'confirmed') {
+        if (tplOn(TPL.booking)) {
+            steps.push({
+                template: TPL.booking,
+                params: [greetName(ctx), title, date, time,
+                    orDash(ctx.venueLabel, 'Venue to be announced'),
+                    orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
+                    orDash(seatsLine(ctx)), orDash(feeLine(ctx, 'Rs ')), ref,
+                    tip1, tip2, cName, cPhone, cEmail]
+            });
+        }
+        steps.push({
+            template: V2.inPerson,
+            params: [greetName(ctx), title, date, time,
                 orDash(ctx.venueLabel, 'Venue to be announced'),
                 orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
-                orDash(`${seatsLine(ctx)} | ${feeLine(ctx, 'Rs ')}`),
-                ctx.bookingRef || 'See your email',
-                tips,
-                org
-            ]
-        };
+                orDash(`${seatsLine(ctx)} | ${feeLine(ctx, 'Rs ')}`), ref, `${tip1}; ${tip2}`, orgLine]
+        });
+    } else if (kind === 'reminder') {
+        const [head, link] = ctx.isOnline ? webinarLinkLines(ctx) : ['Directions', ctx.mapUrl || ctx.viewUrl];
+        if (tplOn(TPL.bookingReminder)) {
+            steps.push({
+                template: TPL.bookingReminder,
+                params: [greetName(ctx), title, ctx.startsInLabel || 'soon', date, time, orDash(whereLine(ctx)),
+                    head, orDash(link, 'See your booking email'), ref, tip1, tip2, cName, cPhone, cEmail]
+            });
+        }
+        steps.push({
+            template: V2.reminder,
+            params: [greetName(ctx), title, ctx.startsInLabel || 'soon', date, time, orDash(whereLine(ctx)),
+                orDash(link, 'See your booking email'), ref, `${tip1}; ${tip2}`, orgLine]
+        });
     }
-    if (kind === 'reminder') {
-        const template = tplOn(TPL.bookingReminder);
-        return template && {
-            template,
-            params: [
-                greetName(ctx),
-                title,
-                ctx.startsInLabel || 'soon',
-                orDash(ctx.dateLabel, 'Date to be confirmed'),
-                orDash(ctx.timeLabel, 'Time to be confirmed'),
-                orDash(whereLine(ctx)),
-                ctx.isOnline
-                    ? `${registerLink(ctx)} - register here if you have not yet; your joining link comes by email`
-                    : orDash(ctx.mapUrl || ctx.viewUrl, 'See your booking email'),
-                ctx.bookingRef || 'See your email',
-                tips,
-                org
-            ]
-        };
-    }
-    return null;
+    return steps.filter((s) => s.template);
 };
 
 /**
@@ -295,7 +362,7 @@ const posterTemplate = (ctx = {}) => {
  */
 const richBookingWhatsApp = (kind, eventParams, ctx = {}) => {
     const image = ctx.posterUrl || DEFAULT_WHATSAPP_POSTER();
-    const steps = [customTemplate(kind, ctx), posterTemplate(ctx)]
+    const steps = [...customTemplates(kind, ctx), posterTemplate(ctx)]
         .filter(Boolean)
         .map((s) => ({ ...s, headerImage: image }));
     steps.push({ template: TPL.event, params: eventParams });
@@ -367,8 +434,8 @@ const whereLine = (ctx = {}) => (ctx.isOnline
 
 /** The standing advice, worded for a webinar or for a hall. */
 const standingTips = (ctx = {}) => (ctx.isOnline
-    ? ['Join 5-10 minutes early to check your audio and video', 'A laptop or phone with a stable connection works best']
-    : ['Arrive 15-30 minutes early for registration', 'Carry a photo ID for each participant']);
+    ? ['Join 5 to 10 minutes before the start to check your audio and video', 'Use a laptop or phone with a stable internet connection']
+    : ['Please arrive 15 to 30 minutes before the start time for registration', 'Carry a valid photo ID for each participant']);
 
 /**
  * The written-out WhatsApp message (session window / text fallback) for a
@@ -378,15 +445,17 @@ const standingTips = (ctx = {}) => (ctx.isOnline
 const bookingText = (ctx = {}, { heading, lead, closing }) => {
     const online = !!ctx.isOnline;
     const notes = noteLinesOf(ctx);
-    const tips = notes.length ? notes : standingTips(ctx);
+    const tips = tipPair(ctx);
+    const [linkHead, link, linkHow] = online ? webinarLinkLines(ctx) : ['', '', ''];
+    const [cName, cPhone, cEmail] = contactParts(ctx);
     return `${heading}\n\n`
         + `Dear ${greetName(ctx)}, Jaibhim! 🙏\n${lead}\n\n`
         + waLines([
             ['🗓', ctx.dateLabel],
             ['⏰', ctx.timeLabel],
             [online ? '💻' : '📍', whereLine(ctx)],
-            ['📝', online ? `Register here: ${registerLink(ctx)}` : ''],
-            ['📧', online && ctx.registerUrl ? 'Your personal joining link is emailed to you once you register' : ''],
+            ['👉', online ? `*${linkHead}*\n${link}` : ''],
+            ['💡', online ? linkHow : ''],
             ['🗺', !online && ctx.mapUrl ? `Directions: ${ctx.mapUrl}` : ''],
             ['🏷', [ctx.topic, ctx.language].filter(Boolean).join(' · ')],
             ['🎟', seatsLine(ctx)],
@@ -395,7 +464,7 @@ const bookingText = (ctx = {}, { heading, lead, closing }) => {
         ])
         + `\n\n📌 *${notes.length ? 'Please note' : (online ? 'Before the webinar' : 'Before you come')}*\n`
         + tips.map((n) => `• ${n}`).join('\n')
-        + (ctx.contactLine ? `\n\n📞 Organiser: ${ctx.contactLine}` : '')
+        + `\n\n📞 *Need help? Contact the organiser*\n👤 *Name:* ${cName}\n📱 *Phone:* ${cPhone}\n📧 *Email:* ${cEmail}`
         + (ctx.viewUrl ? `\n🔎 Your booking: ${ctx.viewUrl}` : '')
         + `\n\n${closing}\n— ${ORG_SIGNATURE}`;
 };
@@ -1093,6 +1162,101 @@ const WHATSAPP_TEMPLATES = [
      * newline, which Meta refuses.
      */
     {
+        /* ONLINE event, confirmed. The link section follows the link kind (register / join / none). */
+        name: 'activ_webinar_registration_v3',
+        envKey: 'BOTBEE_TPL_BOOKING_WEBINAR',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '✅ Thank you for registering for our webinar *{{2}}*\n\n'
+            + '🗓 *Date:* {{3}}\n'
+            + '⏰ *Time:* {{4}}\n'
+            + '💻 *Platform:* {{5}}\n'
+            + '🔖 *Booking ID:* {{6}}\n\n'
+            + '👉 *{{7}}*\n'
+            + '{{8}}\n\n'
+            + '💡 {{9}}.\n\n'
+            + '📞 *Need help? Contact the organiser*\n'
+            + '👤 *Name:* {{10}}\n'
+            + '📱 *Phone:* {{11}}\n'
+            + '📧 *Email:* {{12}}\n\n'
+            + 'We look forward to seeing you online!',
+        params: ['full name', 'event', 'date', 'time', 'platform', 'booking ID', 'link heading', 'link',
+            'what to do with the link', 'organiser name', 'organiser phone', 'organiser email'],
+        samples: ['Tharun', 'How to get business opportunities at NLC', 'Sunday, 27 September 2026',
+            '3:00 PM - 6:00 PM IST', 'Zoom', 'ACTIVB-MUHCP7NA-710D', 'Final step: complete your Zoom registration',
+            'https://zoom.us/meeting/register/abc123',
+            'As soon as you submit that form, your personal joining link appears on the screen. Save it, and join 5-10 minutes before the start',
+            'Rajesh', '+91 82201 12188', 'online@activ.org.in']
+    },
+    {
+        /* IN-PERSON event, confirmed. Every note and contact detail on its own line. */
+        name: 'activ_event_booking_v3',
+        envKey: 'BOTBEE_TPL_BOOKING',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '✅ Your seat is confirmed for *{{2}}*\n\n'
+            + '🗓 *Date:* {{3}}\n'
+            + '⏰ *Time:* {{4}}\n'
+            + '📍 *Venue:* {{5}}\n'
+            + '🗺 *Directions:* {{6}}\n'
+            + '🎟 *Seats:* {{7}}\n'
+            + '💳 *Fee:* {{8}}\n'
+            + '🔖 *Booking ID:* {{9}}\n\n'
+            + '📌 *Please note*\n'
+            + '• {{10}}\n'
+            + '• {{11}}\n\n'
+            + '📞 *Need help? Contact the organiser*\n'
+            + '👤 *Name:* {{12}}\n'
+            + '📱 *Phone:* {{13}}\n'
+            + '📧 *Email:* {{14}}\n\n'
+            + 'We look forward to welcoming you!',
+        params: ['full name', 'event', 'date', 'time', 'venue', 'map link', 'seats', 'fee', 'booking ID',
+            'note 1', 'note 2', 'organiser name', 'organiser phone', 'organiser email'],
+        samples: ['Tharun', 'Entrepreneurs Awareness Programme', 'Friday, 23 October 2026', '9:00 AM - 5:00 PM IST',
+            'Annamalai University, Chidambaram', 'https://maps.app.goo.gl/abc123', '1 seat - Tharun', 'Free',
+            'ACTIVB-MUHAF0VR-2EA6', 'Please arrive 15 to 30 minutes before the start time for registration',
+            'Carry a valid photo ID for each participant', 'Rajesh', '+91 82201 12188', 'events@activ.org.in']
+    },
+    {
+        /* Either format, a day or so before. */
+        name: 'activ_booking_reminder_v3',
+        envKey: 'BOTBEE_TPL_BOOKING_REMINDER',
+        category: 'Utility',
+        meta: true,
+        header: 'IMAGE',
+        footer: 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
+            + '⏰ Friendly reminder: *{{2}}* starts *{{3}}*\n\n'
+            + '🗓 *Date:* {{4}}\n'
+            + '⏰ *Time:* {{5}}\n'
+            + '📍 *Where:* {{6}}\n'
+            + '🔗 *{{7}}:* {{8}}\n'
+            + '🔖 *Booking ID:* {{9}}\n\n'
+            + '📌 *Please note*\n'
+            + '• {{10}}\n'
+            + '• {{11}}\n\n'
+            + '📞 *Need help? Contact the organiser*\n'
+            + '👤 *Name:* {{12}}\n'
+            + '📱 *Phone:* {{13}}\n'
+            + '📧 *Email:* {{14}}\n\n'
+            + 'See you there!',
+        params: ['full name', 'event', 'starts in', 'date', 'time', 'venue, or online + platform', 'link label',
+            'link', 'booking ID', 'note 1', 'note 2', 'organiser name', 'organiser phone', 'organiser email'],
+        samples: ['Tharun', 'SCST Economic Liberty Conference', 'tomorrow', 'Saturday, 10 October 2026',
+            '9:00 AM - 5:30 PM IST', 'DNC Vijay Mahal, Dharmapuri', 'Directions', 'https://maps.app.goo.gl/abc123',
+            'ACTIVB-MUEE9IBU-445B', 'Please arrive 15 to 30 minutes before the start time for registration',
+            'Carry a valid photo ID for each participant', 'Rajesh', '+91 82201 12188', 'events@activ.org.in']
+    },
+    {
         /* ONLINE event, confirmed: register on the platform, link arrives by email. */
         name: 'activ_webinar_registration_v2',
         envKey: 'BOTBEE_TPL_BOOKING_WEBINAR',
@@ -1180,7 +1344,8 @@ const WHATSAPP_TEMPLATES = [
         bodyWithVariables: 'Dear *{{1}}*, Jaibhim! 🙏\n\n'
             + '❌ Your booking *{{2}}* for *{{3}}* on {{4}} has been cancelled by the organiser.\n\n'
             + '📝 *Reason:* {{5}}\n\n'
-            + 'Your seats have been released. For any questions, please contact {{6}}.',
+            + 'Your seats have been released. For any questions, please contact {{6}}.\n\n'
+            + 'We hope to see you at a future ACTIV event.',
         params: ['full name', 'booking ID', 'event', 'date & time', 'reason', 'organiser contact'],
         samples: ['Tharun', 'ACTIVB-MUEE9IBU-445B', 'SCST Economic Liberty Conference',
             'Saturday, 10 October 2026, 9:00 AM IST', 'Duplicate booking', 'Rajesh, +91 82201 12188']

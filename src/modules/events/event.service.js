@@ -269,6 +269,7 @@ const toEvent = (doc = {}, extras = {}) => ({
      * every event, so a switch an editor had just turned off came back on.
      */
     showOnHome: doc.showOnHome !== false,
+    showQrOnPage: doc.showQrOnPage !== false,
     /*
      * The home page BANNER switch and its words — here for the reason
      * `showOnHome` is: the CMS lists map through this function, and a field
