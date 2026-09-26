@@ -560,13 +560,39 @@ class PaymentService {
             }
         }
 
+        /*
+         * THE ANSWER AFTER SETTLING, and the event from the BOOKING.
+         *
+         * `order` was read before the gateway check above, so the call that
+         * confirmed the payment used to report it as still pending. And orders
+         * written while the client supplied the event id have none, which left
+         * the return page unable to open the booking ("still confirming"
+         * forever, and a View-my-booking button pointing at a missing page).
+         * The booking always knows its event, so it is asked.
+         */
+        const fresh = await PaymentOrder.findOne({ orderId: order.orderId }).lean().catch(() => null) || order;
+        let eventId = fresh.eventId ? String(fresh.eventId) : '';
+        let eventSlug = '';
+        if (fresh.orderType === 'event_booking' && fresh.bookingRef) {
+            const EventBooking = require('../events/eventbooking.model');
+            const booking = await EventBooking.findOne({ bookingRef: fresh.bookingRef }).select('eventId').lean().catch(() => null);
+            if (!eventId && booking && booking.eventId) eventId = String(booking.eventId);
+            if (eventId) {
+                const Event = require('../events/event.model');
+                const ev = await Event.findById(eventId).select('slug').lean().catch(() => null);
+                eventSlug = (ev && ev.slug) || '';
+            }
+        }
+
         return {
-            orderId: order.orderId,
-            orderType: order.orderType || 'membership',
-            status: order.status,
-            amount: order.amount,
-            bookingRef: order.bookingRef || '',
-            eventId: order.eventId ? String(order.eventId) : ''
+            orderId: fresh.orderId,
+            orderType: fresh.orderType || 'membership',
+            status: fresh.status,
+            amount: fresh.amount,
+            bookingRef: fresh.bookingRef || '',
+            eventId,
+            // The readable address to send the buyer to (events/eventSlug.js).
+            eventSlug
         };
     }
 

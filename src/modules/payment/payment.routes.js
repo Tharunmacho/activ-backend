@@ -86,6 +86,8 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
     let planId = membershipType;
     /** Set for an event booking: who the seats were booked by. */
     let bookingContact = null;
+    /** The event the booking is for — from the BOOKING, never from the client. */
+    let bookingEventId = null;
 
     if (orderType === 'event_booking') {
         if (!bookingRef) {
@@ -103,6 +105,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
            confirmation is sent to, so the gateway receipt and our own email
            reach the same person. */
         bookingContact = booking.bookedBy || {};
+        bookingEventId = booking.eventId || null;
     } else {
         const plan = await membershipPlanService.getPlanForPayment(membershipType);
         if (!plan) {
@@ -228,7 +231,13 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         amount: calculatedAmount,
         membershipType: orderType === 'membership' ? planId : undefined,
         orderType: orderType,
-        eventId: eventId,
+        /*
+         * THE BOOKING'S OWN EVENT. It was taken from the request body, which the
+         * website stopped sending — every order was saved with no event, so the
+         * return page could never open the booking and sat on "still confirming",
+         * and its View-my-booking button fell through to a page that is not there.
+         */
+        eventId: orderType === 'event_booking' ? bookingEventId : (eventId || undefined),
         bookingRef: bookingRef,
         provider: 'instamojo',
         gatewayPaymentId: result.payment_request_id, // Store the Instamojo request ID here
