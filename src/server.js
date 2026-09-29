@@ -113,8 +113,71 @@ const startServer = async() => {
             });
         });
 
-        // Start listening
-        server.listen(config.port, '0.0.0.0', () => {
+        /*
+         * Event booking reminders, sent at the hours-before offsets each event
+         * sets. Non-fatal: a reminder sweep can never be a reason not to boot.
+         * `EVENT_REMINDERS_ENABLED=false` turns it off.
+         */
+        try {
+            require('./modules/events/eventbooking.service').startReminderScheduler();
+        } catch (error) {
+            logger.warn('Event reminder scheduler not started', { error: error && error.message });
+        }
+
+        // Renewal reminders: 30 days, 7 days, and on expiry.
+        // `MEMBERSHIP_RENEWAL_REMINDERS=false` turns it off.
+        try {
+            require('./modules/notifications/membershipRenewal.service').start();
+        } catch (error) {
+            logger.warn('Membership renewal reminders not started', { error: error && error.message });
+        }
+        // Donations: each donor's final 80G statement, emailed once after 31 March.
+        // `DONATION_STATEMENTS=false` turns it off.
+        try {
+            require('./modules/donations/donation.service').start();
+        } catch (error) {
+            logger.warn('Donation statement sweep not started', { error: error && error.message });
+        }
+
+        /*
+         * Upload bucket. Checked at boot so a key without permission on the
+         * bucket is reported once, here, instead of once per upload. Then
+         * copy across anything uploaded while the bucket was unavailable —
+         * off the startup path, since it can take a while.
+         */
+        const objectStore = require('./core/storage/objectStore');
+        if (objectStore.isEnabled()) {
+            const probe = await objectStore.probe();
+            if (probe.ok) {
+                logger.info('S3 upload bucket is writable', { bucket: config.objectStorage.bucket });
+                require('./core/storage/uploadStore').syncToBucket()
+                    .then((r) => { if (r.copied || r.failed) logger.info('Synced pending uploads to the S3 bucket', r); })
+                    .catch((err) => logger.warn('Upload sync to S3 failed', { error: err && err.message }));
+            } else {
+                logger.error('S3 upload bucket is NOT usable — uploads are going to GridFS instead', {
+                    bucket: config.objectStorage.bucket,
+                    endpoint: config.objectStorage.endpoint,
+                    status: probe.status,
+                    reason: probe.reason,
+                });
+            }
+        } else {
+            logger.warn('No S3 upload bucket configured (AWS_BUCKET_NAME / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) — uploads go to GridFS');
+        }
+
+        /*
+         * Start listening — DUAL-STACK (`::` takes IPv6 and IPv4 alike).
+         *
+         * Bound to '0.0.0.0' (IPv4 only), every request to `localhost:5000`
+         * paid ~200 ms before the first byte on Windows: `localhost` resolves to
+         * `::1` first, the IPv6 connect is refused, and only then does the
+         * client fall back to 127.0.0.1. The website's dev config and the
+         * mobile app both call `localhost`, so that was 200 ms on EVERY API call.
+         * A host with IPv6 disabled cannot bind `::`; it falls back to IPv4.
+         */
+        const onListening = () => {
+            // Keep the landing page's public reads warm — see publicCache.
+            require('./core/middleware/publicCache').warm(config.port, `/api/${config.apiVersion}`);
             logger.info(`
 ╔═══════════════════════════════════════╗
 ║   ACTIV Backend Server Started   ║
@@ -126,6 +189,20 @@ const startServer = async() => {
 ║ Redis: ${(redisClient ? 'Connected' : 'Disconnected (memory cache)').padEnd(29)}║
 ╚═══════════════════════════════════════╝
       `);
+        };
+        const listenIPv4 = () => server.listen(config.port, '0.0.0.0', onListening);
+        const onBindError = (err) => {
+            if (err && (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL')) {
+                logger.warn('IPv6 unavailable — listening on IPv4 only', { code: err.code });
+                listenIPv4();
+                return;
+            }
+            throw err;
+        };
+        server.once('error', onBindError);
+        server.listen({ port: config.port, host: '::', ipv6Only: false }, () => {
+            server.removeListener('error', onBindError);
+            onListening();
         });
 
         // Handle shutdown signals

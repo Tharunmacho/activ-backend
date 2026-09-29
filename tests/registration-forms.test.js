@@ -174,8 +174,11 @@ const testBooleanNormalisation = () => {
     check('registrationType is not derived from the raw request value',
         !src.includes("profileData.doingBusiness ? 'business' : 'aspirant'"),
         'a truthy "no" would label an aspirant a business');
+    // Derived from the NORMALISED `doesBusiness`; the non-business answer is
+    // aspirant or student (each with its own fee).
     check('the controller normalises before deriving',
-        src.includes("registrationType: doesBusiness ? 'business' : 'aspirant'"));
+        src.includes('registrationType: kindFor(doesBusiness)')
+        && src.includes("const kindFor = (business) => (business ? 'business' : nonBusinessKind)"));
     check('an unanswered radio cannot reach a Boolean path',
         src.includes("delete profileData.filedITR") &&
         src.includes("delete profileData.govtSchemeBenefit"),

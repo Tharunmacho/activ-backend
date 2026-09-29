@@ -6,6 +6,7 @@ const MemberDetails = require('../members/memberdetails.model');
 // read is now only a seed and a fallback — see `membershipplan.service`.
 const membershipPlanService = require('../members/membershipplan.service');
 const { isPaidStatus, invalidateMemberContext } = require('../common/memberContext');
+const { renewalFor, renewalBase } = require('../members/membershipState');
 const notificationService = require('../notifications/notification.service');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
@@ -152,10 +153,23 @@ class PaymentOrderService {
          * be created for them: the payment step was unreachable for exactly the
          * members entitled to it.
          */
-        if (isPaidStatus(member.membershipStatus)) {
+        /*
+         * RENEWAL IS THE ONE WAY A PAID MEMBER PAYS AGAIN.
+         *
+         * An expired membership (the sweep writes `expired`, and an `active` row
+         * past its end date counts too) and one inside its last 30 days may open
+         * an order; `renewalFor` is the rule, shared with the member's Renew
+         * button so the button is never offered where this would refuse it.
+         */
+        const renewal = renewalFor(member.toObject ? member.toObject() : member);
+        if (isPaidStatus(member.membershipStatus) && !renewal.canRenew) {
             // Not merely wasteful: a second activation would overwrite the
             // first payment's record on the member.
-            throw ApiError.badRequest('This membership is already active');
+            throw ApiError.badRequest(renewal.lifetime
+                ? 'This is a lifetime membership — there is nothing to renew.'
+                : renewal.opensAt
+                    ? `This membership is active. Renewal opens on ${renewal.opensAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}.`
+                    : 'This membership is already active');
         }
 
         const order = await PaymentOrder.create({
@@ -266,6 +280,7 @@ class PaymentOrderService {
                  * nothing is pending, with nothing reporting an error.
                  */
                 amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
+                planName: order.planName || '',
                 data: { orderId: order.orderId, planId: order.planId }
             });
         } catch (error) {
@@ -396,9 +411,24 @@ class PaymentOrderService {
 
         if (!claimed) throw ApiError.badRequest('This order has already been paid');
 
+        /*
+         * A RENEWAL CONTINUES THE MEMBERSHIP; A FIRST PAYMENT STARTS IT.
+         *
+         * Read before writing: an early renewal's new year starts where the
+         * current one ends (`renewalBase`), and a renewing member keeps the
+         * "member since" date they already had.
+         */
+        const before = await MemberDetails.findById(claimed.memberId).lean().catch(() => null);
+        const priorState = before ? renewalFor(before).state : 'none';
+        const renewing = priorState === 'active' || priorState === 'expired';
+
         const expiresAt = claimed.membershipType === 'lifetime'
             ? null
-            : new Date(new Date().setFullYear(new Date().getFullYear() + 1));
+            : (() => {
+                const base = renewing ? renewalBase(before) : new Date();
+                base.setFullYear(base.getFullYear() + 1);
+                return base;
+            })();
 
         const member = await MemberDetails.findByIdAndUpdate(
             claimed.memberId,
@@ -417,7 +447,7 @@ class PaymentOrderService {
                  */
                 membershipStatus: 'active',
                 membershipType: claimed.membershipType,
-                membershipActivatedAt: new Date(),
+                membershipActivatedAt: (renewing && before && before.membershipActivatedAt) || new Date(),
                 membershipExpiresAt: expiresAt,
                 // From the order, not the request. The amount charged and the
                 // amount recorded are the same number by construction.
@@ -443,6 +473,10 @@ class PaymentOrderService {
          */
         invalidateMemberContext(member._id);
 
+        // ACTIV-2026-001: numbered on first activation, kept for life after.
+        const assignedNumber = await require('../members/memberNumber').assignMembershipNumber(member);
+        if (assignedNumber) member.membershipNumber = assignedNumber;
+
         logger.info('Membership activated by verified payment', {
             orderId: claimed.orderId,
             gatewayPaymentId,
@@ -451,7 +485,7 @@ class PaymentOrderService {
             provider: claimed.provider
         });
 
-        return { order: claimed, member };
+        return { order: claimed, member, renewed: renewing };
     }
 
     /** What a client may see about its own order. */

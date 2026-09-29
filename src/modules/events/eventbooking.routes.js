@@ -6,7 +6,12 @@ const { optionalAuth } = require('../../core/middleware/auth');
 const { createRateLimiter } = require('../../core/middleware/rateLimit');
 const logger = require('../../config/logger');
 
+const { resolveEventParam } = require('./eventSlug');
+
 const router = express.Router();
+
+// A booking taken on `/events/<slug>/book` is stored against the event's id.
+router.param('eventId', resolveEventParam);
 
 /**
  * "Book Now" — the public half of event bookings.
@@ -139,6 +144,31 @@ router.post('/event/:eventId', writeLimiter, optionalAuth, asyncHandler(async(re
             ? 'Your booking is confirmed'
             : 'Booking held — complete the payment to confirm it'
     ));
+}));
+
+/**
+ * POST /api/v1/event-bookings/event/:eventId/check
+ * Body: { email, phone, participants: [{ email, phone }] }
+ *
+ * The same "already registered / entered twice" rule the booking applies, asked
+ * WITHOUT writing anything — the form calls it on Continue so the message sits
+ * under the box before the visitor reaches the review or the payment.
+ * 200 { ok: true }, or 409 with `fields` naming each box.
+ */
+/*
+ * Its OWN limit. It runs while somebody types, so sharing the booking's 20 a
+ * window used the allowance up and the real booking then answered 429.
+ */
+const checkLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 600 });
+router.post('/event/:eventId/check', checkLimiter, optionalAuth, asyncHandler(async(req, res) => {
+    const body = req.body || {};
+    const event = await bookingService.resolveEvent(req.params.eventId, await callerOrNull(req));
+    await bookingService.assertNotAlreadyBooked(
+        event,
+        { email: body.email, phone: body.phone },
+        Array.isArray(body.participants) ? body.participants.slice(0, 50) : []
+    );
+    res.json(ApiResponse.success({ ok: true }));
 }));
 
 /**

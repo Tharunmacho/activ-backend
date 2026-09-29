@@ -3,6 +3,7 @@ const memberService = require('./member.service');
    own comment gives: four copies of it is how the dashboard and the
    certificate came to print different numbers for the same member. */
 const { membershipNumberFor } = require('./memberNumber');
+const { renewalFor } = require('./membershipState');
 const MemberDetails = require('./memberdetails.model');
 const PersonalInfo1 = require('./personalinfo1.model');
 const BusinessInfo = require('./businessinfo.model');
@@ -475,6 +476,26 @@ const updateMember = asyncHandler(async(req, res) => {
     // `turnoverRange` is an enum; the empty string is not a member of it.
     if (profileData.turnoverRange === '') delete profileData.turnoverRange;
 
+    /*
+     * WHICH KIND OF APPLICANT — business, aspirant or student.
+     *
+     * "No business" has two answers now, each with its own fee: an aspirant
+     * and a student. The client names which in `registrationType`; anything
+     * else not doing business is an aspirant, as it always was.
+     */
+    const declaredKind = String(profileData.registrationType || profileData.memberType || '').toLowerCase();
+    const nonBusinessKind = declaredKind === 'student' ? 'student' : 'aspirant';
+    const kindFor = (business) => (business ? 'business' : nonBusinessKind);
+
+    // Only the kind changed (Student <-> Aspirant), with no business answer
+    // sent: update that one field on an existing non-business record.
+    if (doesBusiness === undefined && (declaredKind === 'student' || declaredKind === 'aspirant')) {
+        await BusinessInfo.updateOne(
+            { userId: req.user.userId, doingBusiness: false },
+            { $set: { registrationType: declaredKind, updatedAt: new Date() } }
+        );
+    }
+
     // Save business information to BusinessInfo collection if provided
     if (doesBusiness !== undefined) {
         let businessInfo = await BusinessInfo.findOne({ userId: req.user.userId });
@@ -483,7 +504,7 @@ const updateMember = asyncHandler(async(req, res) => {
             // Update existing business record
             Object.assign(businessInfo, {
                 doingBusiness: profileData.doingBusiness,
-                registrationType: doesBusiness ? 'business' : 'aspirant',
+                registrationType: kindFor(doesBusiness),
                 organizationName: profileData.organizationName || businessInfo.organizationName,
                 constitutionType: profileData.constitutionType || businessInfo.constitutionType,
                 businessTypes: profileData.businessTypes || businessInfo.businessTypes,
@@ -502,7 +523,7 @@ const updateMember = asyncHandler(async(req, res) => {
             businessInfo = new BusinessInfo({
                 userId: req.user.userId,
                 doingBusiness: profileData.doingBusiness,
-                registrationType: doesBusiness ? 'business' : 'aspirant',
+                registrationType: kindFor(doesBusiness),
                 organizationName: profileData.organizationName,
                 constitutionType: profileData.constitutionType,
                 businessTypes: profileData.businessTypes,
@@ -675,13 +696,24 @@ const updateMember = asyncHandler(async(req, res) => {
 
 const getMyProfile = asyncHandler(async(req, res) => {
     // Get personal details from PersonalInfo1 collection and member from web users collection concurrently
-    const [personalInfo, member] = await Promise.all([
+    const [personalInfo, found] = await Promise.all([
         PersonalInfo1.findOne({ userId: req.user.userId }),
         MemberDetails.findById(req.user.userId).select('-password')
     ]);
-    
+    let member = found;
+
     if (!member) {
         return res.status(404).json(ApiResponse.error('Profile not found', 404));
+    }
+
+    /* A paid status whose payment was deleted is not paid: reset, then re-read
+       so everything below answers from the corrected record. See paymentReconcile. */
+    {
+        const { paymentIsGone, reconcileMember } = require('./paymentReconcile');
+        if (await paymentIsGone(member)) {
+            await reconcileMember(member.toObject());
+            member = await MemberDetails.findById(req.user.userId).select('-password');
+        }
     }
     
     // If PersonalInfo1 has data, use it; otherwise fallback to web users data
@@ -729,6 +761,13 @@ const getMyProfile = asyncHandler(async(req, res) => {
         memberType: member.memberType || member.registrationType || '',
 
         membershipType: member.membershipType || 'none',
+        // Platinum is a tier the Super Admin grants; expiry is null for a lifetime membership.
+        membershipTier: member.membershipTier || 'standard',
+        membershipExpiresAt: member.membershipExpiresAt || null,
+        // Whether the Renew button shows, and what it says — the same rule
+        // `paymentOrder.createOrder` enforces (`membershipState.renewalFor`).
+        renewal: renewalFor(member && member.toObject ? member.toObject() : (member || {})),
+        platinumGrant: member.platinumGrant ? { grantedAt: member.platinumGrant.grantedAt || null, receivedOn: member.platinumGrant.receivedOn || null } : null,
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
         /*
          * Membership identity, for the paid dashboard.
@@ -809,6 +848,13 @@ const getMyProfile = asyncHandler(async(req, res) => {
         memberType: member.memberType || member.registrationType || '',
 
         membershipType: member.membershipType || 'none',
+        // Platinum is a tier the Super Admin grants; expiry is null for a lifetime membership.
+        membershipTier: member.membershipTier || 'standard',
+        membershipExpiresAt: member.membershipExpiresAt || null,
+        // Whether the Renew button shows, and what it says — the same rule
+        // `paymentOrder.createOrder` enforces (`membershipState.renewalFor`).
+        renewal: renewalFor(member && member.toObject ? member.toObject() : (member || {})),
+        platinumGrant: member.platinumGrant ? { grantedAt: member.platinumGrant.grantedAt || null, receivedOn: member.platinumGrant.receivedOn || null } : null,
         approvedAt: member.approvedAt || member.membershipActivatedAt || null,
         /*
          * Membership identity, for the paid dashboard.
@@ -1013,7 +1059,11 @@ const uploadProfilePhoto = asyncHandler(async (req, res) => {
 
     // Relative path only — an absolute URL built from the request host points at
     // whatever network the uploading device was on and 404s everywhere else.
-    const profilePhotoUrl = `/uploads/${uploaded.filename}`;
+    // The member's own folder is part of it: `/uploads/members/<name>-<id>/profile-<t>.jpg`
+    // (see `upload.memberPhoto`). The previous file is kept, never deleted.
+    const { relOf } = require('../../core/storage/uploadStore');
+    const rel = relOf(uploaded.path) || uploaded.filename;
+    const profilePhotoUrl = `/uploads/${rel}`;
 
     const member = await MemberDetails.findById(req.user.userId);
     if (!member) {

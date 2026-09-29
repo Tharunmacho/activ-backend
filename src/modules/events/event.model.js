@@ -19,6 +19,36 @@ const agendaItemSchema = new mongoose.Schema({
     location: { type: String, trim: true, default: '' }
 }, { _id: true });
 
+/**
+ * ============================================================================
+ * ONE DAY OF A MULTI-DAY EVENT — its own hours, its own agenda
+ * ============================================================================
+ *
+ * A three-day conclave does not run 09:00 to 17:00 three times. Day one opens
+ * late after registration, day two is the full programme, day three closes at
+ * lunch. The event carried ONE `startAt`/`endAt` pair and ONE flat agenda, so
+ * the page could only ever print a single span for all three days and a list
+ * of sessions with nothing saying which day they fell on.
+ *
+ * `date` is the day itself. `startTime`/`endTime` are STRINGS — "09:30", not
+ * instants — for the same reason the agenda rows are: they belong to the day,
+ * so moving the event to a different date must not leave them pointing at the
+ * old one. `date` and the time are combined only when something needs an
+ * instant.
+ *
+ * OPTIONAL, AND EMPTY ON EVERY EVENT WRITTEN BEFORE THIS. A reader that finds
+ * no days falls back to `startAt`/`endAt` and the flat `agenda`, which is
+ * what every single-day event still uses — there is nothing to migrate, and a
+ * one-day event gains no per-day furniture it does not need.
+ */
+const eventDaySchema = new mongoose.Schema({
+    date: { type: Date, default: null },
+    startTime: { type: String, trim: true, default: '' },
+    endTime: { type: String, trim: true, default: '' },
+    /** What happens on THIS day. Same shape as the flat agenda. */
+    agenda: { type: [agendaItemSchema], default: [] }
+}, { _id: true });
+
 const speakerSchema = new mongoose.Schema({
     name: { type: String, trim: true, default: '' },
     role: { type: String, trim: true, default: '' },
@@ -60,6 +90,12 @@ const eventSchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    /**
+     * The public address, `nlc-business-opportunities-2026-09-27`. Written on
+     * create and never changed after — see `eventSlug.js`. Sparse because rows
+     * written before it existed have none until the backfill runs.
+     */
+    slug: { type: String, trim: true, lowercase: true },
     description: {
         type: String,
         trim: true,
@@ -398,8 +434,70 @@ const eventSchema = new mongoose.Schema({
         index: true
     },
 
+    /*
+     * The event's QR code (it encodes the public `/events/<slug>` address) is
+     * shown on the event page, for a visitor to scan onto their phone or save.
+     * On by default and read `!== false`, so older events show it too; the
+     * editor turns it off per event.
+     */
+    showQrOnPage: {
+        type: Boolean,
+        default: true
+    },
+
+    /*
+     * THE EVENT'S FILES AND VIDEO — an agenda PDF, a brochure, slides, and a
+     * YouTube link. Shown on the event page, linked (and small files attached)
+     * in the booking email, and each document sent as a WhatsApp document
+     * message after the confirmation. `url` is the site-relative `/uploads/…`
+     * path the CMS uploader returns.
+     */
+    attachments: {
+        type: [{
+            _id: false,
+            name: { type: String, trim: true, default: '' },
+            url: { type: String, trim: true, default: '' },
+            type: { type: String, trim: true, default: '' },
+            size: { type: Number, default: 0 }
+        }],
+        default: []
+    },
+    videoUrl: { type: String, trim: true, default: '' },
+
+    /*
+     * ======================================================================
+     * RIDES THE HOME PAGE BANNER (the slideshow at the top of the site)
+     * ======================================================================
+     *
+     * A FOURTH surface, and not `showOnHome`: that one is the events strip
+     * further down the page. This is the gallery's banner switch, given to
+     * events — the same On / Off, and the same banner words over the picture,
+     * spelled exactly as on a gallery item so the two read as one control.
+     *
+     * TRUE by default, as on a gallery item: an event goes into the banner
+     * the moment it is posted, with no checkbox on the form. The On / Off in
+     * CMS -> Home Page is how an editor takes one OUT. Read `!== false`, so
+     * events written before the field existed are in the banner too.
+     *
+     * Only an event the public may read reaches the banner — the slideshow is
+     * built from the public event list, which `onboardingVisibility` filters.
+     */
+    showInBanner: { type: Boolean, default: true },
+    bannerHeadline: { type: String, trim: true, default: '' },
+    bannerHighlight: { type: String, trim: true, default: '' },
+    bannerSubheadline: { type: String, trim: true, default: '' },
+    bannerAlign: { type: String, enum: ['left', 'right'], default: 'left' },
+
     // ---- the detail an event page needs (EVT-001)
     agenda: { type: [agendaItemSchema], default: [] },
+    /**
+     * The per-day programme — see `eventDaySchema`.
+     *
+     * Empty for a single-day event and for everything written before this
+     * existed. `agenda` above stays as the flat list those events use, and as
+     * the fallback for a multi-day event whose days have not been filled in.
+     */
+    days: { type: [eventDaySchema], default: [] },
     speakers: { type: [speakerSchema], default: [] },
 
     /** The street address under the venue name, and a map link if there is one. */
@@ -423,6 +521,14 @@ const eventSchema = new mongoose.Schema({
     /** 0 means unlimited. A cap of zero attendees is not a thing anyone means. */
     capacity: { type: Number, min: 0, default: 0 },
     registrationNote: { type: String, trim: true, default: '' },
+    /*
+     * WHAT IT IS ABOUT, AND IN WHICH LANGUAGE — both printed in the booking
+     * email and WhatsApp message, and on nothing else yet. Free text: a topic
+     * is a phrase ("Government procurement for MSMEs"), a language may be two
+     * ("Tamil & English").
+     */
+    topic: { type: String, trim: true, default: '' },
+    language: { type: String, trim: true, default: '' },
 
     /**
      * What a seat costs, in rupees. 0 is a free event (EVT-002).
@@ -549,5 +655,19 @@ eventSchema.index({ status: 1, audience: 1, startAt: 1 });
  * matches" answerable without reading the collection.
  */
 eventSchema.index({ 'targets.state': 1, 'targets.district': 1 });
+
+// A scalar, so unique means what it says (one event per slug).
+eventSchema.index({ slug: 1 }, { unique: true, sparse: true });
+
+/*
+ * Every new event gets its public address on its first save. Both create paths
+ * (`cms.service.createEvent`, `event.service.createEvent`) go through
+ * `Event.create`, which is a save.
+ */
+eventSchema.pre('save', async function assignSlug() {
+    if (this.slug) return;
+    const { uniqueSlug } = require('./eventSlug');
+    this.slug = await uniqueSlug(this.constructor, this);
+});
 
 module.exports = mongoose.model('Event', eventSchema);

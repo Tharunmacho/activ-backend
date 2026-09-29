@@ -94,10 +94,13 @@ const cachedMember = async (id) => {
     const hit = contextCache.get(id);
     if (hit && hit.expires > Date.now()) return hit.value;
 
-    const member = await MemberDetails.findById(id)
-        .select('fullName email state district block membershipStatus memberType registrationType')
+    let member = await MemberDetails.findById(id)
+        .select('fullName email state district block membershipStatus memberType registrationType paymentId membershipTier')
         .lean()
         .catch(() => null);
+
+    /* A paid status whose payment was deleted is not paid — see paymentReconcile. */
+    if (member) member = await require('../members/paymentReconcile').reconcileMember(member);
 
     /* A miss is cached too. A member id with no profile row — an admin calling
        a member endpoint — would otherwise pay the full round trip on every

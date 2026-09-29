@@ -73,7 +73,7 @@ const send = async({ to, subject, text, html }) => {
         await transport.sendMail({
             from: config.email.from,
             to: target,
-            subject: subject || 'ACTIV Platform',
+            subject: subject || 'ACTIV',
             text: text || '',
             html: html || undefined
         });
@@ -114,7 +114,7 @@ const sendAdminWelcome = async({ email, fullName, password, roleLabel, region })
         '',
         'You will only ever see applications from your own region.',
         '',
-        '— The ACTIV Platform'
+        '— Adidravidar Confederation of Trade & Industrial Vision (ACTIV)'
     ];
 
     return send({
@@ -130,7 +130,7 @@ const sendAdminWelcome = async({ email, fullName, password, roleLabel, region })
   </table>
   <p>Please sign in and change this password immediately — it was generated for you and sent by email, so treat it as temporary.</p>
   <p style="color:#6B7280;font-size:13px">You will only ever see applications from your own region.</p>
-  <p style="color:#6B7280;font-size:13px">— The ACTIV Platform</p>
+  <p style="color:#6B7280;font-size:13px">— Adidravidar Confederation of Trade &amp; Industrial Vision (ACTIV)</p>
 </div>`
     });
 };
@@ -164,7 +164,7 @@ const sendPasswordReset = async({ email, fullName, resetUrl, expiresInMinutes = 
         '',
         'If you did not request this, you can ignore this email — your password has not been changed.',
         '',
-        '— The ACTIV Platform'
+        '— Adidravidar Confederation of Trade & Industrial Vision (ACTIV)'
     ];
 
     return send({
@@ -188,7 +188,7 @@ const sendPasswordReset = async({ email, fullName, resetUrl, expiresInMinutes = 
   <p style="color:#6B7280;font-size:13px">
     If you did not request this, you can ignore this email — your password has not been changed.
   </p>
-  <p style="color:#6B7280;font-size:13px">— The ACTIV Platform</p>
+  <p style="color:#6B7280;font-size:13px">— Adidravidar Confederation of Trade &amp; Industrial Vision (ACTIV)</p>
 </div>`
     });
 };

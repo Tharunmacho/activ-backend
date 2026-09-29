@@ -13,6 +13,7 @@ const eventService = require('../events/event.service');
 // single-event page. See the file itself for why they cannot be written twice.
 const { onboardingClause, isOnboardingContent } = require('../events/onboardingVisibility');
 const { removeOrphans } = require('./media.cleanup');
+const contactOffices = require('./contactOffices');
 const { sanitizeHtml } = require('./richText');
 
 const { findState } = require('./cms.regionMap');
@@ -34,7 +35,7 @@ const galleryState = (payload = {}) => {
 };
 
 const {
-    toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeReminders, sanitizeTargets,
+    toEvent, sanitizeAgenda, sanitizeSpeakers, sanitizeDays, sanitizeReminders, sanitizeTargets,
     sanitizeRegistrationFields
 } = eventService;
 
@@ -63,6 +64,9 @@ const pickEventDetail = (event = {}) => ({
     targetLabel: event.targetLabel,
     audience: event.audience,
     agenda: event.agenda,
+    /* The per-day programme. Empty on a single-day event and on everything
+       written before it existed — the reader falls back to `agenda`. */
+    days: event.days || [],
     speakers: event.speakers,
     venueAddress: event.venueAddress,
     venueMapUrl: event.venueMapUrl,
@@ -74,6 +78,8 @@ const pickEventDetail = (event = {}) => ({
     registrationClosesAt: event.registrationClosesAt,
     capacity: event.capacity,
     registrationNote: event.registrationNote,
+    topic: event.topic,
+    language: event.language,
     reminderOffsetsHours: event.reminderOffsetsHours,
     // What a seat costs, and every region the event was aimed at. Both have to
     // reach the editor or it cannot show back what was just saved.
@@ -102,6 +108,19 @@ const pickEventDetail = (event = {}) => ({
      * page". True unless somebody turned it off — see the schema.
      */
     showOnHome: event.showOnHome !== false,
+    // The QR card on the event page. See the schema.
+    showQrOnPage: event.showQrOnPage !== false,
+    attachments: Array.isArray(event.attachments) ? event.attachments : [],
+    videoUrl: event.videoUrl || '',
+    /*
+     * The home page BANNER, and the words over this event there — the
+     * gallery's own banner fields, on an event. See the schema.
+     */
+    showInBanner: event.showInBanner !== false,
+    bannerHeadline: event.bannerHeadline || '',
+    bannerHighlight: event.bannerHighlight || '',
+    bannerSubheadline: event.bannerSubheadline || '',
+    bannerAlign: event.bannerAlign === 'right' ? 'right' : 'left',
     // The first of the two audience boxes. Sent back with `targets`, not in
     // place of it — the form restores both or it restores neither.
     reachEveryone: event.reachEveryone,
@@ -121,8 +140,17 @@ const pickEventDetail = (event = {}) => ({
  * Opt-IN rather than opt-out on purpose. A field that has to be remembered and
  * stripped is a field that eventually is not.
  */
-const withJoinLink = (mapped = {}, event = {}, privileged = false) =>
-    (privileged ? { ...mapped, onlineUrl: event.onlineUrl || '' } : mapped);
+const withJoinLink = (mapped = {}, event = {}, privileged = false) => {
+    /*
+     * The event's documents and video are FOR THE MESSAGES ONLY (booking email
+     * and WhatsApp) — like the joining link, only an editor ever reads them
+     * back; the public page and API never carry them.
+     */
+    const { attachments, videoUrl, ...publicFields } = mapped;
+    return privileged
+        ? { ...publicFields, onlineUrl: event.onlineUrl || '', attachments: Array.isArray(event.attachments) ? event.attachments : [], videoUrl: event.videoUrl || '' }
+        : publicFields;
+};
 
 /**
  * The event fields the CMS editor may set beyond the basics.
@@ -138,7 +166,24 @@ const eventDetailUpdates = (payload = {}) => {
         update.audience = String(payload.audience || '').toLowerCase() === 'paid' ? 'paid' : 'all';
     }
     if (payload.agenda !== undefined) update.agenda = sanitizeAgenda(parseArray(payload.agenda));
+    if (payload.days !== undefined) update.days = sanitizeDays(parseArray(payload.days));
     if (payload.speakers !== undefined) update.speakers = sanitizeSpeakers(parseArray(payload.speakers));
+    // Event documents (agenda PDF …) and the video link — see the schema.
+    if (payload.attachments !== undefined) {
+        update.attachments = parseArray(payload.attachments)
+            .filter((a) => a && typeof a === 'object' && /^(\/uploads\/|https?:\/\/)/.test(String(a.url || '')))
+            .slice(0, 10)
+            .map((a) => ({
+                name: String(a.name || '').trim().slice(0, 160) || 'Document',
+                url: String(a.url).trim().slice(0, 500),
+                type: String(a.type || '').trim().slice(0, 120),
+                size: Math.max(0, Number(a.size) || 0)
+            }));
+    }
+    if (payload.videoUrl !== undefined) {
+        const v = String(payload.videoUrl || '').trim();
+        update.videoUrl = /^https?:\/\//i.test(v) ? v.slice(0, 500) : '';
+    }
     if (payload.reminderOffsetsHours !== undefined) {
         update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));
     }
@@ -156,7 +201,7 @@ const eventDetailUpdates = (payload = {}) => {
     }
 
     ['category', 'venueAddress', 'venueMapUrl', 'contactName', 'contactPhone', 'contactEmail', 'registrationNote',
-        'onlinePlatform', 'onlineUrl']
+        'onlinePlatform', 'onlineUrl', 'topic', 'language']
         .forEach((key) => {
             if (payload[key] !== undefined) update[key] = str(payload[key]);
         });
@@ -194,6 +239,23 @@ const eventDetailUpdates = (payload = {}) => {
     if (payload.showOnHome !== undefined) {
         update.showOnHome = payload.showOnHome === true || payload.showOnHome === 'true';
     }
+    // The QR card on the event page; same string-boolean rule, absent = untouched.
+    if (payload.showQrOnPage !== undefined) {
+        update.showQrOnPage = payload.showQrOnPage === true || payload.showQrOnPage === 'true';
+    }
+
+    /*
+     * The home page banner — the switch and the words, as on a gallery item
+     * (`updateGalleryItem`), with the same lengths. Absent means untouched:
+     * the Home screen sends only the switch, or only the words.
+     */
+    if (payload.showInBanner !== undefined) {
+        update.showInBanner = payload.showInBanner === true || payload.showInBanner === 'true';
+    }
+    [['bannerHeadline', 120], ['bannerHighlight', 60], ['bannerSubheadline', 280]].forEach(([field, max]) => {
+        if (payload[field] !== undefined) update[field] = String(payload[field] || '').trim().slice(0, max);
+    });
+    if (payload.bannerAlign !== undefined) update.bannerAlign = payload.bannerAlign === 'right' ? 'right' : 'left';
 
     // "Everyone in the association" — see the schema. Absent means untouched,
     // like every other flag here.
@@ -405,8 +467,9 @@ const EMPTY_CONTACT = {
         icon: 'users', title: '', subtitle: '',
         addressLabel: '', phoneLabel: '', emailLabel: '', hoursLabel: '',
     },
-    addressLines: [], phone: '', alternatePhone: '', email: '', workingHours: [], mapEmbedUrl: '',
-    social: { facebook: '', instagram: '', linkedin: '', youtube: '' },
+    addressLines: [], phone: '', alternatePhone: '', email: '', workingHours: [], mapEmbedUrl: '', mapLink: '',
+    offices: [],
+    social: { facebook: '', instagram: '', x: '', linkedin: '', youtube: '', whatsapp: '', telegram: '', threads: '' },
     banner: { enabled: true, icon: 'users', title: '', subtitle: '', ctaLabel: '', ctaHref: '' },
     regionsBand: { enabled: true, eyebrow: '', heading: '', subtitle: '' },
     extraFields: [],
@@ -1284,7 +1347,17 @@ class CmsService {
                 // A slide with no media is not a slide — it renders as a blank
                 // frame the visitor has to sit through.
                 slides: asArray(c.slides)
-                    .map(s => ({ media: cleanMedia(s.media || s), caption: str(s.caption) }))
+                    .map(s => ({
+                        media: cleanMedia(s.media || s),
+                        caption: str(s.caption),
+                        // Each slide's own words and side — see the model.
+                        // Capped: a banner heading is a line, not a page — a
+                        // paste of a whole document once filled the hero.
+                        headline: str(s.headline).slice(0, 120),
+                        headlineHighlight: str(s.headlineHighlight).slice(0, 60),
+                        subheadline: str(s.subheadline).slice(0, 280),
+                        align: s.align === 'right' ? 'right' : 'left',
+                    }))
                     .filter(s => s.media.url),
                 headline: str(c.headline),
                 headlineHighlight: str(c.headlineHighlight),
@@ -1609,7 +1682,9 @@ class CmsService {
      * how the list behaves — an editor checking a link before publishing should
      * not have to make the image live to do it.
      */
-    async getGalleryItem(id, { includeHidden = false } = {}) {
+    async getGalleryItem(idOrSlug, { includeHidden = false } = {}) {
+        // `/gallery/<slug>` and `/gallery/<id>` are the same item (eventSlug.js).
+        const id = await require('../events/eventSlug').resolveGalleryId(GalleryItem, idOrSlug);
         // Checked here rather than left to Mongoose: a malformed id makes
         // `findById` throw a CastError, which surfaces as a 500 on what is
         // really a visitor following a stale link.
@@ -1669,6 +1744,10 @@ class CmsService {
             featured: boolOf(payload.featured, false),
             pinned: boolOf(payload.pinned, false),
             showOnHome: boolOf(payload.showOnHome, true),
+            bannerHeadline: str(payload.bannerHeadline).slice(0, 120),
+            bannerHighlight: str(payload.bannerHighlight).slice(0, 60),
+            bannerSubheadline: str(payload.bannerSubheadline).slice(0, 280),
+            bannerAlign: payload.bannerAlign === 'right' ? 'right' : 'left',
             fromEventId: str(payload.fromEventId),
             sortOrder,
             visible: boolOf(payload.visible, true),
@@ -1680,9 +1759,15 @@ class CmsService {
         const update = { editedBy: actorOf(user) };
         if (payload.media || payload.url || payload.imageUrl) update.media = cleanMedia(payload.media || payload);
 
-        ['title', 'caption', 'category', 'sector', 'eventDate', 'location'].forEach((field) => {
+        ['title', 'caption', 'category', 'sector', 'eventDate', 'location',
+            'bannerHeadline', 'bannerHighlight', 'bannerSubheadline'].forEach((field) => {
             if (payload[field] !== undefined) update[field] = str(payload[field]);
         });
+        // The same caps as the create path.
+        if (update.bannerHeadline !== undefined) update.bannerHeadline = update.bannerHeadline.slice(0, 120);
+        if (update.bannerHighlight !== undefined) update.bannerHighlight = update.bannerHighlight.slice(0, 60);
+        if (update.bannerSubheadline !== undefined) update.bannerSubheadline = update.bannerSubheadline.slice(0, 280);
+        if (payload.bannerAlign !== undefined) update.bannerAlign = payload.bannerAlign === 'right' ? 'right' : 'left';
 
         /* The state, and the region it implies — see the note on the create
            path. An absent key leaves both untouched, as every other field. */
@@ -1733,20 +1818,62 @@ class CmsService {
 
     async getContactInfo() {
         const doc = await readSingleton(ContactSettings, EMPTY_CONTACT);
+        /*
+         * Offices, head office first. A document written before offices existed
+         * becomes ONE head office built from the legacy fields, so nothing that
+         * was on the page disappears. A stored legacy map is re-normalised on the
+         * way out, so an old share link draws a map without a re-save.
+         */
+        const stored = (doc.offices || []).filter((o) => o && o.isActive !== false);
+        const offices = stored.length
+            ? stored.slice().sort((a, b) => (b.isHeadOffice ? 1 : 0) - (a.isHeadOffice ? 1 : 0) || (a.order || 0) - (b.order || 0))
+            : [contactOffices.legacyOffice(doc)].filter(Boolean);
+        const legacyMap = contactOffices.normalizeMap(doc.mapEmbedUrl, (doc.addressLines || []).join(', '));
         return {
             ...doc,
+            offices,
+            mapEmbedUrl: legacyMap.embedUrl,
+            mapLink: doc.mapLink || legacyMap.mapLink,
             heroMedia: (doc.heroMedia || []).map(m => ({ ...EMPTY_MEDIA, ...(m || {}) })),
             formCard: { ...EMPTY_CONTACT.formCard, ...(doc.formCard || {}) },
             infoCard: { ...EMPTY_CONTACT.infoCard, ...(doc.infoCard || {}) },
-            social: { ...EMPTY_CONTACT.social, ...(doc.social || {}) },
+            social: { ...EMPTY_CONTACT.social, ...contactOffices.cleanSocial(doc.social || {}) },
             banner: { ...EMPTY_CONTACT.banner, ...(doc.banner || {}) },
             regionsBand: { ...EMPTY_CONTACT.regionsBand, ...(doc.regionsBand || {}) },
             extraFields: doc.extraFields || [],
         };
     }
 
+    /**
+     * What a pasted map becomes — the CMS editor's live preview. The SAME
+     * resolution the save runs, share links included, so the preview cannot
+     * show a map the page will not.
+     */
+    async previewContactMap(payload = {}) {
+        const r = await contactOffices.resolveMap(payload.input, payload.address);
+        return { embedUrl: r.embedUrl, mapLink: r.mapLink, directionsUrl: r.directionsUrl, query: r.query };
+    }
+
+    /** Offices from the editor: cleaned, maps resolved (in parallel), one head office. */
+    async resolveOffices(list) {
+        const cleaned = contactOffices.settleOffices(asArray(list).map(contactOffices.cleanOffice));
+        return Promise.all(cleaned.map(async (o) => {
+            const r = await contactOffices.resolveMap(o.mapInput, o.addressLines.join(', '));
+            return { ...o, mapEmbedUrl: r.embedUrl, mapLink: r.mapLink, directionsUrl: r.directionsUrl, mapQuery: r.query };
+        }));
+    }
+
     async updateContactInfo(payload = {}, user = {}) {
         const social = payload.social || {};
+        /*
+         * Offices, when the editor sent them. The head office is mirrored into the
+         * legacy single-office fields so every other reader keeps working.
+         * Absent means untouched — a save from an older screen cannot erase them.
+         */
+        const offices = payload.offices !== undefined ? await this.resolveOffices(payload.offices) : null;
+        const head = offices ? offices.find((o) => o.isHeadOffice) || null : null;
+        const legacyMap = head ? null
+            : await contactOffices.resolveMap(payload.mapEmbedUrl, stringList(payload.addressLines).join(', '));
         const form = payload.formCard || {};
         const info = payload.infoCard || {};
         const banner = payload.banner || {};
@@ -1785,19 +1912,19 @@ class CmsService {
                 hoursLabel: str(info.hoursLabel),
             },
 
-            addressLines: stringList(payload.addressLines),
-            phone: str(payload.phone),
-            alternatePhone: str(payload.alternatePhone),
-            email: str(payload.email).toLowerCase(),
-            workingHours: stringList(payload.workingHours),
-            mapEmbedUrl: str(payload.mapEmbedUrl),
+            ...(offices ? { offices } : {}),
+            addressLines: head ? head.addressLines : stringList(payload.addressLines),
+            phone: head ? head.phone : str(payload.phone),
+            alternatePhone: head ? head.alternatePhone : str(payload.alternatePhone),
+            email: (head ? head.email : str(payload.email)).toLowerCase(),
+            workingHours: head ? head.workingHours : stringList(payload.workingHours),
+            mapEmbedUrl: head ? head.mapEmbedUrl : legacyMap.embedUrl,
+            mapLink: head ? head.mapLink : legacyMap.mapLink,
 
-            social: {
-                facebook: str(social.facebook),
-                instagram: str(social.instagram),
-                linkedin: str(social.linkedin),
-                youtube: str(social.youtube),
-            },
+            // Every link normalised on the way in: "@activ" or "instagram.com/x"
+            // become URLs a browser opens; a javascript: link becomes nothing.
+            // Absent means untouched, as with offices.
+            ...(payload.social !== undefined ? { social: contactOffices.cleanSocial(social) } : {}),
 
             banner: {
                 enabled: boolOf(banner.enabled, true),
@@ -1854,6 +1981,9 @@ class CmsService {
             subject: clip(payload.subject, 200),
             message: clip(message, 5000),
             status: 'new',
+            source: meta.member ? 'member_dashboard' : 'website',
+            memberId: meta.member ? clip(meta.member.userId || meta.member.id || '', 40) : '',
+            applicationRef: meta.member ? clip(payload.applicationRef, 40) : '',
             meta: { ip: clip(meta.ip, 60), userAgent: clip(meta.userAgent, 300) },
         });
 
@@ -1962,6 +2092,12 @@ class CmsService {
         const now = Date.now();
         const at = e => (e.startAt ? new Date(e.startAt).getTime() : 0);
         const undated = e => !e.startAt;
+        /* An event is over when it ENDS. A three-day conclave on its second
+           morning is still upcoming; reading `startAt` alone filed it as past. */
+        const over = e => {
+            const finish = e.endAt || e.startAt;
+            return !!finish && new Date(finish).getTime() < now;
+        };
 
         /*
          * AN UNDATED EVENT IS NOT A PAST ONE.
@@ -1978,14 +2114,14 @@ class CmsService {
          * first), and every dated event follows in date order.
          */
         const upcoming = events
-            .filter(e => undated(e) || at(e) >= now)
+            .filter(e => undated(e) || !over(e))
             .sort((a, b) => {
                 if (undated(a) !== undated(b)) return undated(a) ? -1 : 1;
                 if (undated(a)) return 0;
                 return at(a) - at(b);
             });
 
-        const past = events.filter(e => !undated(e) && at(e) < now).sort((a, b) => at(b) - at(a));
+        const past = events.filter(e => !undated(e) && over(e)).sort((a, b) => at(b) - at(a));
 
         // `privileged` carries the join link; `includeDrafts` is the same
         // question asked of a different field, and the controller derives both
@@ -2003,6 +2139,7 @@ class CmsService {
     mapEvents(list = [], { privileged = false } = {}) {
         return (list || []).map(e => ({
             id: String(e._id),
+            slug: e.slug || '',
             title: e.title || '',
             description: e.description || '',
             startAt: e.startAt || null,

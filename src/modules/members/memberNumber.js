@@ -7,8 +7,22 @@
  * Somebody registering in 2026 gets a 2026 number; the next intake gets 2027.
  * The same for an application's reference.
  *
- *     ACTIV-2026-3F9A21          a member
+ *     ACTIV-2026-001             a member — the 1st to join in 2026
+ *     ACTIV-2026-1000            the 1,000th (the count simply grows a digit)
  *     ACTIV-APP-2026-3F9A21      their application
+ *
+ * ------------------------------------------------------------ year-wise count
+ *
+ * The number is ASSIGNED, once, the moment a membership first becomes active
+ * (`assignMembershipNumber`, called by every activation path: both payment
+ * paths and the Platinum grant). Each year has its own counter in
+ * `membership_counters` (`_id: 'membership:2026'`), bumped atomically, so two
+ * payments landing together cannot get the same number, and 2027 starts again
+ * at 001. Three digits minimum because that is what the association reads at a
+ * glance; `padStart` never truncates, so the thousandth member is `ACTIV-2026-1000`.
+ *
+ * A member who already holds a standard number keeps it for life — renewals,
+ * a payment reset and re-payment, a Platinum upgrade all leave it alone.
  *
  * ---------------------------------------------------------------- stability
  *
@@ -75,6 +89,64 @@ const yearOf = (record = {}) => {
 const tailOf = (record = {}) =>
     String(record._id || record.id || '').slice(-6).toUpperCase() || '000000';
 
+/** `ACTIV-2026-001` — the shape an assigned, year-wise number has. */
+const STANDARD_NUMBER = /^ACTIV-\d{4}-\d{3,}$/;
+
+const formatNumber = (year, seq) => `ACTIV-${year}-${String(seq).padStart(3, '0')}`;
+
+/** Next value of this year's counter. Atomic: `$inc` on one document. */
+const nextSequence = async (year) => {
+    const mongoose = require('mongoose');
+    const res = await mongoose.connection.db.collection('membership_counters').findOneAndUpdate(
+        { _id: `membership:${year}` },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after' }
+    );
+    // Driver 6 returns the document; older drivers wrap it in `{ value }`.
+    const doc = res && res.value !== undefined && res.seq === undefined ? res.value : res;
+    return Number((doc && doc.seq) || 0);
+};
+
+/**
+ * Give this member their year-wise number if they do not have one yet, and
+ * return the number they hold. Never throws: a numbering hiccup must not fail
+ * a payment that has already been taken — the member keeps the derived number
+ * until the next activation (or the backfill script) assigns one.
+ *
+ * `year` defaults to the year the membership was activated.
+ */
+const assignMembershipNumber = async (memberOrId, { year } = {}) => {
+    try {
+        const MemberDetails = require('./memberdetails.model');
+        const id = memberOrId && (memberOrId._id || memberOrId.id) ? (memberOrId._id || memberOrId.id) : memberOrId;
+        const member = await MemberDetails.findById(id)
+            .select('membershipNumber membershipActivatedAt createdAt').lean();
+        if (!member) return '';
+        const current = String(member.membershipNumber || '').trim();
+        if (STANDARD_NUMBER.test(current)) return current;
+
+        const y = year || yearOf({ membershipActivatedAt: member.membershipActivatedAt || new Date() });
+        const number = formatNumber(y, await nextSequence(y));
+
+        // Conditional: if another request numbered this member first, keep theirs.
+        const res = await MemberDetails.updateOne(
+            { _id: member._id, membershipNumber: { $not: STANDARD_NUMBER } },
+            { $set: { membershipNumber: number } }
+        );
+        if (res && res.modifiedCount) {
+            try { require('../common/memberContext').invalidateMemberContext(member._id); } catch { /* cache only */ }
+            return number;
+        }
+        const again = await MemberDetails.findById(member._id).select('membershipNumber').lean();
+        return String((again && again.membershipNumber) || number);
+    } catch (error) {
+        try {
+            require('../../config/logger').warn('Could not assign a membership number', { error: error && error.message });
+        } catch { /* logging only */ }
+        return '';
+    }
+};
+
 /**
  * The number to show for this member.
  *
@@ -101,4 +173,7 @@ const applicationRefFor = (application = {}) => {
     return `ACTIV-APP-${yearOf(application)}-${tailOf(application)}`;
 };
 
-module.exports = { membershipNumberFor, applicationRefFor, yearOf };
+module.exports = {
+    membershipNumberFor, applicationRefFor, yearOf,
+    assignMembershipNumber, nextSequence, formatNumber, STANDARD_NUMBER
+};

@@ -41,6 +41,13 @@ const { regionPattern } = require('../common/regionMatch');
 /** Outward, never inward — see the note above. */
 const TIER_ORDER = ['block', 'district', 'state'];
 
+/**
+ * The tiers whose admins have REAL mailboxes, in the order a member should be
+ * pointed at them. Block admin accounts use placeholder addresses, so they are
+ * never used for Reply-To or a printed contact — see `resolveForRegion`.
+ */
+const CONTACT_TIERS = ['district', 'state'];
+
 const ROLE_FOR_TIER = {
     block: 'block_admin',
     district: 'district_admin',
@@ -197,13 +204,22 @@ const resolveForRegion = async(region = {}) => {
      * block when a real district admin exists one rung out would route the reply
      * to a mailbox nobody has created, past a person who would have read it.
      */
-    const nearest = TIER_ORDER
+    /*
+     * BLOCK ADMINS ARE NEVER A REPLY ADDRESS.
+     *
+     * Block admin accounts carry placeholder mailboxes, not real ones — a reply
+     * sent there reaches nobody. The District and State admins have real inboxes,
+     * so every Reply-To, every "your regional office" email and every contact
+     * trio walks DISTRICT -> STATE -> the ACTIV office. Block admins stay in
+     * `contacts` (the oversight screen lists them); they are just never the
+     * address a member is told to write to.
+     */
+    const nearest = CONTACT_TIERS
         .map((tier) => contacts[tier])
         .find((entry) => entry && entry.staffed)
-        // Nothing staffed anywhere: the most specific derived address the
-        // applicant's own region supports, so the reply at least carries the
-        // region it came from.
-        || TIER_ORDER.map((tier) => contacts[tier]).find((entry) => entry && entry.email)
+        // Nothing staffed at district or state: the derived district/state
+        // address, so the reply at least carries the region it came from.
+        || CONTACT_TIERS.map((tier) => contacts[tier]).find((entry) => entry && entry.email)
         || null;
 
     /**
@@ -215,6 +231,23 @@ const resolveForRegion = async(region = {}) => {
      * `events@activ.org.in` tells the applicant who is writing without asking
      * the mail provider to accept an address it has never heard of.
      */
+    /*
+     * THE CONTACT A MESSAGE PRINTS — one real admin, all three fields theirs.
+     *
+     * `nearest` answers "whose inbox gets the Reply-To", and a staffed admin with
+     * no phone on file is a correct answer to that. It is the wrong answer to
+     * "who do I call": the welcome message printed "Guindy Block Admin" beside
+     * ACTIV's own number, because the name came from one place and the phone
+     * fell back to another. So this walks outward to the first staffed tier that
+     * HAS a phone, and returns that admin's name, phone and email together.
+     * null when no tier has one — the caller then prints ACTIV's own office as a
+     * matching trio, never a mixture.
+     */
+    const reachable = CONTACT_TIERS
+        .map((tier) => contacts[tier])
+        .find((entry) => entry && entry.staffed && String(entry.phone || '').trim())
+        || null;
+
     const fromName = nearest && nearest.regionName
         ? `ACTIV ${nearest.regionName} ${nearest.tierLabel} Office`
         : config.email.fromName;
@@ -223,6 +256,7 @@ const resolveForRegion = async(region = {}) => {
         region: clean,
         contacts,
         nearest,
+        reachable,
         replyTo: (nearest && nearest.email) || config.email.supportAddress,
         fromName
     };
@@ -273,6 +307,7 @@ const formatContact = (entry) => {
 
 module.exports = {
     TIER_ORDER,
+    CONTACT_TIERS,
     TIER_LABEL,
     slug,
     derivedAddress,

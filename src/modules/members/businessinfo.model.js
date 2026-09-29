@@ -17,7 +17,7 @@ const businessInfoSchema = new mongoose.Schema({
     },
     registrationType: {
         type: String,
-        enum: ['aspirant', 'business'],
+        enum: ['aspirant', 'business', 'student'],
         default: 'aspirant'
     },
     // Business Details (only if doingBusiness = true)

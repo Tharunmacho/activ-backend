@@ -53,10 +53,14 @@ const membershipPlanSchema = new mongoose.Schema({
      *   aspirant   an applicant who declared no business. Bands do not apply;
      *              there is one such plan and everybody without a company gets
      *              it, at whatever the Super Admin has set.
+     *   student    no business, and studying — the same shape as aspirant, at
+     *              its own fee.
+     *   platinum   the lifetime tier the Super Admin GRANTS for a fee received
+     *              offline. Described in the catalogue, never sold online.
      */
     audience: {
         type: String,
-        enum: ['business', 'aspirant'],
+        enum: ['business', 'aspirant', 'student', 'platinum'],
         default: 'business',
         index: true
     },

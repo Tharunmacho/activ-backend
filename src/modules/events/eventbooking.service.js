@@ -54,6 +54,118 @@ const logger = require('../../config/logger');
 
 /** Trim anything into a string. `null` and `undefined` become `''`. */
 const str = (value) => String(value === null || value === undefined ? '' : value).trim();
+/** The last 10 digits of a phone number, so "+91 90923 17264" and "9092317264" are one person. */
+const phoneKey = (value) => {
+    const d = str(value).replace(/\D/g, '');
+    return d.length >= 10 ? d.slice(-10) : d;
+};
+
+/* ---------------------------------------------------- message formatting */
+
+/** Every booking message is written in India's time, whatever the server's zone. */
+const TZ = 'Asia/Kolkata';
+
+const PAYMENT_MODE_LABELS = {
+    online: 'Online',
+    offline: 'Collected by organiser',
+    cash: 'Cash',
+    upi: 'UPI',
+    bank_transfer: 'Bank transfer'
+};
+
+/** "Rs 1,000" — ASCII, because a rupee sign is what Meta refuses in a template param. */
+const rupees = (value) => {
+    const n = Number(value || 0);
+    return Number.isFinite(n) && n > 0 ? `Rs ${n.toLocaleString('en-IN')}` : '';
+};
+
+const istParts = (date) => {
+    const d = new Date(date);
+    if (Number.isNaN(d.getTime())) return null;
+    return {
+        day: d.toLocaleDateString('en-IN', {
+            timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+        }),
+        dayKey: d.toLocaleDateString('en-CA', { timeZone: TZ }),
+        time: d.toLocaleTimeString('en-IN', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hour12: true })
+            .replace(/\s*(am|pm)\s*$/i, (m) => ` ${m.trim().toUpperCase()}`),
+        midnight: d.toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) === '00:00'
+    };
+};
+
+/**
+ * `{ dateLabel, timeLabel, whenLabel }` for an event's schedule, in IST.
+ *
+ *   one day           "Saturday, 10 October 2026" / "10:00 AM – 1:00 PM IST"
+ *   several days      both days named, each with its time
+ *   no time given     a start at exactly midnight with no end is a date-only
+ *                     event, and "12:00 AM" would be a time nobody set
+ *   no date at all    "Date to be confirmed" — the wording every other surface uses
+ */
+const describeSchedule = (startAt, endAt) => {
+    const s = startAt ? istParts(startAt) : null;
+    if (!s) return { dateLabel: 'Date to be confirmed', timeLabel: '', whenLabel: 'Date to be confirmed' };
+    const e = endAt ? istParts(endAt) : null;
+
+    if (e && e.dayKey !== s.dayKey) {
+        return {
+            dateLabel: `${s.day} to ${e.day}`,
+            timeLabel: `${s.time} to ${e.time} IST`,
+            whenLabel: `${s.day}, ${s.time} to ${e.day}, ${e.time} IST`
+        };
+    }
+
+    const timeLabel = s.midnight && !e ? '' : `${s.time}${e ? ` – ${e.time}` : ''} IST`;
+    return { dateLabel: s.day, timeLabel, whenLabel: timeLabel ? `${s.day}, ${timeLabel}` : s.day };
+};
+
+/**
+ * Is this event attended online, and on what?
+ *
+ * `mode` is the organiser's answer, but it defaults to `offline`, and an
+ * organiser running a Zoom session will often record that by picking "ZOOM" as
+ * the CATEGORY and leaving `mode` alone. Trusting `mode` alone told a webinar's
+ * bookers it was an "In-person event" with no venue.
+ *
+ * So an event also counts as online when it names no physical address AND
+ * something on it says online: a joining link, a platform, or an online word
+ * in the category or in a venue field like "Zoom". A real venue always wins.
+ */
+const ONLINE_WORDS = /\b(zoom|webinar|online|virtual|google\s*meet|g-?meet|teams|webex|youtube|live\s*stream)\b/i;
+const PLATFORMS = [
+    [/zoom/i, 'Zoom'],
+    [/google\s*meet|g-?meet|meet\.google/i, 'Google Meet'],
+    [/teams/i, 'Microsoft Teams'],
+    [/webex/i, 'Webex'],
+    [/youtu/i, 'YouTube Live']
+];
+const attendanceOf = (event = {}, b = {}) => {
+    const venue = str(event.venue || b.eventVenue);
+    const address = str(event.venueAddress);
+    const url = str(event.onlineUrl);
+    const category = str(event.category);
+    const hints = [event.onlinePlatform, category, url, venue].map(str).join(' ');
+
+    const isOnline = event.mode === 'online'
+        || (!address && (!venue || ONLINE_WORDS.test(venue)) && (!!url || ONLINE_WORDS.test(hints)));
+    const found = PLATFORMS.find(([re]) => re.test(hints));
+    // The canonical spelling when the platform is recognised ("zoom" -> "Zoom").
+    const platform = isOnline ? ((found ? found[1] : '') || str(event.onlinePlatform)) : '';
+    // A category that is nothing but a format word ("ZOOM", "Online webinar").
+    const formatWordCategory = isOnline && !!category
+        && category.split(/\s+/).every((w) => ONLINE_WORDS.test(w) || /^(event|session|meeting|webinar)s?$/i.test(w));
+
+    return { isOnline, platform, formatWordCategory };
+};
+
+/** "tomorrow", "in 2 hours", "in 3 days" — for a reminder's headline. */
+const startsIn = (ms) => {
+    const hours = Math.max(0, Math.round(ms / (60 * 60 * 1000)));
+    if (hours < 1) return 'shortly';
+    if (hours < 20) return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+    if (hours <= 36) return 'tomorrow';
+    return `in ${Math.round(hours / 24)} days`;
+};
 
 /**
  * A reference a person can read down a telephone.
@@ -268,6 +380,84 @@ const csvFilename = (title) =>
  * Passed in rather than read here because this mapper is synchronous and runs
  * over lists; the caller fetches the event once.
  */
+/*
+ * WHOSE BOOKING IS THIS — the member's id, OR their email on the booking.
+ *
+ * `userId` alone missed every booking made while signed out (a guest booking
+ * stores `userId: ''`), and every one made with an expired token, which
+ * `optionalAuth` quietly treats as a guest. The member's own email as the
+ * booker or as a named participant is the same person. Emails are stored
+ * lowercased by the schema, so the comparison is exact.
+ *
+ * `who` is a member context ({ id, email }) or, for older callers, an id.
+ */
+const ownerClause = (who) => {
+    const id = typeof who === 'string' ? who : String((who && (who.id || who.userId)) || '');
+    const email = typeof who === 'string' ? '' : String((who && who.email) || '').trim().toLowerCase();
+    const or = [];
+    if (id) or.push({ userId: id });
+    if (email) or.push({ 'bookedBy.email': email }, { 'participants.email': email });
+    return or.length ? { $or: or } : null;
+};
+
+/*
+ * A booking that is attendance: live (active / waitlist), or PAID and not
+ * cancelled — a hold paid after its timer ran out is swept to `expired` while
+ * the money is real, and it must not vanish from the member's own list.
+ */
+const LIVE_CLAUSE = {
+    $or: [
+        { status: { $in: ['active', 'waitlist'] } },
+        { 'payment.status': 'paid', status: { $ne: 'cancelled' } }
+    ]
+};
+
+/**
+ * A booking in the shape the member screens read as `myRegistration`
+ * (see `toRegistration` in event.service). Pure — unit tested.
+ *
+ *   active + paid / not_required -> registered
+ *   active + pending             -> registered, payment pending ("Payment due")
+ *   waitlist                     -> waitlist
+ *   paid but swept to expired    -> registered (the seat was paid for)
+ */
+const bookingAsRegistration = (b = {}) => {
+    const payment = b.payment || {};
+    const paymentStatus = payment.status || 'pending';
+    const status = b.status === 'waitlist' ? 'waitlist'
+        : b.status === 'cancelled' ? 'cancelled'
+            : 'registered';
+    const bookedBy = b.bookedBy || {};
+    return {
+        id: b._id ? String(b._id) : (b.bookingRef || ''),
+        eventId: b.eventId ? String(b.eventId) : '',
+        userId: b.userId ? String(b.userId) : '',
+        source: 'booking',
+        bookingRef: b.bookingRef || '',
+        seats: Math.max(1, Number(b.noOfPersons || 0) || ((b.participants || []).length) || 1),
+        payment: {
+            status: paymentStatus,
+            amount: Number(b.totalAmount || 0),
+            reference: payment.reference || '',
+            method: payment.mode || '',
+            paidAt: payment.paidAt || null
+        },
+        responses: [],
+        memberName: bookedBy.name || '',
+        email: bookedBy.email || '',
+        phone: bookedBy.phone || '',
+        organization: '',
+        state: '',
+        district: '',
+        block: '',
+        status,
+        note: b.note || '',
+        registeredAt: b.createdAt || null,
+        cancelledAt: null,
+        expiresAt: paymentStatus === 'pending' ? (b.expiresAt || null) : null
+    };
+};
+
 const toBooking = (doc = {}, joining = null) => ({
     bookingRef: doc.bookingRef || '',
     eventId: String(doc.eventId || ''),
@@ -335,6 +525,32 @@ const toBooking = (doc = {}, joining = null) => ({
      * from there into the manage link in their confirmation email.
      */
 });
+
+
+/**
+ * An uploaded file's path as a full URL on this server's public address.
+ *
+ * `/uploads/x.png` means nothing to Gmail or to Meta, which fetch the image
+ * themselves. `BACKEND_URL` is the address the world reaches this API on — the
+ * same origin that serves `/uploads` (see app.js). A URL that is already
+ * absolute is returned as it is.
+ */
+const absoluteMediaUrl = (value) => {
+    let raw = String(value || '').trim();
+    if (!raw) return '';
+    /*
+     * An upload stored on a RETIRED deployment's host (the temporary
+     * `*.sslip.io` backend) is re-anchored on the current one: the file lives
+     * on under the same `/uploads/` name, the old host answers 404, and Meta
+     * drops a WhatsApp template whose header image it cannot fetch.
+     */
+    const i = raw.indexOf('/uploads/');
+    if (i > 0 && /^https?:\/\/[^/]*\.sslip\.io\//i.test(raw)) raw = raw.slice(i);
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = String(require('../../config').backendUrl || '').replace(/\/+$/, '');
+    if (!base || /localhost|127\.0\.0\.1/.test(base)) return '';
+    return `${base}${raw.startsWith('/') ? raw : `/${raw}`}`;
+};
 
 class EventBookingService {
     // ==================================================================
@@ -584,16 +800,14 @@ class EventBookingService {
      * pair of seats for colleagues), and the page shows one state; the newest
      * is the one they just made and the one they are asking about.
      */
-    async myBookingsFor(eventIds = [], userId = '') {
-        const ids = (eventIds || []).filter(Boolean);
-        if (!ids.length || !userId) return {};
+    async myBookingsFor(eventIds = [], who = '') {
+        const ids = (eventIds || []).filter((id) => mongoose.Types.ObjectId.isValid(String(id || '')));
+        const owner = ownerClause(who);
+        if (!ids.length || !owner) return {};
 
         const rows = await EventBooking.find({
             eventId: { $in: ids.map((id) => new mongoose.Types.ObjectId(String(id))) },
-            userId: String(userId),
-            // Expired and cancelled bookings are not attendance. Showing one as
-            // "you are booked" would tell somebody they have a seat they lost.
-            status: { $in: ['active', 'waitlist'] }
+            $and: [owner, LIVE_CLAUSE]
         })
             .sort({ createdAt: -1 })
             .lean()
@@ -606,16 +820,39 @@ class EventBookingService {
         }, {});
     }
 
+    /**
+     * The same bookings as `myBookingsFor`, in the `myRegistration` shape the
+     * member screens read — for event.service to fall back to when the legacy
+     * seat collection has nothing for an event.
+     */
+    async myBookingRegistrationsFor(eventIds = [], who = '') {
+        const ids = (eventIds || []).filter((id) => mongoose.Types.ObjectId.isValid(String(id || '')));
+        const owner = ownerClause(who);
+        if (!ids.length || !owner) return {};
+
+        const rows = await EventBooking.find({
+            eventId: { $in: ids.map((id) => new mongoose.Types.ObjectId(String(id))) },
+            $and: [owner, LIVE_CLAUSE]
+        })
+            .sort({ createdAt: -1 })
+            .lean()
+            .catch(() => []);
+
+        return (rows || []).reduce((acc, row) => {
+            const key = String(row.eventId);
+            if (!acc[key]) acc[key] = bookingAsRegistration(row);
+            return acc;
+        }, {});
+    }
+
     /** Every booking this member holds, newest first — their own list. */
-    async myBookings(userId = '') {
-        if (!userId) return { bookings: [], total: 0 };
+    async myBookings(who = '') {
+        const owner = ownerClause(who);
+        if (!owner) return { bookings: [], total: 0 };
 
         await this.sweepExpiredHolds();
 
-        const rows = await EventBooking.find({
-            userId: String(userId),
-            status: { $in: ['active', 'waitlist'] }
-        })
+        const rows = await EventBooking.find({ $and: [owner, LIVE_CLAUSE] })
             .sort({ eventStartAt: -1, createdAt: -1 })
             .limit(200)
             .lean()
@@ -654,6 +891,85 @@ class EventBookingService {
      * the price or relaxes a check, because a member is not more trusted than a
      * guest about what a seat costs.
      */
+    /**
+     * ONE PLACE PER PERSON PER EVENT.
+     *
+     * An email or mobile number that already holds a place in THIS event — as
+     * the booker or as a participant, on a confirmed or waitlisted booking —
+     * cannot be booked again. An unpaid hold that was abandoned at the payment
+     * step does not count, so somebody can retry after a failed payment.
+     *
+     * Refused with a 409 carrying `fields`, so the form can say which box:
+     *   { email | phone | 'participants.N.email' | 'participants.N.phone': message }
+     */
+    async assertNotAlreadyBooked(event, bookedBy, participants = []) {
+        const existing = await EventBooking.find({
+            eventId: event._id || event.id,
+            $or: [
+                { status: 'waitlist' },
+                { status: 'active', 'payment.status': { $in: ['paid', 'not_required'] } }
+            ]
+        }).select('bookingRef bookedBy participants').lean();
+
+        const emails = new Set();
+        const phones = new Set();
+        existing.forEach((b) => [b.bookedBy, ...(b.participants || [])].forEach((p) => {
+            if (p && p.email) emails.add(str(p.email).toLowerCase());
+            if (p && phoneKey(p.phone).length === 10) phones.add(phoneKey(p.phone));
+        }));
+
+        const fields = {};
+        const check = (person, emailKey, phoneKeyName, who) => {
+            const email = str(person && person.email).toLowerCase();
+            const phone = phoneKey(person && person.phone);
+            if (email && emails.has(email)) {
+                fields[emailKey] = 'Email already registered';
+            }
+            if (phone.length === 10 && phones.has(phone)) {
+                fields[phoneKeyName] = 'Mobile number already registered';
+            }
+        };
+        check(bookedBy, 'email', 'phone', 'This');
+
+        /*
+         * PARTICIPANTS MAY NOT REPEAT EACH OTHER. The booker and a participant
+         * may share details (booking for yourself is the normal case); two
+         * participant rows with the same email or mobile may not.
+         */
+        const bookerEmail = str(bookedBy && bookedBy.email).toLowerCase();
+        const bookerPhone = phoneKey(bookedBy && bookedBy.phone);
+        const seenEmail = new Set();
+        const seenPhone = new Set();
+
+        participants.forEach((p, i) => {
+            const email = str(p && p.email).toLowerCase();
+            const phone = phoneKey(p && p.phone);
+
+            // A row carrying the booker's own details was reported on the booker's boxes.
+            const isBooker = (!email || email === bookerEmail) && (!phone || phone === bookerPhone);
+            if (!isBooker) check(p, `participants.${i}.email`, `participants.${i}.phone`, `Participant ${i + 1}'s`);
+
+            if (email && !fields[`participants.${i}.email`] && seenEmail.has(email)) {
+                fields[`participants.${i}.email`] = 'Use another email';
+            }
+            if (phone.length === 10 && !fields[`participants.${i}.phone`] && seenPhone.has(phone)) {
+                fields[`participants.${i}.phone`] = 'Use another mobile number';
+            }
+            if (email) seenEmail.add(email);
+            if (phone.length === 10) seenPhone.add(phone);
+        });
+
+        if (Object.keys(fields).length) {
+            const err = ApiError.conflict(
+                fields.email || fields.phone
+                    ? 'You are already registered for this event with this email or mobile number.'
+                    : 'Each person can hold only one seat for this event — please check the highlighted boxes.'
+            );
+            err.fields = fields;
+            throw err;
+        }
+    }
+
     async createBooking(eventId, payload = {}, context = null, meta = {}) {
         const event = await this.resolveEvent(eventId, context);
 
@@ -729,6 +1045,8 @@ class EventBookingService {
         if (participants.length && !participants[0].name) {
             participants[0] = { ...bookedBy };
         }
+
+        await this.assertNotAlreadyBooked(event, bookedBy, participants);
 
         // ---------------------------------------------------------- seats
 
@@ -1007,9 +1325,25 @@ class EventBookingService {
          * `payment.status: 'pending'` means whichever loses the race matches
          * nothing and is told the booking is already paid — which is true.
          */
+        /*
+         * `failed` is claimable too, and the booking is put back to `active`.
+         *
+         * A hold lapses after thirty minutes and the sweep marks it
+         * `expired` / `failed`. A buyer who took thirty-one minutes on the
+         * gateway's page has still PAID — Instamojo has the money — and
+         * leaving the booking expired would take their money and give them no
+         * seat, no confirmation and no line in the seat count. Money that has
+         * verifiably moved wins over a timer.
+         */
         const claimed = await EventBooking.findOneAndUpdate(
-            { _id: booking._id, 'payment.status': 'pending' },
             {
+                _id: booking._id,
+                status: { $ne: 'cancelled' },
+                'payment.status': { $in: ['pending', 'failed'] }
+            },
+            {
+                status: 'active',
+                expiresAt: null,
                 'payment.status': 'paid',
                 'payment.mode': ['online', 'offline', 'cash', 'upi', 'bank_transfer']
                     .includes(str(mode)) ? str(mode) : 'online',
@@ -1041,9 +1375,62 @@ class EventBookingService {
     async recordOfflinePayment(bookingRef, { mode, recordedBy } = {}) {
         const ref = str(bookingRef).toUpperCase();
 
+        /*
+         * =================================================================
+         * "CONFIRM BOOKING" FOR SOMEBODY WHO DID NOT PAY ONLINE
+         * =================================================================
+         *
+         * The organiser collects the money directly — cash at the door, UPI to
+         * the association's number, a bank transfer — and confirms the booking
+         * here instead of the booker going through Instamojo.
+         *
+         * The row may be `active` (a hold still live), `expired` (the thirty-
+         * minute hold lapsed, which is what every abandoned checkout becomes)
+         * or `waitlist`. All three are put back to `active`: an expired row is
+         * not counted by `countSeats`, so marking it paid while leaving it
+         * expired recorded the money and never took the seat.
+         *
+         * A row that was NOT already holding seats needs them to exist. The
+         * check is against the live count, and it refuses rather than
+         * overbooking — the organiser can raise the capacity on the event and
+         * press the button again.
+         */
+        const existing = await EventBooking.findOne({ bookingRef: ref }).lean().catch(() => null);
+        if (!existing) throw ApiError.notFound('No such booking');
+        if (existing.status === 'cancelled') {
+            throw ApiError.badRequest('This booking was cancelled. Ask the booker to book again.');
+        }
+        const payStatus = (existing.payment && existing.payment.status) || 'pending';
+        if (!['pending', 'failed'].includes(payStatus)) {
+            throw ApiError.badRequest('This booking is not awaiting payment');
+        }
+
+        const holdingSeats = existing.status === 'active'
+            && payStatus === 'pending'
+            && existing.expiresAt && new Date(existing.expiresAt).getTime() > Date.now();
+
+        if (!holdingSeats) {
+            const event = await Event.findById(existing.eventId).lean().catch(() => null);
+            if (event) {
+                const { capacity, seatsLeft } = await this.seatsFor(event);
+                if (capacity > 0 && seatsLeft < Number(existing.noOfPersons || 1)) {
+                    throw ApiError.badRequest(
+                        `Only ${seatsLeft} seat${seatsLeft === 1 ? '' : 's'} left for this event, and this `
+                        + `booking needs ${existing.noOfPersons}. Increase the event's capacity first.`
+                    );
+                }
+            }
+        }
+
         const claimed = await EventBooking.findOneAndUpdate(
-            { bookingRef: ref, 'payment.status': { $in: ['pending', 'failed'] } },
             {
+                bookingRef: ref,
+                status: { $ne: 'cancelled' },
+                'payment.status': { $in: ['pending', 'failed'] }
+            },
+            {
+                status: 'active',
+                expiresAt: null,
                 'payment.status': 'paid',
                 'payment.mode': ['offline', 'cash', 'upi', 'bank_transfer'].includes(str(mode))
                     ? str(mode)
@@ -1056,8 +1443,9 @@ class EventBookingService {
 
         if (!claimed) throw ApiError.badRequest('This booking is not awaiting payment');
 
-        logger.warn('Event booking marked paid by an administrator', {
-            bookingRef: claimed.bookingRef, amount: claimed.totalAmount, recordedBy: str(recordedBy)
+        logger.warn('Event booking confirmed by an administrator (payment collected directly)', {
+            bookingRef: claimed.bookingRef, amount: claimed.totalAmount, recordedBy: str(recordedBy),
+            previousStatus: existing.status
         });
 
         this.announce(claimed);
@@ -1164,17 +1552,25 @@ class EventBookingService {
         return toBooking(booking.toObject ? booking.toObject() : booking);
     }
 
-    /** Free the seats without losing the record. */
+    /**
+     * Free the seats without losing the record — and tell the booker.
+     *
+     * A waitlist entry can be cancelled too; it holds no seat, but the person
+     * on it is still waiting to hear.
+     */
     async cancelBooking(bookingRef, { reason } = {}) {
         const ref = str(bookingRef).toUpperCase();
 
         const cancelled = await EventBooking.findOneAndUpdate(
-            { bookingRef: ref, status: 'active' },
-            { status: 'cancelled', cancelledAt: new Date(), note: str(reason).slice(0, 500) },
+            { bookingRef: ref, status: { $in: ['active', 'waitlist'] } },
+            { status: 'cancelled', cancelledAt: new Date(), expiresAt: null, note: str(reason).slice(0, 500) },
             { new: true }
         );
 
         if (!cancelled) throw ApiError.notFound('No active booking with that reference');
+
+        logger.warn('Event booking cancelled', { bookingRef: cancelled.bookingRef });
+        this.announce(cancelled, 'cancelled', { reason: str(reason) });
         return toBooking(cancelled);
     }
 
@@ -1183,56 +1579,387 @@ class EventBookingService {
     // ==================================================================
 
     /**
-     * Confirm a booking on every channel the booker can be reached on.
+     * Everything a booking message says, built from the booking AND the live
+     * event at the moment of sending.
+     *
+     * The event is re-read rather than trusted from the booking's snapshot
+     * because a message going out NOW should carry the schedule as it stands
+     * now: an organiser who moved the start from 10:00 to 11:00 wants the
+     * reminder to say 11:00. The snapshot is the fallback when the event
+     * cannot be read (deleted, or the database is slow).
+     *
+     * EVERY DATE IS FORMATTED IN IST, explicitly. `toLocaleString` without a
+     * `timeZone` formats in the SERVER's zone, and a server in UTC told a
+     * member their 10:00 am event started at 4:30 am.
+     */
+    async messageContext(booking, kind = 'confirmed', extra = {}) {
+        const b = booking && booking.toObject ? booking.toObject() : (booking || {});
+        const event = (await Event.findById(b.eventId).lean().catch(() => null)) || {};
+
+        const startAt = event.startAt || b.eventStartAt || null;
+        const endAt = event.endAt || null;
+        const { dateLabel, timeLabel, whenLabel } = describeSchedule(startAt, endAt);
+        const startParts = startAt ? istParts(startAt) : null;
+        const endParts = endAt ? istParts(endAt) : null;
+
+        const { isOnline, platform, formatWordCategory } = attendanceOf(event, b);
+        const venueLabel = isOnline
+            ? (platform ? `Online (${platform})` : 'Online')
+            : [event.venue || b.eventVenue, event.venueAddress].filter(Boolean).join(', ');
+
+        const seats = Number(b.noOfPersons || 1);
+        const payment = b.payment || {};
+        const settledVia = payment.status === 'not_required' || Number(b.totalAmount || 0) <= 0
+            ? 'free'
+            : (payment.mode === 'online' && !payment.recordedBy ? 'online' : 'offline');
+        const modeLabel = PAYMENT_MODE_LABELS[payment.mode] || '';
+
+        let paymentLabel = 'Not paid';
+        if (settledVia === 'free') paymentLabel = 'Not required';
+        else if (payment.status === 'paid') {
+            paymentLabel = settledVia === 'online'
+                ? 'Paid online'
+                : `Paid to the organiser${modeLabel ? ` (${modeLabel})` : ''}`;
+        }
+
+        const contactLine = [event.contactName, event.contactPhone, event.contactEmail]
+            .filter(Boolean).join(' · ');
+
+        const eventId = String(b.eventId || '');
+        // The readable address (eventSlug.js) in every link a booker is sent.
+        const publicId = encodeURIComponent(event.slug || eventId);
+        const { appUrl } = require('../notifications/notificationTemplates');
+
+        return {
+            kind,
+            bookingRef: b.bookingRef || '',
+            eventTitle: event.title || b.eventTitle || 'ACTIV event',
+            dateLabel,
+            timeLabel,
+            whenLabel,
+            venue: venueLabel,
+            venueLabel,
+            mapUrl: isOnline ? '' : (event.venueMapUrl || b.eventMapUrl || ''),
+            isOnline,
+            onlinePlatform: platform,
+            // The start and end on their own, for a template that prints
+            // "Time: {from} to {to}".
+            startTimeLabel: startParts && !(startParts.midnight && !endParts) ? `${startParts.time} IST` : '',
+            /*
+             * REAL TIMES instead of "before the start": when to report at the
+             * desk (30 min early, in person) and when to join (5 min early,
+             * online). Empty for an event with no set time.
+             */
+            reportTimeLabel: startParts && !startParts.midnight
+                ? `${istParts(new Date(new Date(startAt).getTime() - 30 * 60000)).time} IST` : '',
+            joinTimeLabel: startParts && !startParts.midnight
+                ? `${istParts(new Date(new Date(startAt).getTime() - 5 * 60000)).time} IST` : '',
+            startClock: startParts && !startParts.midnight ? `${startParts.time} IST` : '',
+            endTimeLabel: endParts ? `${endParts.time} IST` : '',
+            bookerName: (b.bookedBy && b.bookedBy.name) || '',
+            bookerPhone: (b.bookedBy && b.bookedBy.phone) || '',
+            bookerEmail: (b.bookedBy && b.bookedBy.email) || '',
+            // The organiser's "Please note" — printed first in the emails'
+            // "Before you come" box. See `beforeYouComeHtml`.
+            attendeeNote: event.registrationNote || '',
+            /*
+             * WHAT KIND OF EVENT, said the way a professional invitation
+             * says it: an online event is a WEBINAR, an offline one an
+             * in-person event. `category` is the organiser's own filing
+             * ("Conference", "Workshop") and rides beside it.
+             */
+            formatLabel: isOnline
+                ? `Online webinar${platform ? ` on ${platform}` : ''}`
+                : 'In-person event',
+            // "ZOOM" filed as the category is the format, already said above.
+            category: formatWordCategory ? '' : (event.category || ''),
+            topic: event.topic || '',
+            language: event.language || '',
+            /*
+             * THE JOINING LINK, for a booking that holds a place — confirmed
+             * or reminded — and never on a waitlist or cancellation message.
+             * It is sent to the booker because it is theirs: the public page
+             * withholds it (`withJoinLink`) for exactly this reason.
+             */
+            /*
+             * THE LINK ON AN ONLINE EVENT IS THE REGISTRATION LINK, not a join
+             * link. The booker opens it, fills in their name and email on the
+             * platform's own form (Zoom), and the platform emails them their
+             * personal joining link. So every message says "register here" and
+             * never "join here".
+             *
+             * `joinUrl` stays empty: it is reserved for the joining link a
+             * platform webhook will hand back per attendee later.
+             */
+            registerUrl: isOnline && (kind === 'confirmed' || kind === 'reminder') ? (event.onlineUrl || '') : '',
+            joinUrl: '',
+            /*
+             * The event's own poster, as an ABSOLUTE address — an email and a
+             * WhatsApp header are fetched by somebody else's server, which
+             * cannot resolve `/uploads/…`. Empty when the event has none.
+             */
+            posterUrl: absoluteMediaUrl(event.bannerUrl || b.eventBannerUrl || ''),
+            /*
+             * The event's documents (agenda PDF …) and video, as ABSOLUTE
+             * addresses: the email attaches and links them, WhatsApp sends each
+             * document as a document message. See the event schema.
+             */
+            attachments: (Array.isArray(event.attachments) ? event.attachments : [])
+                .map((a) => ({
+                    name: str(a && a.name) || 'Document',
+                    url: absoluteMediaUrl(a && a.url),
+                    type: str(a && a.type),
+                    size: Number(a && a.size) || 0
+                }))
+                .filter((a) => a.url),
+            videoUrl: str(event.videoUrl),
+            seats,
+            seatsLabel: `${seats} seat${seats === 1 ? '' : 's'}`,
+            participantNames: (b.participants || []).map((p) => (p && p.name) || '').filter(Boolean),
+            amountLabel: rupees(b.totalAmount),
+            settledVia,
+            paymentModeLabel: modeLabel,
+            paymentLabel,
+            paymentId: settledVia === 'online' ? (payment.gatewayPaymentId || '') : '',
+            contactLine,
+            contactName: event.contactName || '',
+            contactPhone: event.contactPhone || '',
+            contactEmail: event.contactEmail || '',
+            viewUrl: eventId && b.bookingRef
+                ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
+                : '',
+            eventUrl: eventId ? appUrl(`/events/${publicId}`) : '',
+            // What the email's QR ticket opens: this booking, for check-in at the desk.
+            ticketUrl: eventId && b.bookingRef
+                ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
+                : '',
+            bookedByLine: [b.bookedBy && b.bookedBy.name, b.bookedBy && b.bookedBy.phone]
+                .filter(Boolean).join(' · '),
+            bookedOnLabel: b.createdAt
+                ? new Date(b.createdAt).toLocaleString('en-IN', {
+                    timeZone: TZ, day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit'
+                })
+                : '',
+            data: { bookingRef: b.bookingRef, eventId, seats },
+            ...extra
+        };
+    }
+
+    /**
+     * Tell the booker, on every channel they can be reached on — email,
+     * WhatsApp and (for a member) the bell.
+     *
+     * `kind` picks the message:
+     *   confirmed  a paid booking settled (online, or recorded by the
+     *              organiser), or a free one taken
+     *   waitlist   the event was full; nothing is held and nothing is owed
+     *   cancelled  the organiser cancelled it
+     *   reminder   the event is coming up (see `sendDueReminders`)
      *
      * NEVER AWAITED AND CANNOT THROW. By the time this runs the seats are held
-     * and, on a paid booking, the money has moved. A mail host that is down must
-     * not turn a completed payment into an error the booker sees — they would
-     * pay a second time for seats they already hold.
-     *
-     * Reuses `EVENT_REGISTERED`, which is the approved WhatsApp template for
-     * exactly this fact. A new lifecycle event would mean a new Meta template
-     * and days of review to say the same sentence.
+     * and, on a paid booking, the money has moved. A mail host that is down
+     * must not turn a completed payment into an error the booker sees — they
+     * would pay a second time for seats they already hold.
      */
-    announce(booking) {
-        try {
-            if (!booking) return;
+    announce(booking, kind = null, extra = {}) {
+        if (!booking) return;
+        const resolvedKind = kind || (booking.status === 'waitlist' ? 'waitlist' : 'confirmed');
 
-            const notificationService = require('../notifications/notification.service');
+        (async() => {
             const email = (booking.bookedBy && booking.bookedBy.email) || '';
             const phone = (booking.bookedBy && booking.bookedBy.phone) || '';
             if (!email && !phone) return;
 
-            notificationService.dispatchInBackground('EVENT_REGISTERED', {
+            const ctx = await this.messageContext(booking, resolvedKind, extra);
+            const eventName = {
+                confirmed: 'EVENT_BOOKING_CONFIRMED',
+                cancelled: 'EVENT_BOOKING_CANCELLED',
+                reminder: 'EVENT_BOOKING_REMINDER',
+                waitlist: 'EVENT_BOOKING_WAITLISTED'
+            }[resolvedKind] || 'EVENT_BOOKING_CONFIRMED';
+
+            const notificationService = require('../notifications/notification.service');
+            await notificationService.dispatchLifecycleEvent(eventName, {
                 // A guest has no member id, so there is no bell to write to —
-                // `dispatchLifecycleEvent` skips the in-app channel on its own
-                // when the id is absent rather than failing the whole dispatch.
+                // the in-app channel is skipped on its own when it is absent.
                 id: booking.userId || '',
                 name: (booking.bookedBy && booking.bookedBy.name) || '',
                 email,
                 phone
-            }, {
-                eventTitle: booking.eventTitle || 'ACTIV event',
-                whenLabel: booking.eventStartAt
-                    ? new Date(booking.eventStartAt).toLocaleString('en-IN', {
-                        day: 'numeric', month: 'long', year: 'numeric',
-                        hour: 'numeric', minute: '2-digit'
-                    })
-                    // The wording every other surface prints for an undated
-                    // event. An omitted line reads as a rendering fault.
-                    : 'Date to be confirmed',
-                venue: booking.eventVenue || '',
-                data: {
-                    bookingRef: booking.bookingRef,
-                    eventId: String(booking.eventId || ''),
-                    seats: booking.noOfPersons
+            }, ctx);
+
+            /*
+             * EVERY PARTICIPANT HEARS TOO, in their own words.
+             *
+             * A company head books five seats for their team: each of the five is
+             * the person who has to turn up, so each gets a message naming who
+             * booked for them, THEIR seat and the event details — never the
+             * booker's payment. Not on a waitlist (nothing is held for them).
+             *
+             * One message per person: participant 1 defaults to the booker, and
+             * the same number or address listed twice is sent once. A
+             * participant with neither an email nor a mobile has nowhere to go.
+             */
+            /*
+             * THE EVENT'S DOCUMENTS as WhatsApp files, straight after the
+             * confirmation or reminder: one message per document (up to three),
+             * to the booker here and to each participant below. Only types
+             * WhatsApp opens as a document; the rest are linked in the email.
+             */
+            const DOC_TYPES = /\.(pdf|docx?|xlsx?|pptx?|txt|csv)(\?|$)/i;
+            const documents = ['confirmed', 'reminder'].includes(resolvedKind)
+                ? (ctx.attachments || []).filter((a) => DOC_TYPES.test(a.url) || /pdf|word|excel|powerpoint|spreadsheet|presentation|text\//i.test(a.type)).slice(0, 3)
+                : [];
+            const sendDocuments = async(toPhone, toName) => {
+                const template = require('../../config').botbee.templates.eventDocument;
+                if (!toPhone || !documents.length || !template || String(template).toLowerCase() === 'none') return;
+                const whatsappTemplate = require('../notifications/whatsappTemplate');
+                for (const doc of documents) {
+                    const sent = await whatsappTemplate.sendTemplateMessage(toPhone, template, [
+                        str(toName) || 'Member',
+                        doc.name,
+                        ctx.eventTitle || 'the event',
+                        ctx.whenLabel || 'Date to be confirmed',
+                        ctx.bookingRef || '-'
+                    ], 'en', '', { headerDocument: { link: doc.url, filename: doc.name } }).catch((e) => ({ success: false, error: e && e.message }));
+                    await notificationService.log({
+                        user: booking.userId || null,
+                        event: `EVENT_DOCUMENT_${resolvedKind.toUpperCase()}`,
+                        channel: 'whatsapp',
+                        recipient: sent.to || toPhone,
+                        templateId: template,
+                        subject: doc.name,
+                        status: sent.success ? 'sent' : 'failed',
+                        providerMessageId: sent.messageId,
+                        lastError: sent.error,
+                        data: { bookingRef: booking.bookingRef, document: doc.url }
+                    }).catch(() => {});
                 }
+            };
+            await sendDocuments(phone, (booking.bookedBy && booking.bookedBy.name) || '');
+
+            if (!['confirmed', 'reminder', 'cancelled'].includes(resolvedKind)) return;
+            const seen = new Set([phoneKey(phone), str(email).toLowerCase()].filter(Boolean));
+            const people = (booking.participants || []).filter((p) => {
+                const keys = [phoneKey(p && p.phone), str(p && p.email).toLowerCase()].filter(Boolean);
+                if (!keys.length || keys.some((k) => seen.has(k))) return false;
+                keys.forEach((k) => seen.add(k));
+                return true;
             });
-        } catch (error) {
-            logger.warn('Event booking confirmation not sent', {
-                bookingRef: booking && booking.bookingRef, error: error && error.message
+            const participantEvent = {
+                confirmed: 'EVENT_PARTICIPANT_CONFIRMED',
+                reminder: 'EVENT_PARTICIPANT_REMINDER',
+                cancelled: 'EVENT_PARTICIPANT_CANCELLED'
+            }[resolvedKind];
+            for (const person of people) {
+                await notificationService.dispatchLifecycleEvent(participantEvent, {
+                    id: '',
+                    name: str(person.name),
+                    email: str(person.email),
+                    phone: str(person.phone)
+                }, {
+                    ...ctx,
+                    // The message is about THEIR seat, booked by somebody else.
+                    participantName: str(person.name),
+                    participantEmail: str(person.email),
+                    participantPhone: str(person.phone),
+                    bookerName: (booking.bookedBy && booking.bookedBy.name) || '',
+                    bookerEmail: str(person.email)
+                }).catch((error) => logger.warn('Participant message not sent', {
+                    bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
+                }));
+                await sendDocuments(str(person.phone), str(person.name));
+            }
+        })().catch((error) => {
+            logger.warn('Event booking message not sent', {
+                bookingRef: booking && booking.bookingRef, kind: resolvedKind, error: error && error.message
             });
+        });
+    }
+
+    /**
+     * =====================================================================
+     * REMINDERS, SENT WHEN THE EVENT'S OWN SCHEDULE SAYS SO
+     * =====================================================================
+     *
+     * `Event.reminderOffsetsHours` is what the organiser set ("24h before",
+     * "2h before"). It was stored and shown on the dashboard and nothing ever
+     * sent it. This does, on a timer started by `server.js`.
+     *
+     * An event with no offsets of its own falls back to
+     * `EVENT_REMINDER_DEFAULT_HOURS` (24 unless set; `0` turns the fallback
+     * off). Offsets are computed against the event's CURRENT start, so moving
+     * the event moves its reminders with it.
+     *
+     * ONE REMINDER PER OFFSET PER BOOKING, even with several server instances:
+     * the offset is claimed with `$addToSet` on a filter that requires it to be
+     * absent, so a second instance matches nothing.
+     *
+     * A booking made AFTER an offset's moment does not get that reminder — a
+     * seat taken an hour before the start has just had its confirmation, and
+     * "starts tomorrow" then would be wrong.
+     */
+    async sendDueReminders() {
+        const now = Date.now();
+        const rawDefault = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined
+            ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
+        const fallback = rawDefault.split(',').map(Number).filter((h) => Number.isFinite(h) && h > 0);
+
+        const horizon = new Date(now + 8 * 24 * 60 * 60 * 1000);
+        const events = await Event.find({ startAt: { $gt: new Date(now), $lte: horizon } })
+            .select('_id startAt reminderOffsetsHours')
+            .lean()
+            .catch(() => []);
+
+        let sent = 0;
+        for (const event of events || []) {
+            const start = new Date(event.startAt).getTime();
+            const own = Array.isArray(event.reminderOffsetsHours) ? event.reminderOffsetsHours : [];
+            const offsets = (own.length ? own : fallback)
+                .map(Number)
+                .filter((h) => Number.isFinite(h) && h > 0 && h <= 24 * 7);
+
+            for (const hours of offsets) {
+                const moment = start - hours * 60 * 60 * 1000;
+                if (now < moment) continue;
+
+                for (let guard = 0; guard < 5000; guard += 1) {
+                    const booking = await EventBooking.findOneAndUpdate(
+                        {
+                            eventId: event._id,
+                            status: 'active',
+                            'payment.status': { $in: ['paid', 'not_required'] },
+                            createdAt: { $lt: new Date(moment) },
+                            remindersSent: { $ne: hours }
+                        },
+                        { $addToSet: { remindersSent: hours } },
+                        { new: true }
+                    ).catch(() => null);
+                    if (!booking) break;
+
+                    this.announce(booking, 'reminder', { startsInLabel: startsIn(start - now) });
+                    sent += 1;
+                }
+            }
         }
+
+        if (sent) logger.info('Event booking reminders sent', { count: sent });
+        return sent;
+    }
+
+    /** Start the reminder timer. Idempotent; `server.js` calls it once. */
+    startReminderScheduler() {
+        if (this.reminderTimer) return;
+        if (String(process.env.EVENT_REMINDERS_ENABLED || 'true').toLowerCase() === 'false') return;
+
+        const every = Math.max(1, parseInt(process.env.EVENT_REMINDER_INTERVAL_MINUTES, 10) || 5) * 60 * 1000;
+        const tick = () => this.sendDueReminders().catch((error) =>
+            logger.warn('Event reminder sweep failed', { error: error && error.message }));
+
+        this.reminderTimer = setInterval(tick, every);
+        if (this.reminderTimer.unref) this.reminderTimer.unref();
+        const first = setTimeout(tick, 30 * 1000);
+        if (first.unref) first.unref();
     }
 
     // ==================================================================
@@ -1927,3 +2654,6 @@ module.exports = new EventBookingService();
 module.exports.isMockMode = isMockMode;
 module.exports.sign = sign;
 module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
+module.exports.describeSchedule = describeSchedule;
+module.exports.bookingAsRegistration = bookingAsRegistration;
+module.exports.ownerClause = ownerClause;

@@ -341,6 +341,23 @@ const homeSchema = new mongoose.Schema({
         slides: [{
             media: media(),
             caption: text(),
+            /*
+             * THIS SLIDE'S OWN WORDS.
+             *
+             * The banner used to print one heading and one subheading over
+             * every picture, so a photograph of a conference and a photograph
+             * of an awards night both said the same sentence. Each slide now
+             * carries its own; blank falls back to the shared headline below,
+             * which is what every slide written before these fields shows.
+             *
+             * `align` is which side the words sit on. The picture's subject is
+             * often on one side — a speaker, a stage, a banner — and the words
+             * must be movable off it rather than printed over it.
+             */
+            headline: text(),
+            headlineHighlight: text(),
+            subheadline: text(),
+            align: { type: String, enum: ['left', 'right'], default: 'left' },
         }],
         headline: text(),
         /** Rendered in the accent colour after the headline, on the same line. */
@@ -837,6 +854,18 @@ const galleryItemSchema = new mongoose.Schema({
     showOnHome: { type: Boolean, default: true, index: true },
 
     /**
+     * What the home banner SAYS over this image, and on which side.
+     *
+     * Separate from `title` / `caption`: those describe the item on the gallery
+     * page, these are the large heading and subheading a visitor reads over
+     * the full-width banner. Blank falls back to the banner's shared headline.
+     */
+    bannerHeadline: { type: String, trim: true, default: '' },
+    bannerHighlight: { type: String, trim: true, default: '' },
+    bannerSubheadline: { type: String, trim: true, default: '' },
+    bannerAlign: { type: String, enum: ['left', 'right'], default: 'left' },
+
+    /**
      * The event this was made from, where it was made from one.
      *
      * Set by “Send to the gallery” on a finished event. It is what makes a
@@ -1264,6 +1293,19 @@ const newsSettingsSchema = new mongoose.Schema({
 galleryItemSchema.index({ state: 1 });
 galleryItemSchema.index({ region: 1 });
 
+/*
+ * THE READABLE ADDRESS, `/gallery/<slug>` — see `events/eventSlug.js`. Written
+ * on the first save and never changed after, so a shared link survives a
+ * retitle; the id links keep working too. A scalar, so unique means one item.
+ */
+galleryItemSchema.add({ slug: { type: String, trim: true, lowercase: true } });
+galleryItemSchema.index({ slug: 1 }, { unique: true, sparse: true });
+galleryItemSchema.pre('save', async function assignGallerySlug() {
+    if (this.slug) return;
+    const { galleryBaseSlug, uniqueSlugFrom } = require('../events/eventSlug');
+    this.slug = await uniqueSlugFrom(this.constructor, this, galleryBaseSlug(this));
+});
+
 const contactSettingsSchema = new mongoose.Schema({
     key: singletonKey,
 
@@ -1320,13 +1362,53 @@ const contactSettingsSchema = new mongoose.Schema({
     alternatePhone: text(),
     email: { type: String, trim: true, lowercase: true, default: '' },
     workingHours: [{ type: String, trim: true }],
+    /*
+     * The HEAD OFFICE's map, mirrored from `offices` on every save — the legacy
+     * single-office fields above are kept because other screens (Help & Support,
+     * the footer) still read them. `mapEmbedUrl` is always a frameable Google URL
+     * now; see `contactOffices.resolveMap` for why a pasted link used to show nothing.
+     */
     mapEmbedUrl: text(),
+    mapLink: text(),
 
+    /**
+     * STATE-WISE OFFICES. The Contact page switches between them; the one marked
+     * `isHeadOffice` is shown first and mirrored into the legacy fields above.
+     * `mapInput` is whatever the editor pasted (a share link, the embed code, an
+     * address); `mapEmbedUrl` / `mapLink` / `directionsUrl` are derived from it
+     * on save.
+     */
+    offices: [{
+        _id: false,
+        id: text(),
+        state: text(),
+        label: text(),
+        isHeadOffice: { type: Boolean, default: false },
+        addressLines: [{ type: String, trim: true }],
+        phone: text(),
+        alternatePhone: text(),
+        email: { type: String, trim: true, lowercase: true, default: '' },
+        whatsapp: text(),
+        workingHours: [{ type: String, trim: true }],
+        mapInput: text(),
+        mapEmbedUrl: text(),
+        mapLink: text(),
+        directionsUrl: text(),
+        mapQuery: text(),
+        order: { type: Number, default: 0 },
+        isActive: { type: Boolean, default: true },
+    }],
+
+    /** The association's own profiles — footer, Contact page and the phone menu. */
     social: {
         facebook: text(),
         instagram: text(),
+        x: text(),
         linkedin: text(),
         youtube: text(),
+        whatsapp: text(),
+        telegram: text(),
+        threads: text(),
     },
 
     /*
@@ -1372,6 +1454,12 @@ const contactMessageSchema = new mongoose.Schema({
     message: { type: String, trim: true, required: true },
 
     status: { type: String, enum: ['new', 'read', 'archived'], default: 'new', index: true },
+
+    /** Where it was sent from — the public Contact page, or Help & Support in the member dashboard. */
+    source: { type: String, enum: ['website', 'member_dashboard'], default: 'website' },
+    /** The member who sent it, when it came from the dashboard. */
+    memberId: { type: String, default: '' },
+    applicationRef: { type: String, default: '' },
 
     /** Kept for abuse triage: the one endpoint anyone at all can write to. */
     meta: {

@@ -140,11 +140,17 @@ const changePasswordValidator = validate([
     .withMessage('New password must be at least 6 characters long')
 ]);
 
+/*
+ * `normalizeEmail()` is deliberately NOT used: it strips the dots from a Gmail
+ * address, so `a.b@gmail.com` was looked up as `ab@gmail.com`, matched
+ * nothing, and the member never got their link.
+ */
 const forgotPasswordValidator = validate([
     body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email')
+    .customSanitizer((value) => String(value || '').trim().toLowerCase())
+    .matches(/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/)
+    .withMessage('Please provide a valid email'),
+    body('portal').optional().isIn(['member', 'admin', ''])
 ]);
 
 const resetPasswordValidator = validate([

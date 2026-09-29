@@ -55,27 +55,28 @@ const getCurrentUser = asyncHandler(async(req, res) => {
  * See the note in authService.requestPasswordReset.
  */
 const forgotPassword = asyncHandler(async(req, res) => {
-    const { email } = req.body;
+    const { email, portal } = req.body;
 
-    const result = await authService.requestPasswordReset(email);
+    const result = await authService.requestPasswordReset(email, { portal });
 
     res.json(ApiResponse.success(result, result.message));
 });
 
 const verifyResetToken = asyncHandler(async(req, res) => {
     const token = req.query.token || req.body.token;
+    const portal = req.query.portal || req.body.portal;
 
-    const result = await authService.verifyResetToken(token);
+    const result = await authService.verifyResetToken(token, { portal });
 
     res.json(ApiResponse.success(result));
 });
 
 const resetPassword = asyncHandler(async(req, res) => {
-    const { token, newPassword, password } = req.body;
+    const { token, newPassword, password, portal } = req.body;
 
     // `password` is accepted as an alias so a client that reuses its
     // change-password form field does not silently send nothing.
-    await authService.resetPassword(token, newPassword || password);
+    await authService.resetPassword(token, newPassword || password, { portal });
 
     res.json(
         ApiResponse.success(null, 'Password reset successfully. You can now sign in.')

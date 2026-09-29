@@ -54,6 +54,8 @@ const errorHandler = (err, req, res, next) => {
         success: false,
         statusCode: statusCode || 500,
         message,
+        // Per-field messages ({ email: 'Already registered…' }) a form shows under each box.
+        ...(err && err.fields && { fields: err.fields }),
         ...(config.env === 'development' && { stack: err.stack }),
     };
 

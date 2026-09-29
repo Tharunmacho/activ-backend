@@ -42,12 +42,75 @@ router.post(
 // GET so the reset page can check the link before rendering its form.
 router.get('/reset-password/verify', authLimiter, authController.verifyResetToken);
 
+/*
+ * POST /auth/check-availability { email, phoneNumber } -> { email: taken?, phoneNumber: taken? }
+ *
+ * Registration step 1 asks before moving on, so "already registered" appears
+ * under the box it belongs to instead of after the region step. Only booleans
+ * come back; rate-limited like sign-in.
+ */
+router.post('/check-availability', authLimiter, async(req, res, next) => {
+    try {
+        const MemberDetails = require('../members/memberdetails.model');
+        const MemberAuth = require('./auth.model');
+        const email = String((req.body && req.body.email) || '').toLowerCase().trim();
+        const digits = String((req.body && req.body.phoneNumber) || '').replace(/\D/g, '').slice(-10);
+        const [inDetails, inAuth, byPhone] = await Promise.all([
+            email ? MemberDetails.exists({ email }) : null,
+            email ? MemberAuth.exists({ email }) : null,
+            digits.length === 10
+                ? MemberDetails.exists({ phoneNumber: new RegExp(`${digits.split('').join('\\D*')}$`) })
+                : null
+        ]);
+        res.json({ success: true, data: { email: !!(inDetails || inAuth), phoneNumber: !!byPhone } });
+    } catch (error) {
+        next(error);
+    }
+});
+
 router.post(
     '/reset-password',
     authLimiter,
     authValidators.resetPasswordValidator,
     authController.resetPassword
 );
+
+/*
+ * Sign in with Google / Facebook / LinkedIn — members only. See oauth.service.
+ * `/providers` tells the website which buttons to show (only those whose keys
+ * are set). `/start` and `/callback` are browser navigations, not XHR.
+ */
+const oauthService = require('./oauth.service');
+
+router.get('/oauth/providers', (req, res) => {
+    res.json({ success: true, data: oauthService.listProviders() });
+});
+
+router.get('/oauth/:provider/start', authLimiter, (req, res) => {
+    try {
+        res.redirect(oauthService.startUrl(String(req.params.provider || '').toLowerCase(), req, res));
+    } catch (err) {
+        const reason = err && err.statusCode === 404 ? 'unavailable' : 'not_configured';
+        const base = String(require('../../config').frontendUrl || '').replace(/\/+$/, '');
+        res.redirect(`${base}/auth/social#error=${reason}`);
+    }
+});
+
+router.get('/oauth/:provider/callback', authLimiter, async(req, res) => {
+    const target = await oauthService
+        .handleCallback(String(req.params.provider || '').toLowerCase(), req, res)
+        .catch(() => `${String(require('../../config').frontendUrl || '').replace(/\/+$/, '')}/auth/social#error=failed`);
+    res.redirect(target);
+});
+
+router.post('/oauth/exchange', authLimiter, async(req, res, next) => {
+    try {
+        const result = await oauthService.exchange(req.body && req.body.code);
+        res.json({ success: true, message: 'Login successful', data: result });
+    } catch (err) {
+        next(err);
+    }
+});
 
 // Protected routes
 router.post('/logout', verifyToken, authController.logout);

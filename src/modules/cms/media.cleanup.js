@@ -1,6 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const logger = require('../../config/logger');
+const { removeFile } = require('../../core/storage/uploadStore');
 
 /**
  * Remove uploaded files that nothing points at any more.
@@ -92,7 +93,14 @@ const referencedFilenames = async() => {
         GallerySettings.find({}).lean().catch(() => []),
         GalleryItem.find({}).lean().catch(() => []),
         ContactSettings.find({}).lean().catch(() => []),
-        Event.find({}).select('bannerUrl').lean().catch(() => []),
+        // Whole event documents, not just the banner: speaker photos, the
+        // agenda and gallery images live on the event too, and a list of named
+        // fields is exactly what this function exists to avoid.
+        Event.find({}).lean().catch(() => []),
+        // Member profile photos. New ones live under members/ (never swept);
+        // ones uploaded before that sit at the top level and must stay too.
+        require('../members/memberdetails.model').find({ profilePhoto: { $nin: [null, ''] } })
+            .select('profilePhoto').lean().catch(() => []),
     ]);
 
     sources.forEach(docs => collect(docs, found));
@@ -120,6 +128,8 @@ const removeOrphans = async(candidates) => {
         const removed = [];
 
         for (const name of orphans) {
+            // Member photos are the member's, not the CMS's: never deleted here.
+            if (String(name).startsWith('members/')) continue;
             const target = path.resolve(UPLOADS_DIR, name);
 
             // Refuse anything that resolves outside the uploads directory.
@@ -127,6 +137,10 @@ const removeOrphans = async(candidates) => {
                 logger.warn('Refused to delete a file outside uploads', { name });
                 continue;
             }
+
+            // The database copy goes too — otherwise the fallback in
+            // `uploadStore` would keep serving a file the CMS deleted.
+            await removeFile(name);
 
             try {
                 await fs.unlink(target);
@@ -169,6 +183,8 @@ const findAllOrphans = async() => {
     const orphans = [];
     for (const name of onDisk) {
         if (referenced.has(name)) continue;
+        // A member's own folder of photos is never CMS media — never an orphan.
+        if (name === 'members') continue;
         try {
             const stat = await fs.stat(path.join(UPLOADS_DIR, name));
             if (stat.isFile()) orphans.push({ name, bytes: stat.size, modified: stat.mtime });

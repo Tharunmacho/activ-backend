@@ -79,12 +79,12 @@ const providerName = () => (metaCloudService.isConfigured() ? 'meta' : 'botbee')
  * which one answered -- without it, a token added on a Friday would change
  * where every message comes from with nothing in the log to show it.
  */
-const sendTemplateMessage = async(phone, templateName, params = [], languageCode = 'en', textFallback = '') => {
+const sendTemplateMessage = async(phone, templateName, params = [], languageCode = 'en', textFallback = '', options = {}) => {
     const chosen = provider();
     const name = providerName();
     const safeParams = sanitizeParams(params);
 
-    const result = await chosen.sendTemplateMessage(phone, templateName, safeParams, languageCode, textFallback);
+    const result = await chosen.sendTemplateMessage(phone, templateName, safeParams, languageCode, textFallback, options);
 
     /*
      * A Meta failure is NOT retried through BotBee.

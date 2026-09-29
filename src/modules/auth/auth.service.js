@@ -62,12 +62,40 @@ const hashResetToken = (token) => {
  * route; otherwise it is derived from FRONTEND_URL. The token travels in the
  * query string because the page needs to read it before any request is made.
  */
-const buildResetUrl = (rawToken) => {
-    const base = String(process.env.PASSWORD_RESET_URL || `${config.frontendUrl}/reset-password`)
+const buildResetUrl = (rawToken, kind = 'member') => {
+    /* An admin's link opens the ADMIN reset screen, which only ever looks the
+       token up among admin accounts — see `portalOf`. */
+    const base = String(kind === 'admin'
+        ? (process.env.ADMIN_PASSWORD_RESET_URL || `${config.frontendUrl}/admin/reset-password`)
+        : (process.env.PASSWORD_RESET_URL || `${config.frontendUrl}/reset-password`))
         .trim()
         .replace(/\/+$/, '');
     const separator = base.includes('?') ? '&' : '?';
     return `${base}${separator}token=${encodeURIComponent(rawToken)}`;
+};
+
+/**
+ * WHICH SIGN-IN SCREEN a reset belongs to.
+ *
+ * `'admin'` (the admin login's "Forgot password?") reaches ONLY admin accounts
+ * that the Super Admin created and that are active. `'member'` reaches ONLY
+ * member accounts. So typing an admin's address into the member form — or a
+ * member's into the admin form — sends nothing at all, and the legacy scaffold
+ * records (which were never real people) cannot be reset by anyone.
+ *
+ * `''` is the released mobile app, which sends no portal: member first, then a
+ * provisioned admin, exactly as before but without the scaffold.
+ */
+const portalOf = (portal) => {
+    const p = String(portal || '').toLowerCase();
+    return p === 'admin' || p === 'member' ? p : '';
+};
+
+/** `ta•••@gmail.com` — enough for the owner to recognise, not enough to harvest. */
+const maskEmail = (email) => {
+    const [user = '', domain = ''] = String(email || '').split('@');
+    if (!domain) return '';
+    return `${user.slice(0, 2)}${'•'.repeat(Math.max(3, Math.min(6, user.length - 2)))}@${domain}`;
 };
 
 /**
@@ -131,7 +159,25 @@ class AuthService {
         ]);
 
         if (existingMember || existingAuth) {
-            throw ApiError.conflict('Email already registered');
+            const err = ApiError.conflict('Email already registered');
+            err.fields = { email: 'This email is already registered. Please sign in instead.' };
+            throw err;
+        }
+
+        /*
+         * ONE ACCOUNT PER MOBILE NUMBER, as per email. Compared on the last ten
+         * digits so "+91 90923 17264", "919092317264" and "9092317264" are one
+         * number whichever way it was typed or stored.
+         */
+        const phoneDigits = String(userData.phoneNumber || '').replace(/\D/g, '').slice(-10);
+        if (phoneDigits.length === 10) {
+            const anyFormat = new RegExp(`${phoneDigits.split('').join('\\D*')}$`);
+            const samePhone = await MemberDetails.findOne({ phoneNumber: anyFormat }).select('_id').lean();
+            if (samePhone) {
+                const err = ApiError.conflict('Mobile number already registered');
+                err.fields = { phoneNumber: 'This mobile number is already registered. Please sign in instead.' };
+                throw err;
+            }
         }
 
         // An applicant may only register into a region that has an active admin
@@ -370,8 +416,7 @@ class AuthService {
     }
 
     async login(identifier, password, { portal = '' } = {}) {
-        // `identifier` is an email, a Member ID or a mobile number; see
-        // resolveLoginEmail. Admins sign in by email only.
+        // `identifier` is an email or a Member ID; see resolveLoginEmail.
         const normalizedEmail = await this.resolveLoginEmail(identifier);
 
         if (!normalizedEmail) {
@@ -393,56 +438,10 @@ class AuthService {
                 throw ApiError.unauthorized('Invalid credentials');
             }
 
-            // Get full user details from "web users" collection
-            const memberDetails = await MemberDetails.findOne({ email: normalizedEmail });
-
-            /*
-             * BOTH records decide. A member is a credential plus a profile, and
-             * an admin blocking someone writes to both — but a record blocked
-             * before that was true, or by a script, or by a future path that
-             * touches only one of them, would otherwise still sign in. The check
-             * sits after the password so a wrong password on a blocked account
-             * still answers "Invalid credentials": telling an attacker which
-             * emails belong to blocked members is a free directory.
-             */
-            if (memberDetails && memberDetails.isActive === false) {
-                throw ApiError.forbidden(BLOCKED_MESSAGE);
-            }
-
-            if (memberDetails) {
-                const userRole = normalizeRole(memberDetails.role);
-                /* The member screen only — see `assertPortal`. */
-                this.assertPortal(portal, userRole);
-                // Location claims must ride in the token: the geofenced admin
-                // dashboards read them off req.user to scope every query.
-                const tokens = this.generateTokens({
-                    _id: memberDetails._id,
-                    email: memberDetails.email,
-                    role: userRole,
-                    block: memberDetails.block,
-                    district: memberDetails.district,
-                    state: memberDetails.state
-                });
-
-                await cacheClient.set(
-                    CACHE_KEYS.USER(memberDetails._id),
-                    memberDetails.toJSON(),
-                    CACHE_TTL.HOUR
-                );
-
-                return {
-                    user: {
-                        id: memberDetails._id,
-                        memberId: memberDetails._id,
-                        email: memberDetails.email,
-                        fullName: memberDetails.fullName,
-                        role: userRole
-                    },
-                    memberDetails: memberDetails.toJSON(),
-                    token: tokens.accessToken,
-                    role: userRole
-                };
-            }
+            // The profile decides the rest; null means a credential with no
+            // profile, which falls through to the admin lookup as before.
+            const session = await this.memberSession(normalizedEmail, portal);
+            if (session) return session;
         }
 
         // 2. Admin sign-in. One lookup through the repository, which scans every
@@ -661,80 +660,96 @@ class AuthService {
     }
 
     /**
-     * Start a password reset.
+     * The account an email may reset, on this screen — or null.
+     *
+     * Returns a `write` that stores reset fields wherever the account lives, so
+     * callers never need to know which collection that is.
+     */
+    async resettableByEmail(email, portal = '') {
+        const normalizedEmail = String(email || '').toLowerCase().trim();
+        if (!normalizedEmail) return null;
+        const wanted = portalOf(portal);
+
+        if (wanted !== 'admin') {
+            const memberAuth = await MemberAuth.findOne({ email: normalizedEmail }).catch(() => null);
+            if (memberAuth) {
+                const details = await MemberDetails.findOne({ email: normalizedEmail })
+                    .select('fullName isActive').lean().catch(() => null);
+                if (memberAuth.isActive === false || (details && details.isActive === false)) return null;
+                return {
+                    kind: 'member',
+                    email: normalizedEmail,
+                    fullName: (details && details.fullName) || '',
+                    write: (set) => MemberAuth.updateOne({ _id: memberAuth._id }, { $set: set })
+                };
+            }
+            if (wanted === 'member') return null;
+        }
+
+        const hit = await adminRepository.findRawByEmail(normalizedEmail).catch(() => null);
+        if (!hit) return null;
+        const row = adminRepository.toAdminRow(hit.doc, hit.source);
+        // Only a real, active account the Super Admin created. The pre-seeded
+        // scaffold shares one password and belongs to nobody.
+        if (!row.active || !adminRepository.isProvisioned(hit.doc, hit.source)) return null;
+        return {
+            kind: 'admin',
+            email: normalizedEmail,
+            fullName: row.fullName || '',
+            write: (set) => adminRepository.updateById(hit, set)
+        };
+    }
+
+    /** Issue a single-use reset token for a resolved account; returns the RAW token. */
+    async issueResetToken(account, ttlMs = RESET_TOKEN_TTL_MS) {
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        await account.write({
+            resetPasswordToken: hashResetToken(rawToken),
+            resetPasswordExpires: new Date(Date.now() + ttlMs)
+        });
+        return rawToken;
+    }
+
+    /**
+     * Start a password reset by EMAIL.
      *
      * Always resolves the same way whether or not the address exists. An
      * endpoint that answers "no such account" is an account-enumeration oracle,
-     * and this one is public and unauthenticated — anyone could walk a list of
-     * addresses through it and learn which are registered.
+     * and this one is public and unauthenticated.
      *
-     * Both member and admin accounts are supported. They store credentials in
-     * different places, so the token is written wherever the account actually
-     * lives; `resetPassword` looks in both.
+     * `portal` keeps the two sign-in screens apart — see `portalOf`. The link
+     * only lets the mailbox owner CHOOSE a new password; no password is ever
+     * sent or shown to anybody.
      */
-    async requestPasswordReset(email) {
+    async requestPasswordReset(email, { portal = '' } = {}) {
         const normalizedEmail = String(email || '').toLowerCase().trim();
         const generic = {
+            channel: 'email',
             message: 'If that email is registered, a reset link is on its way.'
         };
 
         if (!normalizedEmail) return generic;
 
-        // The raw token goes in the email and is never stored; only its hash is
-        // kept, so a database dump yields no usable links.
-        const rawToken = crypto.randomBytes(32).toString('hex');
-        const tokenHash = hashResetToken(rawToken);
-        const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-
-        let recipientName = '';
-        let stored = false;
-
-        const memberAuth = await MemberAuth.findOne({ email: normalizedEmail }).catch(() => null);
-        if (memberAuth && memberAuth.isActive !== false) {
-            await MemberAuth.updateOne(
-                { _id: memberAuth._id },
-                { $set: { resetPasswordToken: tokenHash, resetPasswordExpires: expiresAt } }
-            );
-            stored = true;
-
-            const memberDetails = await MemberDetails.findOne({ email: normalizedEmail }).catch(() => null);
-            recipientName = (memberDetails && memberDetails.fullName) || '';
-        } else {
-            const hit = await adminRepository.findRawByEmail(normalizedEmail).catch(() => null);
-            if (hit) {
-                const row = adminRepository.toAdminRow(hit.doc, hit.source);
-                if (row.active) {
-                    await adminRepository.updateById(hit, {
-                        resetPasswordToken: tokenHash,
-                        resetPasswordExpires: expiresAt
-                    });
-                    stored = true;
-                    recipientName = row.fullName || '';
-                }
-            }
-        }
-
-        if (!stored) {
-            // Nothing to reset. Logged so a genuine support request can be
-            // traced, but the caller is told the same thing either way.
-            logger.info('Password reset requested for an unknown or inactive account', {
-                email: normalizedEmail
+        const account = await this.resettableByEmail(normalizedEmail, portal);
+        if (!account) {
+            // Logged so a genuine support request can be traced, but the caller
+            // is told the same thing either way.
+            logger.info('Password reset requested for an unknown, inactive or out-of-portal account', {
+                email: normalizedEmail, portal: portalOf(portal) || 'any'
             });
             return generic;
         }
 
-        const resetUrl = buildResetUrl(rawToken);
+        const rawToken = await this.issueResetToken(account);
+        const resetUrl = buildResetUrl(rawToken, account.kind);
         const delivery = await mailer.sendPasswordReset({
             email: normalizedEmail,
-            fullName: recipientName,
+            fullName: account.fullName,
             resetUrl,
             expiresInMinutes: RESET_TOKEN_TTL_MS / 60000
         });
 
         if (!delivery.sent) {
-            // The token is valid and stored; only delivery failed. Say so in the
-            // logs rather than to the caller, who must not learn from the
-            // response whether the address exists.
             logger.warn('Password reset email was not delivered', {
                 email: normalizedEmail,
                 skipped: delivery.skipped,
@@ -748,23 +763,33 @@ class AuthService {
     /**
      * Check a token before showing the "choose a new password" form.
      *
-     * Lets the client fail early with a clear message instead of collecting a
-     * new password and then rejecting it. Returns a boolean rather than
-     * throwing — an expired link is an ordinary outcome, not an error.
+     * Looked up ONLY among the accounts the screen serves: an admin token opens
+     * on /admin/reset-password and a member token on /reset-password.
      */
-    async verifyResetToken(token) {
+    async verifyResetToken(token, { portal = '' } = {}) {
         const tokenHash = hashResetToken(token);
         if (!tokenHash) return { valid: false };
+        const wanted = portalOf(portal);
 
-        const memberAuth = await MemberAuth.findOne({
-            resetPasswordToken: tokenHash,
-            resetPasswordExpires: { $gt: new Date() }
-        }).catch(() => null);
+        if (wanted !== 'admin') {
+            const memberAuth = await MemberAuth.findOne({
+                resetPasswordToken: tokenHash,
+                resetPasswordExpires: { $gt: new Date() }
+            }).catch(() => null);
+            if (memberAuth && memberAuth.isActive !== false) {
+                return { valid: true, email: maskEmail(memberAuth.email), kind: 'member' };
+            }
+        }
 
-        if (memberAuth) return { valid: true, email: memberAuth.email };
-
-        const hit = await adminRepository.findRawByResetToken(tokenHash).catch(() => null);
-        if (hit) return { valid: true, email: String(hit.doc.email || '').toLowerCase() };
+        if (wanted !== 'member') {
+            const hit = await adminRepository.findRawByResetToken(tokenHash).catch(() => null);
+            if (hit) {
+                const row = adminRepository.toAdminRow(hit.doc, hit.source);
+                if (row.active && adminRepository.isProvisioned(hit.doc, hit.source)) {
+                    return { valid: true, email: maskEmail(row.email), kind: 'admin' };
+                }
+            }
+        }
 
         return { valid: false };
     }
@@ -773,67 +798,95 @@ class AuthService {
      * Consume a reset token and set the new password.
      *
      * The token is cleared in the same write that sets the password, so a link
-     * works exactly once even if it is opened twice.
+     * works exactly once. The account is re-checked at this moment too: an admin
+     * deactivated after the link was sent cannot use it.
      */
-    async resetPassword(token, newPassword) {
+    async resetPassword(token, newPassword, { portal = '' } = {}) {
         const password = String(newPassword || '');
         if (password.length < 6) {
             throw ApiError.badRequest('Password must be at least 6 characters long');
         }
 
+        const invalid = 'This reset link is invalid or has expired. Please request a new one.';
         const tokenHash = hashResetToken(token);
-        if (!tokenHash) {
-            throw ApiError.badRequest('This reset link is invalid or has expired. Please request a new one.');
+        if (!tokenHash) throw ApiError.badRequest(invalid);
+        const wanted = portalOf(portal);
+
+        if (wanted !== 'admin') {
+            const memberAuth = await MemberAuth.findOne({
+                resetPasswordToken: tokenHash,
+                resetPasswordExpires: { $gt: new Date() }
+            }).select('+password').catch(() => null);
+
+            if (memberAuth) {
+                if (memberAuth.isActive === false) throw ApiError.badRequest(invalid);
+                // Assigned, not updated in place, so the model's pre-save hook
+                // does the hashing.
+                memberAuth.password = password;
+                memberAuth.resetPasswordToken = undefined;
+                memberAuth.resetPasswordExpires = undefined;
+                await memberAuth.save();
+
+                await cacheClient.del(CACHE_KEYS.USER(memberAuth._id.toString()));
+                logger.info('Password reset completed', { email: memberAuth.email, kind: 'member' });
+                return { email: memberAuth.email, kind: 'member' };
+            }
         }
 
-        const memberAuth = await MemberAuth.findOne({
-            resetPasswordToken: tokenHash,
-            resetPasswordExpires: { $gt: new Date() }
-        }).select('+password').catch(() => null);
+        if (wanted !== 'member') {
+            const hit = await adminRepository.findRawByResetToken(tokenHash).catch(() => null);
+            if (hit) {
+                const row = adminRepository.toAdminRow(hit.doc, hit.source);
+                if (!row.active || !adminRepository.isProvisioned(hit.doc, hit.source)) {
+                    throw ApiError.badRequest(invalid);
+                }
+                // The repository translates `passwordHash` to whichever spelling
+                // the holding collection uses.
+                const passwordHash = await bcrypt.hash(password, 10);
+                await adminRepository.updateById(hit, {
+                    passwordHash,
+                    resetPasswordToken: '',
+                    resetPasswordExpires: null,
+                    mustResetPassword: false
+                });
 
-        if (memberAuth) {
-            // Assigned, not updated in place, so the model's pre-save hook does
-            // the hashing — writing the raw string through updateOne would store
-            // the password in plaintext.
-            memberAuth.password = password;
-            memberAuth.resetPasswordToken = undefined;
-            memberAuth.resetPasswordExpires = undefined;
-            await memberAuth.save();
-
-            await cacheClient.del(CACHE_KEYS.USER(memberAuth._id.toString()));
-            logger.info('Password reset completed', { email: memberAuth.email, kind: 'member' });
-
-            return { email: memberAuth.email };
+                const email = String(hit.doc.email || '').toLowerCase();
+                await cacheClient.del(CACHE_KEYS.USER(String(hit.objectId)));
+                logger.info('Password reset completed', { email, kind: 'admin' });
+                return { email, kind: 'admin' };
+            }
         }
 
-        const hit = await adminRepository.findRawByResetToken(tokenHash).catch(() => null);
-        if (hit) {
-            // The repository translates `passwordHash` to whichever spelling the
-            // holding collection uses; writing it directly would land in the
-            // wrong field and leave the account with its old credential.
-            const passwordHash = await bcrypt.hash(password, 10);
-            await adminRepository.updateById(hit, {
-                passwordHash,
-                resetPasswordToken: '',
-                resetPasswordExpires: null,
-                mustResetPassword: false
-            });
-
-            const email = String(hit.doc.email || '').toLowerCase();
-            await cacheClient.del(CACHE_KEYS.USER(String(hit.objectId)));
-            logger.info('Password reset completed', { email, kind: 'admin' });
-
-            return { email };
-        }
-
-        throw ApiError.badRequest('This reset link is invalid or has expired. Please request a new one.');
+        throw ApiError.badRequest(invalid);
     }
 
     async changePassword(userId, oldPassword, newPassword) {
-        const memberAuth = await MemberAuth.findById(userId).select('+password');
+        const memberAuth = await MemberAuth.findById(userId).select('+password').catch(() => null);
 
+        /*
+         * AN ADMIN CHANGING THEIR OWN PASSWORD.
+         *
+         * This only ever looked in the member credential collection, so every
+         * admin who used "Change Password" on their Settings screen — block,
+         * district, state, events — was told "User not found" and kept the
+         * password they were trying to replace. Admins live in `adminsdb`,
+         * reached only through `admin.repository`, which also translates
+         * `passwordHash` to the spelling the holding collection uses.
+         */
         if (!memberAuth) {
-            throw ApiError.notFound('User not found');
+            const hit = await adminRepository.findRawById(String(userId || '')).catch(() => null);
+            if (!hit) throw ApiError.notFound('User not found');
+
+            const stored = hit.doc.passwordHash || hit.doc.password || '';
+            const matches = stored.startsWith('$2')
+                ? await bcrypt.compare(String(oldPassword || ''), stored).catch(() => false)
+                : (!!stored && stored === oldPassword);
+            if (!matches) throw ApiError.badRequest('Current password is incorrect');
+
+            await adminRepository.updateById(hit, { passwordHash: await bcrypt.hash(String(newPassword), 10) });
+            await cacheClient.del(CACHE_KEYS.USER(String(hit.objectId)));
+            logger.info('Admin changed their own password', { email: String(hit.doc.email || '').toLowerCase() });
+            return true;
         }
 
         // Verify old password

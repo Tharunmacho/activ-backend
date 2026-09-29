@@ -180,7 +180,7 @@ class DirectoryService {
         const sector = str(filters.sector);
         const memberType = str(filters.memberType).toLowerCase();
 
-        if (memberType === 'aspirant' || memberType === 'business') {
+        if (memberType === 'aspirant' || memberType === 'business' || memberType === 'student') {
             query.$or = [{ memberType }, { registrationType: memberType }];
         }
 

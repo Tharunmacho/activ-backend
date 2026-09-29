@@ -229,6 +229,37 @@ const memberDetailsSchema = new mongoose.Schema({
     membershipExpiresAt: {
         type: Date
     },
+    /*
+     * Which renewal reminders this member has been sent, as `<expiry>:<window>`
+     * ("2027-03-31:30"). Keyed by the expiry date so a renewal — which moves the
+     * date — starts a fresh set, and declared because strict mode would drop it
+     * and every sweep would remind the same member again.
+     */
+    renewalReminders: {
+        type: [String],
+        default: undefined
+    },
+    /*
+     * THE "RENEW NOW" MESSAGES AFTER A MEMBERSHIP HAS EXPIRED — twice a month
+     * (the 1st and the 15th) while this is on. Only the State Admin (and the
+     * Super Admin) may switch it, from the Members screen; who and when is kept.
+     * See `membershipRenewal.service` and `admin/adminMembers.service`.
+     */
+    renewalReminderEnabled: {
+        type: Boolean,
+        default: true
+    },
+    renewalReminderChangedBy: {
+        type: String,
+        trim: true
+    },
+    renewalReminderChangedAt: {
+        type: Date
+    },
+    /** The last renewal message of any kind — the 24-hour guard on "send now". */
+    lastRenewalReminderAt: {
+        type: Date
+    },
     paymentAmount: {
         type: Number,
         min: 0
@@ -248,7 +279,7 @@ const memberDetailsSchema = new mongoose.Schema({
          * whole thing looked like a warning rather than three fields silently
          * never being written.
          */
-        enum: ['member', 'admin', 'aspirant', 'business'],
+        enum: ['member', 'admin', 'aspirant', 'business', 'student'],
         default: 'member'
     },
 
@@ -264,17 +295,55 @@ const memberDetailsSchema = new mongoose.Schema({
      */
     memberType: {
         type: String,
-        enum: ['aspirant', 'business'],
+        enum: ['aspirant', 'business', 'student'],
         trim: true
     },
     registrationType: {
         type: String,
-        enum: ['aspirant', 'business'],
+        enum: ['aspirant', 'business', 'student'],
         trim: true
     },
     isActive: {
         type: Boolean,
         default: true
+    },
+
+    /*
+     * PLATINUM — the lifetime tier the Super Admin GRANTS for a fee received
+     * offline (cash, cheque, transfer). `standard` is every other member.
+     * Kept apart from `membershipType` ('annual' | 'lifetime'): that says how
+     * long a membership runs, this says which tier it is.
+     */
+    membershipTier: {
+        type: String,
+        enum: ['standard', 'platinum'],
+        default: 'standard'
+    },
+    /*
+     * The record of that grant: who, when, how much and how it was paid — and
+     * what the membership was BEFORE, so revoking a grant restores it rather
+     * than guessing. Nested and undeclared-by-default: absent on every member
+     * who was never granted it.
+     */
+    platinumGrant: {
+        type: new mongoose.Schema({
+            grantedAt: Date,
+            grantedBy: String,
+            grantedByName: String,
+            amount: Number,
+            paymentMode: { type: String, enum: ['cash', 'cheque', 'bank_transfer', 'upi_offline', 'other'] },
+            receiptNumber: String,
+            receivedOn: Date,
+            note: String,
+            orderId: String,
+            previous: {
+                membershipStatus: String,
+                membershipType: String,
+                membershipExpiresAt: Date,
+                membershipActivatedAt: Date
+            }
+        }, { _id: false }),
+        default: undefined
     },
     profilePhoto: {
         type: String,

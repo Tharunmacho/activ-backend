@@ -110,7 +110,7 @@ module.exports = {
                 ? String(process.env.EMAIL_SECURE).toLowerCase() === 'true'
                 : port === 465,
 
-            fromName: real(process.env.EMAIL_FROM_NAME) || 'ACTIV Platform',
+            fromName: real(process.env.EMAIL_FROM_NAME) || 'ACTIV',
             /** The envelope address every message is actually sent from. */
             defaultFrom,
             /** Legacy composite value, still read by `core/utils/mailer.js`. */
@@ -312,7 +312,65 @@ module.exports = {
                 welcome: real(process.env.BOTBEE_TPL_WELCOME) || 'activ_registration_welcome',
                 status: real(process.env.BOTBEE_TPL_STATUS) || 'activ_membership_status',
                 payment: real(process.env.BOTBEE_TPL_PAYMENT) || 'activ_payment_request',
-                event: real(process.env.BOTBEE_TPL_EVENT) || 'activ_event_reminder'
+                event: real(process.env.BOTBEE_TPL_EVENT) || 'activ_event_reminder',
+                /*
+                 * The detailed event-booking templates. EMPTY BY DEFAULT: until a
+                 * name is set here the booking messages go through `event` above,
+                 * which is already approved. Set each one only once Meta has
+                 * approved it (scripts/whatsapp-booking-templates.js submits them),
+                 * and a send that still fails falls back to `event` on its own.
+                 */
+                /*
+                 * The CUSTOM templates (`_v2` in notificationTemplates.js) are
+                 * named by default and tried FIRST. While one is still in Meta
+                 * review Meta refuses it and the send falls through the chain to
+                 * the approved poster template, so nothing is lost; the day it is
+                 * approved it becomes the only one sent, with no redeploy.
+                 */
+                booking: real(process.env.BOTBEE_TPL_BOOKING) || 'activ_event_booking_v4',
+                bookingWebinar: real(process.env.BOTBEE_TPL_BOOKING_WEBINAR) || 'activ_webinar_registration_v4',
+                bookingCancel: real(process.env.BOTBEE_TPL_BOOKING_CANCEL) || 'activ_booking_cancelled_v3',
+                bookingReminder: real(process.env.BOTBEE_TPL_BOOKING_REMINDER) || 'activ_booking_reminder_v4',
+                // A participant's seat, booked for them by somebody else (names the booker).
+                bookingParticipant: real(process.env.BOTBEE_TPL_BOOKING_PARTICIPANT) || 'activ_participant_seat_v2',
+                // One event document (agenda PDF …) as a WhatsApp file, after the confirmation.
+                eventDocument: real(process.env.BOTBEE_TPL_EVENT_DOCUMENT) || 'activ_event_document_v1',
+                /*
+                 * Two ALREADY-APPROVED templates on the account, both with the
+                 * event poster as an image header and the association's full
+                 * name as the footer. Used for a confirmation and a reminder
+                 * whenever the dedicated one above is not set:
+                 *   cnfrm  in person — 13 variables: attendee, venue, date,
+                 *          time from/to, seats, amount
+                 *   ccmsg  online    — 4 variables: attendee, event, link, email
+                 * Set either to `none` to fall back to the generic template.
+                 */
+                /*
+                 * THE MEMBERSHIP JOURNEY (membershipTemplates.js) — one detailed
+                 * template per moment, tried FIRST exactly like the booking ones.
+                 * Until Meta approves one, the send falls back to the older
+                 * approved template (`welcome` / `status` / `payment`) with the
+                 * same news in fewer words. `none` switches one off.
+                 */
+                accountWelcome: real(process.env.BOTBEE_TPL_ACCOUNT_WELCOME) || 'activ_account_welcome_v1',
+                applicationReceived: real(process.env.BOTBEE_TPL_APPLICATION_RECEIVED) || 'activ_application_received_v1',
+                /*
+                 * v2 prints Block, District and State on three lines instead of
+                 * one "Region" line. Tried first; while Meta is still reviewing
+                 * one, the send falls back to the v1 above.
+                 */
+                accountWelcomeV2: real(process.env.BOTBEE_TPL_ACCOUNT_WELCOME_V2) || 'activ_account_welcome_v2',
+                applicationReceivedV2: real(process.env.BOTBEE_TPL_APPLICATION_RECEIVED_V2) || 'activ_application_received_v2',
+                adminNewApplicationV2: real(process.env.BOTBEE_TPL_ADMIN_NEW_APPLICATION_V2) || 'activ_admin_new_application_v2',
+                applicationProgress: real(process.env.BOTBEE_TPL_APPLICATION_PROGRESS) || 'activ_application_progress_v1',
+                membershipApproved: real(process.env.BOTBEE_TPL_MEMBERSHIP_APPROVED) || 'activ_membership_approved_v1',
+                applicationDeclined: real(process.env.BOTBEE_TPL_APPLICATION_DECLINED) || 'activ_application_declined_v1',
+                paymentPending: real(process.env.BOTBEE_TPL_PAYMENT_PENDING) || 'activ_payment_pending_v1',
+                membershipActive: real(process.env.BOTBEE_TPL_MEMBERSHIP_ACTIVE) || 'activ_membership_active_v1',
+                membershipRenewal: real(process.env.BOTBEE_TPL_MEMBERSHIP_RENEWAL) || 'activ_membership_renewal_v1',
+                adminNewApplication: real(process.env.BOTBEE_TPL_ADMIN_NEW_APPLICATION) || 'activ_admin_new_application_v1',
+                bookingInPerson: real(process.env.BOTBEE_TPL_BOOKING_INPERSON) || 'cnfrm',
+                bookingOnline: real(process.env.BOTBEE_TPL_BOOKING_ONLINE) || 'ccmsg'
             },
 
             /*
@@ -361,6 +419,24 @@ module.exports = {
     upload: {
         maxFileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 5 * 1024 * 1024,
         uploadDir: process.env.UPLOAD_DIR || './uploads'
+    },
+
+    /**
+     * S3-compatible bucket (Garage) that holds every upload — see
+     * `core/storage/objectStore.js`. Unset, uploads fall back to GridFS.
+     */
+    objectStorage: {
+        region: process.env.AWS_REGION || 'garage',
+        bucket: process.env.AWS_BUCKET_NAME || '',
+        endpoint: process.env.AWS_ENDPOINT_URL || '',
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+        /** Key prefix inside the bucket; a file is `<prefix>/<filename>`. */
+        prefix: (process.env.AWS_UPLOAD_PREFIX || 'uploads').replace(/^\/+|\/+$/g, ''),
+
+        get isConfigured() {
+            return !!(this.bucket && this.accessKeyId && this.secretAccessKey);
+        }
     },
 
     log: {

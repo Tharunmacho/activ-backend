@@ -42,14 +42,40 @@ const PLANS = Object.freeze({
         name: 'Aspirant',
         amount: 2000,
         membershipType: 'annual',
-        forBusiness: false
+        forBusiness: false,
+        audience: 'aspirant'
+    },
+    /* Not doing business, and studying: its own, lower fee. */
+    student: {
+        id: 'student',
+        name: 'Student',
+        amount: 500,
+        membershipType: 'annual',
+        forBusiness: false,
+        audience: 'student'
+    },
+    /*
+     * PLATINUM — a lifetime membership the Super Admin GRANTS, for a fee
+     * received offline (cash, cheque, transfer). Listed so the catalogue can
+     * describe it; never payable online — `getPlanForPayment` refuses it.
+     */
+    platinum: {
+        id: 'platinum',
+        name: 'Platinum Lifetime',
+        amount: 200000,
+        membershipType: 'lifetime',
+        forBusiness: true,
+        audience: 'platinum'
     }
 });
 
 /** The plan, or `null`. Callers must treat `null` as "reject the request". */
 const getPlan = planId => PLANS[String(planId || '').trim().toLowerCase()] || null;
 
-/** Every plan, for the endpoint that lets a client render the picker. */
-const listPlans = () => Object.values(PLANS);
+/**
+ * Every plan a client may offer for PAYMENT, for the picker. Platinum is
+ * left out: it is granted by the Super Admin, never bought in an app.
+ */
+const listPlans = () => Object.values(PLANS).filter((plan) => plan.audience !== 'platinum');
 
 module.exports = { PLANS, getPlan, listPlans };

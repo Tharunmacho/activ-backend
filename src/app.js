@@ -9,14 +9,36 @@ const { apiLimiter } = require('./core/middleware/rateLimit');
 const { performanceMonitor } = require('./core/middleware/performance');
 
 const path = require('path');
+const uploadStore = require('./core/storage/uploadStore');
+const { serveFromBucket, serveFromDatabase, persistUploadsMiddleware } = uploadStore;
+const { makeVariantMiddleware } = require('./core/storage/imageVariants');
 
 const app = express();
 
 // Trust reverse proxy for X-Forwarded-For (Caddy/Nginx)
 app.set('trust proxy', 1);
 
-// Serve uploaded images statically from /uploads folder
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// Serve uploaded images statically from /uploads folder — then from the S3
+// bucket, then from the database, when the disk copy is gone, which on the
+// deployed container is after every deploy. See `core/storage/uploadStore.js`.
+// `?w=800` asks for a resized WebP of the same upload — see `imageVariants`.
+// First, so a sized request never downloads the full original.
+app.use('/uploads', makeVariantMiddleware({
+    uploadsDir: uploadStore.UPLOADS_DIR,
+    objectStore: uploadStore.objectStore,
+    bucket: uploadStore.bucket
+}));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
+    // Unique names, never reused: a month, and no re-check on every visit.
+    maxAge: '30d',
+    immutable: true
+}));
+app.use('/uploads', serveFromBucket);
+app.use('/uploads', serveFromDatabase);
+
+// Every successful upload is copied into the S3 bucket (GridFS if the bucket
+// refuses it), whichever router's multer received it.
+app.use(persistUploadsMiddleware);
 
 // Security middleware
 setupSecurity(app);
@@ -43,6 +65,10 @@ app.use('/api', (req, res, next) => {
     if (req.path.includes('/auth/')) return next();
     return apiLimiter(req, res, next);
 });
+
+// A successful write anywhere empties the public read cache, so an editor's
+// save is on the next read. See `core/middleware/publicCache.js`.
+app.use(`/api/${config.apiVersion}`, require('./core/middleware/publicCache').clearOnWrite);
 
 // API routes
 app.use(`/api/${config.apiVersion}`, routes);

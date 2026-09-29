@@ -35,7 +35,17 @@ const newPaymentReference = () =>
  * what was aimed at where they are. A super admin manages the whole programme,
  * so region targeting must not hide anything from them.
  */
-const isSuperAdmin = (context = {}) => String(context.role || '') === 'super_admin';
+const isSuperAdmin = (context = {}) =>
+    ['super_admin', 'events_admin'].includes(String(context.role || ''));
+
+/*
+ * THE EVENTS ADMIN manages the programme and nothing else — the same events,
+ * drafts included, that the super admin manages. `resolveMemberContext` does
+ * not count it as an admin (that list also opens the member directory and the
+ * approval queues), so it is widened HERE, for events only.
+ */
+const withEventsAdmin = (context = {}) =>
+    (String((context && context.role) || '') === 'events_admin' ? { ...context, isAdmin: true } : context);
 
 const str = (value) => String(value === null || value === undefined ? '' : value).trim();
 
@@ -96,6 +106,35 @@ const sanitizeAgenda = (value) => {
     });
 };
 
+/**
+ * THE PER-DAY PROGRAMME — see `eventDaySchema`.
+ *
+ * A day is kept when it has a date; without one there is nothing to print it
+ * under and nothing to sort it by, so it is an empty row the editor tabbed
+ * through. Days are sorted by date, because "day 2" is a fact about the
+ * calendar rather than about the order somebody happened to type them in.
+ *
+ * `agenda` inside a day goes through exactly the same cleaner as the flat one,
+ * so a session gets the same treatment wherever it is written.
+ */
+const sanitizeDays = (value) => {
+    if (!Array.isArray(value)) return [];
+
+    return value
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => {
+            const date = item.date ? new Date(item.date) : null;
+            return {
+                date: date && !Number.isNaN(date.getTime()) ? date : null,
+                startTime: toClockTime(item.startTime || item.start),
+                endTime: toClockTime(item.endTime || item.end),
+                agenda: sanitizeAgenda(item.agenda)
+            };
+        })
+        .filter((item) => item.date)
+        .sort((a, b) => a.date.getTime() - b.date.getTime());
+};
+
 const sanitizeSpeakers = (value) => {
     if (!Array.isArray(value)) return [];
 
@@ -137,6 +176,8 @@ const registrationClosesAt = (doc = {}) => {
 
 const toEvent = (doc = {}, extras = {}) => ({
     id: doc._id ? doc._id.toString() : '',
+    // The public address; see eventSlug.js. Links use it, the API accepts either.
+    slug: doc.slug || '',
     title: doc.title || '',
     description: doc.description || '',
     startAt: doc.startAt || null,
@@ -228,6 +269,21 @@ const toEvent = (doc = {}, extras = {}) => ({
      * every event, so a switch an editor had just turned off came back on.
      */
     showOnHome: doc.showOnHome !== false,
+    showQrOnPage: doc.showQrOnPage !== false,
+    /*
+     * The home page BANNER switch and its words — here for the reason
+     * `showOnHome` is: the CMS lists map through this function, and a field
+     * added only to the CMS mapper reads back `undefined`.
+     */
+    showInBanner: doc.showInBanner !== false,
+    // The subject and the language — see the schema. Mapped here for the
+    // reason the banner fields are: the CMS lists read through this function.
+    topic: doc.topic || '',
+    language: doc.language || '',
+    bannerHeadline: doc.bannerHeadline || '',
+    bannerHighlight: doc.bannerHighlight || '',
+    bannerSubheadline: doc.bannerSubheadline || '',
+    bannerAlign: doc.bannerAlign === 'right' ? 'right' : 'left',
     channel: doc.channel || 'public',
     /*
      * Whether this goes to everyone regardless of `targets`.
@@ -246,6 +302,36 @@ const toEvent = (doc = {}, extras = {}) => ({
         description: item.description || '',
         speaker: item.speaker || '',
         location: item.location || ''
+    })),
+    /*
+     * THE PER-DAY PROGRAMME — and it has to be mapped HERE, not only in
+     * `pickEventDetail`.
+     *
+     * That function is called as `pickEventDetail(toEvent(e))`, so it reads
+     * THIS object rather than the Mongoose document. A field added there and
+     * not here is therefore always empty: `days` was stored correctly,
+     * sanitised correctly and served as `[]` on every request, so the event
+     * page fell back to the flat agenda and the day-by-day programme an
+     * editor had just typed in appeared nowhere. Reported as "it is not
+     * updated".
+     *
+     * The dates are ISO strings, like every other date this mapper emits, so
+     * the client never receives a Date it has to guess the shape of.
+     */
+    days: (doc.days || []).map((day) => ({
+        id: day._id ? String(day._id) : '',
+        date: day.date ? new Date(day.date).toISOString() : '',
+        startTime: day.startTime || '',
+        endTime: day.endTime || '',
+        agenda: (day.agenda || []).map((item) => ({
+            id: item._id ? String(item._id) : '',
+            startTime: item.startTime || '',
+            endTime: item.endTime || '',
+            title: item.title || '',
+            description: item.description || '',
+            speaker: item.speaker || '',
+            location: item.location || ''
+        }))
     })),
     speakers: (doc.speakers || []).map((item) => ({
         id: item._id ? String(item._id) : '',
@@ -462,6 +548,7 @@ const sanitize = (payload = {}) => {
     }
 
     if (payload.agenda !== undefined) out.agenda = sanitizeAgenda(parseMaybeJson(payload.agenda));
+    if (payload.days !== undefined) out.days = sanitizeDays(parseMaybeJson(payload.days));
     if (payload.speakers !== undefined) out.speakers = sanitizeSpeakers(parseMaybeJson(payload.speakers));
     if (payload.reminderOffsetsHours !== undefined) {
         out.reminderOffsetsHours = sanitizeReminders(parseMaybeJson(payload.reminderOffsetsHours));
@@ -809,6 +896,7 @@ class EventService {
      * and the audience gate needs the same guarantee.
      */
     async listEvents(filters = {}, context = {}) {
+        context = withEventsAdmin(context);
         const isAdmin = !!context.isAdmin;
         const query = {};
 
@@ -842,8 +930,20 @@ class EventService {
             query.audience = str(filters.audience).toLowerCase();
         }
 
+        /*
+         * Upcoming means NOT YET OVER: the end decides it where there is one.
+         * `startAt >= now` dropped a multi-day event from the member app on
+         * the morning of its first day. Pushed onto `$and` so it cannot
+         * collide with the targeting `$or` below.
+         */
         if (str(filters.upcoming) === 'true') {
-            query.startAt = { $gte: new Date() };
+            const now = new Date();
+            query.$and = [...(query.$and || []), {
+                $or: [
+                    { endAt: { $gte: now } },
+                    { endAt: null, startAt: { $gte: now } }
+                ]
+            }];
         }
 
         /*
@@ -898,7 +998,7 @@ class EventService {
         const ids = events.map((doc) => doc._id);
         const [counts, mine] = await Promise.all([
             this.countRegistrations(ids),
-            this.myRegistrationsFor(ids, context.id),
+            this.myRegistrationsFor(ids, context),
         ]);
 
         return {
@@ -913,6 +1013,7 @@ class EventService {
     }
 
     async getEvent(id, context = {}) {
+        context = withEventsAdmin(context);
         if (!mongoose.Types.ObjectId.isValid(String(id || ''))) throw ApiError.badRequest('Invalid event id');
 
         const doc = await Event.findById(id).lean().catch(() => null);
@@ -944,7 +1045,7 @@ class EventService {
         }
 
         const counts = await this.countRegistrations([doc._id]);
-        const mine = await this.myRegistrationsFor([doc._id], context.id);
+        const mine = await this.myRegistrationsFor([doc._id], context);
 
         return toEvent(doc, {
             registeredCount: counts[String(doc._id)] || 0,
@@ -991,19 +1092,43 @@ class EventService {
         }, {});
     }
 
-    /** This member's own seat on each of those events, keyed by event id. */
-    async myRegistrationsFor(eventIds = [], userId = '') {
+    /**
+     * This member's own seat on each of those events, keyed by event id.
+     *
+     * TWO COLLECTIONS. The legacy `/register` flow writes `EventRegistration`;
+     * the Book Now form (public site or member area, signed in or as a guest)
+     * writes `EventBooking`. Reading only the first meant a member who booked
+     * and paid was shown "Book Now" again and an empty My registrations tab.
+     * A legacy seat wins where both exist; otherwise the newest live booking
+     * that is the member's — by id, or by their email as booker/participant.
+     *
+     * `who` is the member context; a bare id still works (legacy seats only
+     * match on it, bookings need the email for guest bookings).
+     */
+    async myRegistrationsFor(eventIds = [], who = '') {
         const ids = (eventIds || []).filter(Boolean);
-        if (!ids.length || !userId) return {};
+        const userId = typeof who === 'string' ? who : String((who && who.id) || '');
+        if (!ids.length || !who) return {};
 
-        const rows = await EventRegistration.find({ eventId: { $in: ids }, userId: String(userId) })
-            .lean()
-            .catch(() => []);
+        const [rows, bookings] = await Promise.all([
+            userId
+                ? EventRegistration.find({ eventId: { $in: ids }, userId: String(userId) }).lean().catch(() => [])
+                : Promise.resolve([]),
+            // Lazy: the booking service requires the event model, and a
+            // top-level require here would make the two load each other.
+            require('./eventbooking.service').myBookingRegistrationsFor(ids, who).catch(() => ({})),
+        ]);
 
-        return (rows || []).reduce((acc, row) => {
+        const mine = (rows || []).reduce((acc, row) => {
             acc[String(row.eventId)] = toRegistration(row);
             return acc;
         }, {});
+
+        for (const [eventId, reg] of Object.entries(bookings || {})) {
+            const legacy = mine[eventId];
+            if (!legacy || legacy.status === 'cancelled') mine[eventId] = reg;
+        }
+        return mine;
     }
 
     async createEvent(payload = {}, actor = {}) {
@@ -1497,14 +1622,41 @@ class EventService {
 
     /** Everything this member has a seat at, with the event attached. */
     async myRegistrations(context = {}) {
-        if (!context.id) return { registrations: [], total: 0 };
+        if (!context.id && !context.email) return { registrations: [], total: 0 };
 
-        const rows = await EventRegistration.find({ userId: String(context.id), status: { $ne: 'cancelled' } })
-            .sort({ registeredAt: -1 })
-            .lean()
-            .catch(() => []);
+        const bookingService = require('./eventbooking.service');
+        const [rows, bookingRows] = await Promise.all([
+            context.id
+                ? EventRegistration.find({ userId: String(context.id), status: { $ne: 'cancelled' } })
+                    .sort({ registeredAt: -1 }).lean().catch(() => [])
+                : Promise.resolve([]),
+            // Book Now bookings — see `myRegistrationsFor`.
+            (async () => {
+                const owner = bookingService.ownerClause(context);
+                if (!owner) return [];
+                const EventBooking = require('./eventbooking.model');
+                return EventBooking.find({
+                    $and: [owner, { $or: [
+                        { status: { $in: ['active', 'waitlist'] } },
+                        { 'payment.status': 'paid', status: { $ne: 'cancelled' } }
+                    ] }]
+                }).sort({ createdAt: -1 }).limit(200).lean().catch(() => []);
+            })(),
+        ]);
 
-        const events = await Event.find({ _id: { $in: (rows || []).map((row) => row.eventId) } })
+        // One row per event: a legacy seat wins, else the newest booking.
+        const legacy = (rows || []).map(toRegistration);
+        const seen = new Set(legacy.map((r) => r.eventId));
+        const fromBookings = [];
+        for (const b of bookingRows || []) {
+            const reg = bookingService.bookingAsRegistration(b);
+            if (!reg.eventId || seen.has(reg.eventId)) continue;
+            seen.add(reg.eventId);
+            fromBookings.push(reg);
+        }
+        const all = [...legacy, ...fromBookings];
+
+        const events = await Event.find({ _id: { $in: all.map((r) => r.eventId).filter((id) => mongoose.Types.ObjectId.isValid(id)) } })
             .lean()
             .catch(() => []);
 
@@ -1514,11 +1666,8 @@ class EventService {
         }, {});
 
         return {
-            registrations: (rows || []).map((row) => ({
-                ...toRegistration(row),
-                event: byId[String(row.eventId)] || null
-            })),
-            total: (rows || []).length
+            registrations: all.map((reg) => ({ ...reg, event: byId[reg.eventId] || null })),
+            total: all.length
         };
     }
 }
@@ -1528,6 +1677,7 @@ module.exports.toEvent = toEvent;
 module.exports.toRegistration = toRegistration;
 module.exports.sanitizeAgenda = sanitizeAgenda;
 module.exports.sanitizeSpeakers = sanitizeSpeakers;
+module.exports.sanitizeDays = sanitizeDays;
 module.exports.sanitizeReminders = sanitizeReminders;
 module.exports.toClockTime = toClockTime;
 module.exports.registrationClosesAt = registrationClosesAt;

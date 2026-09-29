@@ -14,6 +14,7 @@
     "test:e2e": "node tests/e2e-approval-flow.test.js",
     "test:messaging": "node tests/messaging.test.js",
     "test:cms": "node tests/cms-content.test.js",
+    "test:contact": "node tests/contact-offices.test.js",
     "lint": "eslint src/**/*.js",
     "lint:fix": "eslint src/**/*.js --fix",
     "pm2:start": "pm2 start pm2.config.js",
@@ -21,7 +22,12 @@
     "pm2:restart": "pm2 restart activ-backend",
     "pm2:logs": "pm2 logs activ-backend",
     "test:forms": "node tests/registration-forms.test.js",
-    "test:whatsapp": "node tests/whatsapp-templates.test.js"
+    "test:whatsapp": "node tests/whatsapp-templates.test.js",
+    "test:membership-messages": "node tests/membership-messages.test.js",
+    "test:plans": "node tests/membership-plans.test.js",
+    "test:members": "node tests/members-state.test.js",
+    "test:donations": "node tests/donations.test.js",
+    "test:my-events": "node tests/my-event-registrations.test.js"
   },
   "keywords": [
     "activ",
@@ -31,6 +37,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1140.0",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^2.4.3",
@@ -47,7 +54,9 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.7",
+    "qrcode": "^1.5.4",
     "redis": "^4.6.10",
+    "sharp": "^0.33.5",
     "winston": "^3.11.0"
   },
   "devDependencies": {

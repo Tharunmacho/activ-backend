@@ -17,6 +17,7 @@ const { memberSnapshot } = require('../common/memberContext');
 const regionService = require('../regions/region.service');
 const auditService = require('../audit/audit.service');
 const notificationService = require('../notifications/notification.service');
+const membershipContext = require('../notifications/membershipContext');
 
 /**
  * The approval state machine, keyed by *normalized* status.
@@ -102,14 +103,28 @@ class ApplicationService {
 
         const appData = applicationData.data || applicationData;
         const bizInfo = appData.businessInfo || {};
-        const isAspirant =
-            bizInfo.doingBusiness === false ||
-            appData.registrationType === 'aspirant' ||
-            appData.memberType === 'aspirant' ||
-            applicationData.registrationType === 'aspirant' ||
-            applicationData.memberType === 'aspirant';
+        const declares = (value) => [
+            appData.registrationType, appData.memberType,
+            applicationData.registrationType, applicationData.memberType
+        ].some((v) => String(v || '').toLowerCase() === value);
 
-        const derivedRole = isAspirant ? 'aspirant' : (bizInfo.doingBusiness ? 'business' : 'member');
+        /*
+         * A STUDENT is the second non-business kind, with its own fee. Named by
+         * the client, or already recorded on the member's own business record
+         * (the Business step writes it there) — so a client that only sends
+         * "aspirant" cannot turn a declared student back into one.
+         */
+        const storedBusiness = await BusinessInfo.findOne({ userId }).lean().catch(() => null);
+        const isStudent = declares('student')
+            || (bizInfo.doingBusiness === false && String(bizInfo.registrationType || '').toLowerCase() === 'student')
+            || (!!storedBusiness && storedBusiness.doingBusiness === false && storedBusiness.registrationType === 'student'
+                && bizInfo.doingBusiness !== true && !declares('business'));
+        const isAspirant = !isStudent && (
+            bizInfo.doingBusiness === false ||
+            declares('aspirant'));
+        const kind = isStudent ? 'student' : (isAspirant ? 'aspirant' : 'business');
+
+        const derivedRole = isStudent ? 'student' : (isAspirant ? 'aspirant' : (bizInfo.doingBusiness ? 'business' : 'member'));
 
         const payload = {
             fullName: applicationData.fullName || (userDetails && (userDetails.fullName || userDetails.name)) || 'Applicant',
@@ -126,9 +141,10 @@ class ApplicationService {
             block: applicationData.block || (userDetails && userDetails.block) || '',
             data: appData,
             role: derivedRole,
-            memberType: isAspirant ? 'aspirant' : 'business',
-            registrationType: isAspirant ? 'aspirant' : 'business',
-            ...applicationData
+            ...applicationData,
+            // After the spread: the derived kind wins over a client's older label.
+            memberType: kind,
+            registrationType: kind
         };
 
         // The last gate before an application exists. The registration screen only
@@ -207,20 +223,6 @@ class ApplicationService {
         await this.logActivity(userId, 'application_submitted', 'Application', application._id,
             'Membership application submitted');
 
-        notificationService.dispatchInBackground('APPLICATION_SUBMITTED', {
-            id: userId,
-            name: application.fullName,
-            email: application.email,
-            phone: application.phone,
-            whatsapp: application.phone,
-            state: application.state,
-            district: application.district,
-            block: application.block
-        }, {
-            application,
-            reference: String(application._id || '').slice(-6).toUpperCase()
-        });
-
         /*
          * Record what the applicant is, on the profile that describes them.
          *
@@ -257,8 +259,8 @@ class ApplicationService {
                  * The declared type has two fields of its own, below, and both
                  * clients already read them.
                  */
-                userDetails.memberType = isAspirant ? 'aspirant' : 'business';
-                userDetails.registrationType = isAspirant ? 'aspirant' : 'business';
+                userDetails.memberType = kind;
+                userDetails.registrationType = kind;
                 await userDetails.save();
             }
         } catch (updateErr) {
@@ -291,23 +293,14 @@ class ApplicationService {
          * the applicant can answer this email and reach the person now holding
          * their file, rather than a no-reply mailbox.
          *
-         * Not awaited: `dispatchInBackground` cannot throw, and three network
-         * calls have no business sitting between an applicant pressing Submit
-         * and seeing their confirmation. The submission is already saved.
+         * Not awaited: `announceSubmission` cannot throw, and its network calls
+         * have no business sitting between an applicant pressing Submit and
+         * seeing their confirmation. The submission is already saved.
+         *
+         * SENT ONCE. This dispatch used to appear twice in this method, so every
+         * applicant received two identical emails and two WhatsApp messages.
          */
-        notificationService.dispatchInBackground('APPLICATION_SUBMITTED', {
-            id: userId,
-            name: application.fullName,
-            email: application.email,
-            phone: application.phone,
-            state: application.state,
-            district: application.district,
-            block: application.block
-        }, {
-            application,
-            reference: String(application._id).slice(-6).toUpperCase(),
-            data: { applicationId: String(application._id) }
-        });
+        this.announceSubmission(application, userDetails).catch(() => null);
 
         logger.info('Application submitted', {
             applicationId: application._id,
@@ -1161,7 +1154,10 @@ class ApplicationService {
                     {
                         userId: application.userId,
                         doingBusiness: businessInfo.doingBusiness === true,
-                        registrationType: businessInfo.doingBusiness ? 'business' : 'aspirant',
+                        registrationType: businessInfo.doingBusiness
+                            ? 'business'
+                            : ([application.registrationType, application.memberType, businessInfo.registrationType]
+                                .some((v) => String(v || '').toLowerCase() === 'student') ? 'student' : 'aspirant'),
                         organizationName: businessInfo.organizationName,
                         constitutionType: businessInfo.constitutionType,
                         businessTypes: businessInfo.businessTypes || [],
@@ -1292,95 +1288,177 @@ class ApplicationService {
         // each review outcome because every one of them already funnels through
         // this method — one place to keep correct instead of several that can
         // drift apart.
-        await this.notifyApplicant(application, tier, action, extra);
+        //
+        // NOT AWAITED. It sends an email and a WhatsApp message, and the admin
+        // pressing Approve had to wait for both before their screen answered.
+        // `notifyApplicant` cannot throw; the decision is already saved.
+        this.notifyApplicant(application, tier, action, extra).catch(() => null);
     }
 
     /**
-     * Tell the applicant what just happened to their file.
+     * Tell the applicant what just happened to their file — and ONLY what the
+     * review model says happened (CLAUDE.md, "three verdicts, one outcome").
      *
-     * Deliberately vague about *who* decided: an applicant is told their
-     * application moved on, not which named admin at which tier signed it off.
-     * A rejection carries the reason, because that is the one thing they can act
-     * on.
+     *   State / Super approves  -> APPLICATION_APPROVED: approved, ready for
+     *                              payment, with the plan and fee THEY will pay
+     *   State / Super rejects   -> CORRECTION_REQUESTED, with the reason
+     *   Block / District approves, outcome still open
+     *                           -> APPLICATION_ENDORSED: "your Block Admin
+     *                              approved — the State Admin decides"
+     *   Block / District rejects -> nothing to the applicant
      *
-     * Never throws — `safeCreate` swallows and logs. An approval that succeeded
-     * must not report failure because the notification could not be written; the
-     * status transition has already been saved and, for a final approval, is
-     * terminal and unrepeatable.
+     * The last line is the fix. Every rejection used to send "your application
+     * was not approved", including a Block's or District's — which is an
+     * OBJECTION recorded for the State, not a decision. The State can and does
+     * approve over one, so the applicant was being told they had been refused
+     * ahead of a decision that could still go their way.
+     *
+     * Every message carries the whole journey card (each tier's verdict as it
+     * stands now), so it is right however the three reviews interleave.
+     *
+     * Never throws: `dispatchLifecycleEvent` cannot, and the context lookups
+     * resolve rather than reject.
      */
     async notifyApplicant(application, tier, action, extra = {}) {
-        const recipient = application?.userId;
-        if (!recipient) return;
+        try {
+            const recipient = application?.userId;
+            if (!recipient) return;
 
-        const status = normalizeStatus(application?.status);
+            const status = normalizeStatus(application?.status);
+            const decides = tierReviews.decidesOutcome(tier);
 
-        /*
-         * One recipient description, built once.
-         *
-         * The region fields are what the dispatcher resolves the applicant's own
-         * Block/District/State admin from, so the email they receive can be
-         * replied to and land in that admin's real inbox. Passing `application`
-         * alongside them lets the resolver fall back to the copies inside
-         * `data.personalDetails` on legacy rows, where the top-level fields are
-         * empty — without that, an older application resolves to no region at
-         * all and every reply goes to the support desk instead.
-         */
-        const to = {
-            id: recipient,
-            name: application.fullName,
-            email: application.email,
-            phone: application.phone,
-            state: application.state,
-            district: application.district,
-            block: application.block
-        };
-
-        const reference = String(application._id || '').slice(-6).toUpperCase();
-        const TIER_LABEL = {
-            block: `${application.block || 'Block'} Block`,
-            district: `${application.district || 'District'} District`,
-            state: `${application.state || 'State'} State`,
-            super: 'ACTIV Head Office'
-        };
-
-        if (action === 'reject') {
-            const reason = String(extra.reason || application?.rejectionReason || '').trim();
-            await notificationService.dispatchLifecycleEvent('CORRECTION_REQUESTED', to, {
-                application,
-                reference,
-                reason,
-                tierLabel: TIER_LABEL[tier] || `${application.block || 'Block'} Block`,
-                data: { applicationId: String(application._id || ''), tier, reason }
-            });
-            return;
-        }
-
-        // Final approval is the one the applicant has been waiting for, and it
-        // carries the next step — approval does not yet mean an active
-        // membership, payment does.
-        if (status === 'Approved') {
-            await notificationService.dispatchLifecycleEvent('APPLICATION_APPROVED', to, {
-                application,
-                reference,
+            /*
+             * The region fields are what the dispatcher resolves the applicant's
+             * own office from, so the email can be replied to and land in that
+             * admin's real inbox; `application` rides along so legacy rows with
+             * their region only inside `data` still resolve.
+             */
+            const to = {
+                id: recipient,
+                name: application.fullName,
+                email: application.email,
+                phone: application.phone,
                 state: application.state,
-                data: { applicationId: String(application._id || '') }
-            });
-            return;
-        }
+                district: application.district,
+                block: application.block
+            };
 
-        /*
-         * THERE IS NO STAGE CHANGE LEFT TO ANNOUNCE.
-         *
-         * `STAGE_CHANGED` told an applicant their file had cleared one tier and
-         * moved to the next — "cleared the Block review, now with your District
-         * Admin". With one decision ending the review, an approval IS the final
-         * approval and was sent above; nothing else can reach this line except a
-         * file somebody left pending, which is not an event.
-         *
-         * Sending a stage message anyway would be worse than sending nothing: it
-         * would tell an applicant whose membership has just been granted that
-         * their application had been passed to somebody else.
-         */
+            const base = await membershipContext.forApplication(application);
+            const office = (t) => (t === 'super' ? 'ACTIV Head Office' : base[`${t}Office`] || 'State Admin');
+            const decided = (application.reviews || {})[decides ? tierReviews.DECIDING_TIER : tier] || {};
+            const common = {
+                ...base,
+                application,
+                decidedBy: office(tier),
+                decidedLabel: membershipContext.dateLabel(decided.decidedAt || new Date()),
+                data: { applicationId: String(application._id || ''), tier }
+            };
+
+            if (!decides) {
+                // An objection is the State's to weigh, not the applicant's news.
+                if (action !== 'approve') return;
+                // The outcome is already settled — nothing left to announce.
+                if (status !== 'Pending') return;
+                // A higher tier already approved for itself: the applicant has
+                // already heard better news than this.
+                const above = tierReviews.TIER_ORDER.slice(tierReviews.TIER_ORDER.indexOf(tier) + 1);
+                if (above.some((t) => tierReviews.hasOwnVerdict(application, t)
+                    && tierReviews.tierVerdict(application, t).decision === 'approved')) return;
+
+                await notificationService.dispatchLifecycleEvent('APPLICATION_ENDORSED', to, {
+                    ...common,
+                    endorsedBy: office(tier),
+                    endorsedTierLabel: tier === 'district' ? 'District' : 'Block'
+                });
+                return;
+            }
+
+            if (action === 'reject') {
+                const reason = String(extra.reason || application?.rejectionReason || '').trim();
+                await notificationService.dispatchLifecycleEvent('CORRECTION_REQUESTED', to, {
+                    ...common,
+                    reason,
+                    data: { ...common.data, reason }
+                });
+                return;
+            }
+
+            if (status === 'Approved') {
+                const plan = await membershipContext.planFor(application, base.business);
+                await notificationService.dispatchLifecycleEvent('APPLICATION_APPROVED', to, {
+                    ...common,
+                    ...plan,
+                    stage: 'approved'
+                });
+            }
+        } catch (error) {
+            logger.warn('Applicant notification not sent', {
+                applicationId: String(application?._id || ''), tier, action, error: error && error.message
+            });
+        }
+    }
+
+    /**
+     * A new application: the applicant's receipt, and an alert to every admin
+     * whose region it falls in — Block, District and State, since all three
+     * review at once. Admins had to open their dashboard to find new work.
+     *
+     * Capped at ten admins (a region never has more; a misconfigured roster
+     * must not become a mail storm) and switchable off with
+     * `ADMIN_NEW_APPLICATION_ALERTS=false`. Never throws.
+     */
+    async announceSubmission(application, userDetails = null) {
+        try {
+            const base = await membershipContext.forApplication(application);
+
+            await notificationService.dispatchLifecycleEvent('APPLICATION_SUBMITTED', {
+                id: application.userId,
+                name: application.fullName,
+                email: application.email,
+                phone: (userDetails && userDetails.whatsappNumber) || application.phone,
+                state: application.state,
+                district: application.district,
+                block: application.block
+            }, {
+                ...base,
+                application,
+                data: { applicationId: String(application._id) }
+            });
+
+            if (String(process.env.ADMIN_NEW_APPLICATION_ALERTS || 'true').toLowerCase() === 'false') return;
+
+            const regionalContacts = require('../notifications/regionalContacts.service');
+            const byTier = await regionalContacts.adminsForRegion(base.region);
+            const admins = tierReviews.TIER_ORDER
+                .flatMap((tier) => (byTier[tier] || []).map((admin) => ({ tier, admin })))
+                .slice(0, 10);
+
+            for (const { tier, admin } of admins) {
+                const adminRegion = [admin.block, admin.district, admin.state].filter(Boolean).join(', ');
+                notificationService.dispatchInBackground('ADMIN_NEW_APPLICATION', {
+                    name: admin.fullName || `${regionalContacts.TIER_LABEL[tier]} Admin`,
+                    // Block admin addresses are sign-in ids, not mailboxes: they get
+                    // WhatsApp and the bell, never email. District/State are real inboxes.
+                    email: tier === 'block' ? '' : admin.email,
+                    phone: admin.phoneNumber
+                }, {
+                    ...base,
+                    noRegionalContact: true,
+                    applicantName: application.fullName,
+                    applicantEmail: application.email,
+                    applicantPhone: application.phone,
+                    applicantRegion: base.regionLabel,
+                    adminRegion,
+                    adminTierLabel: regionalContacts.TIER_LABEL[tier],
+                    adminDecides: tier === tierReviews.DECIDING_TIER,
+                    reviewPath: `/${tier}-admin/approvals`
+                });
+            }
+        } catch (error) {
+            logger.warn('Submission announcement not sent', {
+                applicationId: String(application?._id || ''), error: error && error.message
+            });
+        }
     }
 
     /**

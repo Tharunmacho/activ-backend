@@ -205,7 +205,17 @@ const listPlans = asyncHandler(async(req, res) => {
     // answers with the plans the platform shipped rather than with nothing.
     await membershipPlanService.listActive().catch(() => []);
 
-    const plans = await MembershipPlan.find({ isActive: { $ne: false } })
+    /*
+     * PLATINUM ONLY ON REQUEST. It is granted at the office, never bought, and
+     * the released mobile app lists every row here with a Pay button — so it
+     * is left out unless the caller asks (`?include=platinum`, the website's
+     * Platinum offer card, which shows it as information).
+     */
+    const withPlatinum = String(req.query.include || '').split(',').includes('platinum');
+    const plans = await MembershipPlan.find({
+        isActive: { $ne: false },
+        ...(withPlatinum ? {} : { audience: { $ne: 'platinum' } }),
+    })
         .sort({ displayOrder: 1, amountPaise: 1 })
         .lean()
         .catch(() => []);
@@ -255,18 +265,18 @@ const listMyPlans = asyncHandler(async(req, res) => {
      */
     const business = await BusinessInfo.findOne({ userId: String(userId) }).lean().catch(() => null);
 
-    const declaredAspirant = business
-        ? business.doingBusiness === false
-        : true;
+    // Business, or one of the two non-business kinds — a student has its own fee.
+    const kind = !business
+        ? 'aspirant'
+        : business.doingBusiness === false
+            ? (business.registrationType === 'student' ? 'student' : 'aspirant')
+            : 'business';
 
     const commencementYear = business
         ? (business.businessCommencementYear || business.commencementYear || '')
         : '';
 
-    const resolved = await membershipPlanService.resolveForMember({
-        commencementYear,
-        isAspirant: declaredAspirant
-    });
+    const resolved = await membershipPlanService.resolveForMember({ commencementYear, kind });
 
     res.json(ApiResponse.success(resolved));
 });
@@ -495,6 +505,27 @@ const getCertificate = asyncHandler(async(req, res) => {
 
     const issuedAt = new Date();
 
+    /*
+     * THE FACTS THE CERTIFICATE DESIGNS PRINT, read from where they are stored:
+     * PAN / GSTIN / Udyam on the financial form, the company and its line of
+     * business on the business form, and the membership payments themselves on
+     * the paid orders. Every one is `''` when not on record — never guessed.
+     */
+    const MemberFinancialInfo = require('./memberfinancialinfo.model');
+    const PaymentOrder = require('../payment/paymentorder.model');
+    const id = String(owner);
+    const [financial, business, orders] = await Promise.all([
+        MemberFinancialInfo.findOne({ $or: [{ memberId: id }, { userId: id }] }).lean().catch(() => null),
+        BusinessInfo.findOne({ userId: id }).lean().catch(() => null),
+        mongoose.Types.ObjectId.isValid(id)
+            ? PaymentOrder.find({ memberId: id, status: 'paid', orderType: 'membership' })
+                .sort({ paidAt: 1 }).limit(12).lean().catch(() => [])
+            : [],
+    ]);
+    const clean = (v) => String(v === null || v === undefined ? '' : v).trim();
+    const MODE = { upi: 'UPI', card: 'Card', netbanking: 'Net banking', wallet: 'Wallet', neft: 'NEFT', cash: 'Cash', cheque: 'Cheque' };
+    const modeOf = (m) => MODE[clean(m).toLowerCase()] || (clean(m) ? clean(m).replace(/\b\w/g, (c) => c.toUpperCase()) : 'Online');
+
     res.json(ApiResponse.success({
         kind,
         title: spec.title,
@@ -510,9 +541,18 @@ const getCertificate = asyncHandler(async(req, res) => {
             isInternational: member.isInternational === true,
             place: member.place || '',
             country: member.country || '',
+            /** The member's own PAN — the donor PAN on the tax certificate. */
+            pan: clean(financial && financial.panNumber).toUpperCase(),
+            /** The membership certificate's company block. */
+            companyName: clean(business && business.organizationName),
+            businessSector: clean(business && business.businessActivities),
+            udyamNumber: clean(financial && financial.udyamNumber).toUpperCase(),
+            gstNumber: clean(financial && financial.gstNumber).toUpperCase(),
         },
         /** `annual` | `lifetime` | `''`. The client words it. */
         membershipType: type === 'annual' || type === 'lifetime' ? type : '',
+        // 'platinum' for a lifetime membership the Super Admin granted; 'standard' otherwise.
+        membershipTier: member.membershipTier === 'platinum' ? 'platinum' : 'standard',
         memberSince: member.approvedAt || member.createdAt || null,
         activatedAt,
         /**
@@ -551,6 +591,17 @@ const getCertificate = asyncHandler(async(req, res) => {
                 amount: typeof member.paymentAmount === 'number' ? member.paymentAmount : null,
                 reference: member.paymentId || '',
                 receivedOn: member.lastPaymentDate || member.membershipActivatedAt || null,
+                /*
+                 * The payment-details table: each paid membership order, oldest
+                 * first. Empty when the payment predates orders (the Instamojo
+                 * link path) — the client then prints the single contribution.
+                 */
+                payments: (orders || []).map((o) => ({
+                    date: o.paidAt || o.updatedAt || null,
+                    amount: typeof o.amount === 'number' ? o.amount : null,
+                    mode: modeOf(o.paymentMethod),
+                    reference: clean(o.gatewayPaymentId || o.orderId),
+                })),
             }
             : null,
         /*
@@ -564,7 +615,9 @@ const getCertificate = asyncHandler(async(req, res) => {
         reference: [
             'ACTIV',
             kind === 'membership' ? 'MEM' : 'TAX',
-            membershipNumberFor(member),
+            // `ACTIV-2026-001` -> `2026-001`, so the reference reads
+            // ACTIV-MEM-2026-001-20260929 rather than ACTIV-MEM-ACTIV-….
+            String(membershipNumberFor(member) || '').replace(/^ACTIV-/i, ''),
             issuedAt.toISOString().slice(0, 10).replace(/-/g, ''),
         ].join('-'),
         // Stamped at read time rather than stored: the certificate is generated

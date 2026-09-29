@@ -484,5 +484,30 @@ test('a malformed row does not throw', () => {
     assert.strictEqual(classifyForLevel({}, LEVELS.BLOCK), 'pending');
 });
 
+/* ---- an admin with no region of their own sees NOTHING, never everything ---- */
+const { ownRegionMissing } = require('../src/modules/admin/superadmin.service');
+
+test('a state admin with no state is a missing scope', () => {
+    assert.strictEqual(ownRegionMissing({ role: 'state_admin', state: '' }), true);
+    assert.strictEqual(ownRegionMissing({ role: 'state_admin', state: '  ' }), true);
+    assert.strictEqual(ownRegionMissing({ role: 'state_admin', state: 'Tamil Nadu' }), false);
+});
+
+test('a district admin needs a district — a state alone is not enough', () => {
+    assert.strictEqual(ownRegionMissing({ role: 'district_admin', state: 'Tamil Nadu', district: '' }), true);
+    assert.strictEqual(ownRegionMissing({ role: 'district_admin', state: 'Tamil Nadu', district: 'Ariyalur' }), false);
+});
+
+test('a block admin needs a block', () => {
+    assert.strictEqual(ownRegionMissing({ role: 'block_admin', district: 'Ariyalur', block: '' }), true);
+    assert.strictEqual(ownRegionMissing({ role: 'block_admin', block: 'Guindy' }), false);
+});
+
+test('the super admin is never missing a scope; an unknown role always is', () => {
+    assert.strictEqual(ownRegionMissing({ role: 'super_admin' }), false);
+    assert.strictEqual(ownRegionMissing({ role: 'events_admin' }), true);
+    assert.strictEqual(ownRegionMissing({}), true);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

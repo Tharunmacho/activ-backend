@@ -41,6 +41,19 @@ router.put('/super/membership/plans/:key', requireRole('super_admin'), controlle
 router.post('/super/membership/plans/:key/retire', requireRole('super_admin'), controller.retireMembershipPlan);
 router.delete('/super/membership/plans/:key', requireRole('super_admin'), controller.deleteMembershipPlan);
 
+/*
+ * PLATINUM — the lifetime tier, paid at the office and GRANTED here, never
+ * bought online. See `members/platinum.service`. `/search` before `/:memberId`.
+ */
+const platinum = require('../members/platinum.controller');
+router.get('/super/membership/platinum', requireRole('super_admin'), platinum.overview);
+router.get('/super/membership/platinum/search', requireRole('super_admin'), platinum.search);
+router.get('/super/membership/platinum/requests', requireRole('super_admin'), platinum.listRequests);
+router.get('/super/membership/platinum/requests/:id', requireRole('super_admin'), platinum.requestDetail);
+router.patch('/super/membership/platinum/requests/:id', requireRole('super_admin'), platinum.updateRequest);
+router.post('/super/membership/platinum/:memberId', requireRole('super_admin'), platinum.grant);
+router.delete('/super/membership/platinum/:memberId', requireRole('super_admin'), platinum.revoke);
+
 // Declared before '/super/admins/:id' — Express matches in order, and a literal
 // segment registered after a parameterised one is never reached.
 router.get('/super/admins/regions', requireRole('super_admin'), controller.suggestAdminRegions);
@@ -70,6 +83,8 @@ const TEAM_ROLES = ['super_admin', 'state_admin', 'district_admin'];
 
 router.get('/team/directory', requireRole(...TEAM_ROLES), controller.getDirectory);
 router.get('/team/applications', requireRole(...TEAM_ROLES), controller.getSuperApplications);
+// The Hub's top figures, narrowed to the caller's patch (Super Admin: everything).
+router.get('/team/overview', requireRole(...TEAM_ROLES), controller.getTeamOverview);
 
 /*
  * STAFFING IS THE SUPER ADMIN'S, AND ONLY THE SUPER ADMIN'S.
@@ -90,6 +105,18 @@ router.get('/team/applications', requireRole(...TEAM_ROLES), controller.getSuper
 // Common Stats & User Management
 router.get('/stats', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.getDashboardStats);
 router.get('/users', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), controller.getUsers);
+
+/*
+ * MEMBERS — paid (Active), lapsed (Expired), approved-not-paid (Awaiting). Every
+ * tier reads its own region; the renewal-reminder switch and "send now" are the
+ * State Admin's (and the Super Admin's) alone. See `adminMembers.service`.
+ * `/remind-expired` before `/:id/...`.
+ */
+const adminMembers = require('./adminMembers.controller');
+router.get('/members', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), adminMembers.list);
+router.post('/members/remind-expired', requireRole('state_admin', 'super_admin'), adminMembers.remindAllExpired);
+router.patch('/members/:id/reminders', requireRole('state_admin', 'super_admin'), adminMembers.setReminders);
+router.post('/members/:id/remind', requireRole('state_admin', 'super_admin'), adminMembers.remindNow);
 router.patch('/users/:id/role', requireRole('super_admin'), controller.updateUserRole);
 router.patch('/users/:id/toggle-status', requireRole('super_admin'), controller.toggleUserStatus);
 

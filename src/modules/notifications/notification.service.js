@@ -191,7 +191,14 @@ class NotificationService {
              */
             let contact = null;
             try {
-                contact = payload.application
+                /*
+                 * `noRegionalContact`: a message TO an admin (a new file in their
+                 * queue). Routing its replies to the applicant's regional office —
+                 * which may be that same admin — would be a loop; it goes to the
+                 * support desk instead.
+                 */
+                if (payload.noRegionalContact) contact = null;
+                else contact = payload.application
                     ? await regionalContacts.resolveForApplication(payload.application)
                     : await regionalContacts.resolveForRegion({
                         state: recipient.state,
@@ -214,6 +221,23 @@ class NotificationService {
                 state: recipient.state || (contact && contact.region.state) || '',
                 district: recipient.district || (contact && contact.region.district) || '',
                 block: recipient.block || (contact && contact.region.block) || '',
+                /*
+                 * The office this member can reach, for the "Need help?" block
+                 * every membership message ends with — the SAME office the
+                 * email's Reply-To and footer name, resolved once above, so the
+                 * WhatsApp message and the email cannot point at two people.
+                 */
+                /*
+                 * ONE admin supplies all three: the first tier (block, district,
+                 * state) whose admin has a phone on file. None has one -> all
+                 * three blank, and the template prints ACTIV's own office as a
+                 * set. Never a region's name beside another person's number.
+                 */
+                officeName: contact && contact.reachable
+                    ? `${[contact.reachable.regionName, contact.reachable.tierLabel].filter(Boolean).join(' ')} Admin`
+                    : '',
+                officePhone: (contact && contact.reachable && contact.reachable.phone) || '',
+                officeEmail: (contact && contact.reachable && contact.reachable.email) || '',
                 /*
                  * Free text from an admin, pre-escaped for the one template that
                  * drops it straight into markup. The raw value stays on `reason`
@@ -259,13 +283,41 @@ class NotificationService {
             /* ------------------------------------------------------ the email */
             if (rendered.email && email) {
                 jobs.push((async() => {
+                    /*
+                     * A QR TICKET, when the email asks for one (`ticketQr` = the
+                     * address it opens): drawn here, embedded inline as
+                     * `cid:ticket-qr` inside the booking-ID stub. A failure to
+                     * draw it only drops the code, never the email.
+                     */
+                    const inlineImages = [];
+                    let highlight = rendered.email.highlight;
+                    if (rendered.email.ticketQr && highlight) {
+                        try {
+                            const QRCode = require('qrcode');
+                            const content = await QRCode.toBuffer(String(rendered.email.ticketQr), {
+                                type: 'png', width: 336, margin: 1, errorCorrectionLevel: 'M',
+                                color: { dark: '#000000', light: '#ffffff' }
+                            });
+                            inlineImages.push({ cid: 'ticket-qr', filename: 'ticket-qr.png', content });
+                            highlight = { ...highlight, qrSrc: 'cid:ticket-qr' };
+                        } catch (qrError) {
+                            logger.warn('Ticket QR not drawn', { event: eventName, error: qrError && qrError.message });
+                        }
+                    }
+
                     const html = emailService.buildHtmlTemplate({
                         title: rendered.email.title,
                         recipientName: ctx.name,
                         preheader: rendered.email.preheader,
                         bodyHtml: rendered.email.bodyHtml,
                         actionButton: rendered.email.actionButton,
+                        secondaryButton: rendered.email.secondaryButton,
                         facts: rendered.email.facts,
+                        tone: rendered.email.tone,
+                        badge: rendered.email.badge,
+                        highlight,
+                        poster: rendered.email.poster,
+                        afterHtml: rendered.email.afterHtml,
                         contact
                     });
 
@@ -273,7 +325,9 @@ class NotificationService {
                         to: email,
                         subject: rendered.email.subject,
                         html,
-                        contact
+                        contact,
+                        inlineImages,
+                        files: rendered.email.fileAttachments || []
                     });
 
                     result.channels.email = sent;
@@ -307,7 +361,7 @@ class NotificationService {
             }
 
             /* --------------------------------------------------- the WhatsApp */
-            if (rendered.whatsapp && phone) {
+            if (rendered.whatsapp && rendered.whatsapp.template && phone) {
                 jobs.push((async() => {
                     /*
                      * BOTH ARE SENT, AND THE TEMPLATE'S OUTCOME IS THE OUTCOME.
@@ -345,13 +399,49 @@ class NotificationService {
                      * the day substitution starts working.
                      */
                     let sessionText = null;
-                    const sent = await whatsappTemplate.sendTemplateMessage(
+                    let sent = await whatsappTemplate.sendTemplateMessage(
                         phone,
                         rendered.whatsapp.template,
                         rendered.whatsapp.params,
                         'en',
-                        rendered.whatsapp.text
+                        rendered.whatsapp.text,
+                        // The poster, for a template created with an image
+                        // header. The generic fallback below has none.
+                        { headerImage: rendered.whatsapp.headerImage || '' }
                     );
+
+                    /*
+                     * A detailed template that Meta refused — still in review,
+                     * renamed, or its variable count changed — is retried ONCE
+                     * through the generic approved one the builder names as
+                     * `fallback`. The failure is kept on the result so the log
+                     * row still says the detailed template is broken.
+                     */
+                    /*
+                     * The fallback is a CHAIN (custom -> approved poster ->
+                     * generic), each step carrying its own poster header or
+                     * none. Walked until one is accepted.
+                     */
+                    let tried = rendered.whatsapp.template;
+                    let fb = rendered.whatsapp.fallback;
+                    const refused = [];
+                    while (!sent.success && fb && fb.template) {
+                        if (fb.template !== tried) {
+                            refused.push(`"${tried}": ${sent.error}`);
+                            logger.warn('WhatsApp template refused; trying the next one', {
+                                event: eventName, template: tried, next: fb.template, error: sent.error
+                            });
+                            sent = await whatsappTemplate.sendTemplateMessage(
+                                phone, fb.template, fb.params, 'en', rendered.whatsapp.text,
+                                { headerImage: fb.headerImage || '' }
+                            );
+                            tried = fb.template;
+                        }
+                        fb = fb.fallback;
+                    }
+                    if (sent.success && refused.length) {
+                        sent = { ...sent, error: `Sent on "${tried}" after ${refused.join('; ')}` };
+                    }
 
                     /*
                      * THE FREE TEXT IS A FALLBACK, NOT A SECOND COPY.
@@ -392,8 +482,8 @@ class NotificationService {
                         event: eventName,
                         channel: 'whatsapp',
                         recipient: sent.to || phone,
-                        templateId: rendered.whatsapp.template,
-                        subject: rendered.whatsapp.template,
+                        templateId: sent.template || rendered.whatsapp.template,
+                        subject: sent.template || rendered.whatsapp.template,
                         status: sent.success ? 'sent' : 'failed',
                         mock: !!sent.mock,
                         providerMessageId: sent.messageId,

@@ -78,7 +78,7 @@ const paymentOrderSchema = new mongoose.Schema({
     /** 'membership' or 'event_booking' */
     orderType: {
         type: String,
-        enum: ['membership', 'event_booking'],
+        enum: ['membership', 'event_booking', 'donation'],
         default: 'membership',
         required: true
     },
@@ -87,6 +87,12 @@ const paymentOrderSchema = new mongoose.Schema({
     eventId: {
         type: String,
         trim: true
+    },
+
+    /** The `donations` row if orderType is 'donation'. */
+    donationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        index: true
     },
 
     /** Booking Reference if orderType is 'event_booking' */
@@ -110,7 +116,9 @@ const paymentOrderSchema = new mongoose.Schema({
      */
     status: {
         type: String,
-        enum: ['created', 'paid', 'failed'],
+        // `cancelled`: an offline (Platinum) payment record voided when the
+        // Super Admin revokes the grant — kept, never deleted, as the receipt.
+        enum: ['created', 'paid', 'failed', 'cancelled'],
         default: 'created',
         index: true
     },

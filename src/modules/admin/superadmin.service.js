@@ -174,6 +174,23 @@ const assertManageable = (target = {}, scope = {}) => {
     }
 };
 
+/**
+ * Has this admin lost the region their OWN tier is defined by?
+ *
+ * A state admin with no state, a district admin with no district — a scope that
+ * could not be resolved. Every read must then answer NOTHING. Merging an empty
+ * region into a filter means "not narrowed", which is every applicant in the
+ * association: `/admin/team/applications` did exactly that for an account whose
+ * record carried no region. Fail closed. The super admin is never "missing".
+ */
+const ownRegionMissing = (scope = {}) => {
+    if (scope.role === 'super_admin') return false;
+    if (scope.role === 'state_admin') return !String(scope.state || '').trim();
+    if (scope.role === 'district_admin') return !String(scope.district || '').trim();
+    if (scope.role === 'block_admin') return !String(scope.block || '').trim();
+    return true; // any other role has no patch on these screens
+};
+
 const ROLE_LABELS = adminRepository.ROLE_LABELS;
 
 /*
@@ -346,16 +363,44 @@ class SuperAdminService {
         return cached(CACHE_KEYS.ADMIN_OVERVIEW, HUB_TTL_SECONDS, () => this.computeOverview());
     }
 
-    async computeOverview() {
-        const [totalMembers, applications, allAdmins] = await Promise.all([
+    /**
+     * THE SAME HUB FIGURES FOR A STATE OR DISTRICT ADMIN — their own patch.
+     *
+     * The Hub is one screen for all three (`/district-admin/hub`,
+     * `/state-admin/hub` mount it), but it asked `/super/overview`, which is
+     * Super Admin only: every tier admin got a 403, the page said "the overview
+     * could not be loaded" and printed four zeros. This answers the same shape,
+     * narrowed by the same anchored geofence the dashboards use. Not cached
+     * across admins — each patch is its own answer.
+     */
+    async getTeamOverview(actor = {}) {
+        const scope = await actorScope(actor);
+        if (scope.role === 'super_admin') return this.getOverview();
+        let filter = null;
+        if (scope.role === 'state_admin' && scope.state) filter = adminService.buildGeoFilter('state', scope.state);
+        else if (scope.role === 'district_admin' && scope.district) filter = adminService.buildGeoFilter('district', scope.district);
+        if (!filter) {
+            // No resolvable patch: an honest empty answer, never the whole country.
+            return this.computeOverview({ _id: null }, scope);
+        }
+        return this.computeOverview(filter, scope);
+    }
+
+    async computeOverview(appFilter = {}, scope = null) {
+        const [totalMembers, applications, allAdminsRaw] = await Promise.all([
             Member.countDocuments().catch(() => 0),
-            Application.find({})
+            Application.find(appFilter)
             .sort({ createdAt: -1 })
             .limit(GLOBAL_FETCH_LIMIT)
             .lean()
             .catch(() => []),
             this.allAdminRows()
         ]);
+        // A team admin's Hub counts the admins of their own patch only.
+        const allAdmins = scope && scope.role !== 'super_admin'
+            ? (allAdminsRaw || []).filter((doc) => sameRegion(doc.state, scope.state)
+                && (scope.role !== 'district_admin' || sameRegion(doc.district, scope.district)))
+            : allAdminsRaw;
 
         const counts = { pending: 0, approved: 0, rejected: 0 };
         /*
@@ -588,6 +633,15 @@ class SuperAdminService {
          * bookmark narrows to something they may see instead of erroring.
          */
         const scope = await actorScope(actor);
+        if (ownRegionMissing(scope)) {
+            const tierWord = String(scope.role || '').replace('_admin', '') || 'region';
+            return {
+                applicants: [],
+                pagination: { page: 1, limit: parseInt(filters.limit, 10) || 20, total: 0, pages: 0 },
+                scopeUnresolved: true,
+                message: `Your account has no ${tierWord} set — ask the Super Admin to add it in Manage Admins.`,
+            };
+        }
         if (scope.role === 'state_admin') filters = { ...filters, state: scope.state };
         if (scope.role === 'district_admin') filters = { ...filters, state: scope.state, district: scope.district };
 
@@ -1668,3 +1722,5 @@ class SuperAdminService {
 module.exports = new SuperAdminService();
 module.exports.MANAGEABLE_ROLES = MANAGEABLE_ROLES;
 module.exports.BOTTLENECK_DAYS = BOTTLENECK_DAYS;
+// Exported for tests: the fail-closed rule for an admin with no region of their own.
+module.exports.ownRegionMissing = ownRegionMissing;

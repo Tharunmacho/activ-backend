@@ -313,31 +313,44 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
     const memberCode = firstOf(application.memberCode, member.memberCode);
 
     // Derived from what the applicant actually declared, not guessed.
-    const isAspirantUser =
-        (business.doingBusiness === false || data.doingBusiness === false) &&
-        !doingBusiness &&
-        (data.registrationType === 'aspirant' || data.memberType === 'aspirant' || application.registrationType === 'aspirant' || application.memberType === 'aspirant');
+    const declaredAs = (value) => [data.registrationType, data.memberType, application.registrationType,
+        application.memberType, business.registrationType].some((v) => String(v || '').toLowerCase() === value);
+    const notTrading = (business.doingBusiness === false || data.doingBusiness === false) && !doingBusiness;
+
+    // A student is the second non-business kind, with its own fee.
+    const isStudentUser = !doingBusiness && declaredAs('student');
+    const isAspirantUser = !isStudentUser && notTrading && declaredAs('aspirant');
 
     let derivedRole = 'Member';
-    if (isAspirantUser) {
+    if (isStudentUser) {
+        derivedRole = 'Student';
+    } else if (isAspirantUser) {
         derivedRole = 'Aspirant';
     } else if (doingBusiness) {
         derivedRole = 'Business Member';
     }
 
-    const finalRole = isAspirantUser ? 'Aspirant' : (derivedRole !== 'Member' ? derivedRole : firstOf(application.role, member.role, 'Business Member'));
+    const finalRole = isStudentUser ? 'Student'
+        : isAspirantUser ? 'Aspirant'
+            : (derivedRole !== 'Member' ? derivedRole : firstOf(application.role, member.role, 'Business Member'));
 
     return {
         id,
         applicationId: id,
         memberId: application.userId ? application.userId.toString() : (member._id ? member._id.toString() : ''),
         memberCode,
+        // The ASSIGNED year-wise Member ID (ACTIV-2026-001) — only once they have
+        // paid and been numbered. Never derived here: an applicant is not a member.
+        membershipNumber: String(member.membershipNumber || '').trim(),
         fullName: firstOf(application.fullName, personal.fullName, member.fullName),
         email: firstOf(application.email, personal.email, member.email),
+        // The photo the member uploaded — their own record first (it is the one
+        // Settings writes), the application's mirror as a fallback.
+        profilePhoto: firstOf(member.profilePhoto, application.profilePhoto, personal.profilePhoto),
         phone: firstOf(application.phone, personal.phoneNumber, personal.phone, member.phoneNumber),
         role: finalRole,
         /**
-         * `'business' | 'aspirant'`, from what the applicant declared.
+         * `'business' | 'aspirant' | 'student'`, from what the applicant declared.
          *
          * Both clients read `memberType` — the mobile applicant card renders it
          * as "Membership Type" and the website Members screens map it with
@@ -348,7 +361,7 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
          * Derived from the same `isAspirantUser` the role above uses, so the two
          * fields cannot disagree about the same applicant.
          */
-        memberType: isAspirantUser ? 'aspirant' : 'business',
+        memberType: isStudentUser ? 'student' : (isAspirantUser ? 'aspirant' : 'business'),
         /**
          * Whether the member's account is active — the real Boolean on their
          * "web users" record, which `userAction` toggles when an admin suspends

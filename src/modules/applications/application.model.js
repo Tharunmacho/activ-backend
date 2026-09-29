@@ -112,12 +112,12 @@ const applicationSchema = new mongoose.Schema({
      */
     memberType: {
         type: String,
-        enum: ['aspirant', 'business'],
+        enum: ['aspirant', 'business', 'student'],
         trim: true
     },
     registrationType: {
         type: String,
-        enum: ['aspirant', 'business'],
+        enum: ['aspirant', 'business', 'student'],
         trim: true
     },
     /** The role the applicant is granted on approval. */

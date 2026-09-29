@@ -1,3 +1,4 @@
+const { resolveEventId } = require('../events/eventSlug');
 const cmsService = require('./cms.service');
 const regionPages = require('./cms.regionPages.service');
 const news = require('./cms.news.service');
@@ -81,6 +82,18 @@ const uploadMedia = asyncHandler(async(req, res) => {
     }, 'Uploaded'));
 });
 
+/** An event document (agenda, brochure …) — see `attachmentUpload` in cms.routes. */
+const uploadAttachment = asyncHandler(async(req, res) => {
+    if (!req.file) return res.status(400).json(ApiResponse.error('No file uploaded', 400));
+    res.status(201).json(ApiResponse.created({
+        url: `/uploads/${req.file.filename}`,
+        // The name the editor gave the file, which is what a reader recognises.
+        name: String(req.file.originalname || req.file.filename).slice(0, 160),
+        type: req.file.mimetype || '',
+        size: req.file.size,
+    }, 'Uploaded'));
+});
+
 // ---------------------------------------------------------------- about
 
 const getAbout = asyncHandler(async(req, res) => {
@@ -106,12 +119,22 @@ const updateAbout = asyncHandler(async(req, res) => {
 const canSeeDrafts = (req) =>
     !!(req.user && ['super_admin', 'cms_admin'].includes(req.user.role));
 
+/**
+ * Events and the gallery: the content editors, plus the EVENTS ADMIN, whose
+ * portal is the programme, the gallery, the news and the schemes. Kept apart
+ * from `canSeeDrafts` so that role never sees a draft policy or region page.
+ * (News and schemes need nothing here — they show drafts to any signed-in
+ * reader already.)
+ */
+const canSeeEventDrafts = (req) =>
+    canSeeDrafts(req) || !!(req.user && req.user.role === 'events_admin');
+
 // ---------------------------------------------------------------- gallery
 
 const getGallery = asyncHandler(async(req, res) => {
     // Only a signed-in content admin may see hidden images; the public grid
     // must not be able to ask for them.
-    const includeHidden = canSeeDrafts(req) && String(req.query.includeHidden || '') === 'true';
+    const includeHidden = canSeeEventDrafts(req) && String(req.query.includeHidden || '') === 'true';
 
     // `?home=true` is the landing page's strip: only what an editor flagged for
     // it, newest first, without the long fields no card on that page reads.
@@ -129,7 +152,7 @@ const getGallery = asyncHandler(async(req, res) => {
  */
 const getGalleryItem = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(
-        await cmsService.getGalleryItem(req.params.id, { includeHidden: canSeeDrafts(req) }),
+        await cmsService.getGalleryItem(req.params.id, { includeHidden: canSeeEventDrafts(req) }),
     ));
 });
 
@@ -162,8 +185,15 @@ const getContactInfo = asyncHandler(async(req, res) => {
 });
 
 const updateContactInfo = asyncHandler(async(req, res) => {
-    const info = await cmsService.updateContactInfo(req.body || {}, req.user || {});
-    res.json(ApiResponse.success(info, 'Contact details updated'));
+    await cmsService.updateContactInfo(req.body || {}, req.user || {});
+    // The same shape the page reads (offices ordered, maps resolved), so the
+    // editor shows exactly what visitors will see.
+    res.json(ApiResponse.success(await cmsService.getContactInfo(), 'Contact details updated'));
+});
+
+/** A pasted map, resolved the way a save resolves it — the editor's live preview. */
+const previewContactMap = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await cmsService.previewContactMap(req.body || {})));
 });
 
 // ---------------------------------------------------------------- contact messages
@@ -179,6 +209,10 @@ const createContactMessage = asyncHandler(async(req, res) => {
     const result = await cmsService.createContactMessage(req.body || {}, {
         ip: req.ip,
         userAgent: req.get('user-agent') || '',
+        // WHERE IT CAME FROM is decided by the token, never the body: a member
+        // signed in on the dashboard is 'member_dashboard'; anyone else is the
+        // public contact form.
+        member: req.user && String(req.user.role || '') === 'member' ? req.user : null,
     });
 
     res.status(201).json(ApiResponse.created(result, 'Thanks — your message has been received.'));
@@ -249,7 +283,17 @@ const getEvents = asyncHandler(async(req, res) => {
      * The public caller is unchanged: no session, no drafts, and the onboarding
      * rule applied — see `listEvents`.
      */
-    const editor = canSeeDrafts(req);
+    /*
+     * `?scope=public` ASKS THE VISITOR'S QUESTION EVEN WITH A SESSION.
+     *
+     * The public pages send the admin's token like every other request, so a
+     * signed-in super admin browsing the home page was handed the EDITOR list
+     * — drafts and members-only events included — and the website's read
+     * cache then served that list to the public grid, and the public list to
+     * the editor, depending on which screen asked first. The pages that
+     * render what a visitor sees now say so explicitly.
+     */
+    const editor = canSeeEventDrafts(req) && String(req.query.scope || '') !== 'public';
     res.json(ApiResponse.success(await cmsService.listEvents({
         includeDrafts: editor,
         // The join link for an online event, which is not public — see
@@ -266,9 +310,9 @@ const getEvents = asyncHandler(async(req, res) => {
  * 404 to everyone but a super admin — exactly as it is absent from the list.
  */
 const getEvent = asyncHandler(async(req, res) => {
-    const editor = canSeeDrafts(req);
+    const editor = canSeeEventDrafts(req);
     res.json(ApiResponse.success(
-        await cmsService.listEvent(req.params.id, { includeDrafts: editor, privileged: editor }),
+        await cmsService.listEvent(await resolveEventId(req.params.id), { includeDrafts: editor, privileged: editor }),
     ));
 });
 
@@ -613,10 +657,10 @@ module.exports = {
     getSiteSettings, updateSiteSettings,
     getEventsSettings, updateEventsSettings,
     getGallerySettings, updateGallerySettings,
-    getHome, updateHome, uploadMedia,
+    getHome, updateHome, uploadMedia, uploadAttachment,
     getAbout, updateAbout,
     getGallery, getGalleryItem, addGalleryItem, updateGalleryItem, deleteGalleryItem,
-    getContactInfo, updateContactInfo,
+    getContactInfo, updateContactInfo, previewContactMap,
     createContactMessage, listContactMessages, setMessageStatus, deleteContactMessage,
     getLeaderMessagePurposes, createLeaderMessage,
     listLeaderMessages, updateLeaderMessage, deleteLeaderMessage,

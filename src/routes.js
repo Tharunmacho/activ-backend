@@ -17,6 +17,7 @@ const announcementRoutes = require('./modules/announcements/announcement.routes'
 const auditRoutes = require('./modules/audit/audit.routes');
 const regionRoutes = require('./modules/regions/region.routes');
 const cmsRoutes = require('./modules/cms/cms.routes');
+const { publicCache } = require('./core/middleware/publicCache');
 const paymentRoutes = require('./modules/payment/payment.routes');
 const webhookRoutes = require('./modules/payment/webhook.routes');
 const botbeeWebhookRoutes = require('./modules/notifications/botbeeWebhook.routes');
@@ -44,7 +45,7 @@ router.use('/auth', authRoutes);
 // at '/' and calls `router.use(verifyToken)` internally, which turns it into a
 // catch-all auth gate for every route registered after it. Mounted lower down,
 // these endpoints answer 401 and the registration dropdowns come back empty.
-router.use('/regions', regionRoutes);
+router.use('/regions', publicCache, regionRoutes);
 
 /**
  * Public site content (hero, about, gallery, events, contact).
@@ -55,7 +56,8 @@ router.use('/regions', regionRoutes);
  * after it. Below that line these would all answer 401 and the public site
  * would render empty.
  */
-router.use('/cms', cmsRoutes);
+// `publicCache`: anonymous reads answered from memory — see the middleware.
+router.use('/cms', publicCache, cmsRoutes);
 
 /**
  * Public event bookings — the "Book Now" flow.
@@ -100,6 +102,13 @@ router.use('/members', memberRoutes);
  */
 router.use('/browse-members', browseRouter);
 router.use('/companies', companyRouter);
+// A member asking for Platinum — `members/platinum.routes.js`. Before the
+// membership router so nothing there can capture `/platinum`.
+router.use('/membership/platinum', require('./modules/members/platinum.routes'));
+/* The anonymous plans listing is the same for every visitor: memory-cached like
+   the CMS reads (a signed-in `/plans/mine` carries a token and is never cached;
+   a Super Admin price edit is a write, which clears the cache). */
+router.use('/membership/plans', publicCache);
 router.use('/membership', membershipRouter);
 // Member-to-member direct messages. Above `businessRoutes` for the same reason
 // the three routers before it are — see the note there.
@@ -128,6 +137,39 @@ router.use('/messages', messageRoutes);
  */
 router.use('/webhook', webhookRoutes);
 
+/**
+ * ==========================================================================
+ * `/payment`, ALSO ABOVE THE GATE — because a GUEST can pay for a seat
+ * ==========================================================================
+ *
+ * `/event-bookings` is already up here (see the note above it) precisely so
+ * somebody with no ACTIV account can book. Checkout was left below, so the
+ * moment bookings started going through the gateway a guest hit 401 on
+ * `/payment/create-request` — after typing in every participant.
+ *
+ * SAFE, because every route in that file carries its own guard rather than
+ * leaning on this one: `/order`, `/order/:id`, `/complete`, `/mock-authorize`
+ * and `/status` are all `verifyToken`, `/renew` is `verifyToken` plus
+ * `super_admin`, and `/create-request` is `optionalAuth` with an explicit
+ * check that a MEMBERSHIP still needs an account. `/config` and `/plans` are
+ * public on purpose — a price list and "which checkout is live" are things a
+ * visitor is allowed to know.
+ *
+ * Checked route by route before moving it. A blanket gate is not a licence to
+ * leave individual routes unguarded, and this mount is the proof of that.
+ */
+router.use('/payment', paymentRoutes);
+
+/*
+ * DONATIONS — a donor has no account, so the public half is above the gate
+ * like `/event-bookings`. The Super Admin half carries its own
+ * verifyToken + super_admin (donation.routes.js), and is mounted here too so
+ * it is matched before `/admin`'s router.
+ */
+const { publicRouter: donationPublicRoutes, adminRouter: donationAdminRoutes } = require('./modules/donations/donation.routes');
+router.use('/donations', donationPublicRoutes);
+router.use('/admin/super/donations', donationAdminRoutes);
+
 router.use('/', businessRoutes);  // Business profile routes
 router.use('/products', productRoutes);  // Products routes
 router.use('/applications', applicationRoutes);
@@ -146,7 +188,7 @@ router.use('/events', eventRoutes);
  */
 router.use('/announcements', announcementRoutes);
 router.use('/audit', auditRoutes);
-router.use('/payment', paymentRoutes);
-/* `/webhook` is mounted ABOVE `businessRoutes` — see the note there. */
+/* `/payment` and `/webhook` are both mounted ABOVE `businessRoutes` — see
+   the notes there. */
 
 module.exports = router;

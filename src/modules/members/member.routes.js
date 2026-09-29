@@ -60,7 +60,8 @@ router.put('/profile', verifyToken, validators.updateMemberValidator, controller
  * which is silent from the client's side, since the upload is wrapped in a
  * try/catch that only warns. The controller takes whichever file arrived.
  */
-router.post('/profile-photo', verifyToken, upload.any(), controller.uploadProfilePhoto);
+// `upload.memberPhoto` writes into the member's own folder — see upload.js.
+router.post('/profile-photo', verifyToken, upload.memberPhoto.any(), controller.uploadProfilePhoto);
 
 /**
  * The path the shipped mobile app actually calls (`/members/:id/photo`). It was

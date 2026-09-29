@@ -77,7 +77,9 @@ const SEED_BANDS = {
     basic: { minYears: 0, maxYears: 5, order: 1 },
     intermediate: { minYears: 5, maxYears: 10, order: 2, popular: true },
     ideal: { minYears: 10, maxYears: null, order: 3 },
-    aspirant: { minYears: 0, maxYears: null, order: 4 }
+    aspirant: { minYears: 0, maxYears: null, order: 4 },
+    student: { minYears: 0, maxYears: null, order: 5 },
+    platinum: { minYears: 0, maxYears: null, order: 6 }
 };
 
 const SEED_FEATURES = {
@@ -100,7 +102,33 @@ const SEED_FEATURES = {
         'Association updates and event invitations',
         'Access to the member directory',
         'Guidance on starting a business'
+    ],
+    student: [
+        'Association updates and event invitations',
+        'Access to the member directory',
+        'Mentoring and guidance for students planning a business'
+    ],
+    platinum: [
+        'Lifetime membership — never renew',
+        'Platinum badge on your member dashboard',
+        'Every member benefit, for life',
+        'Priority invitations to ACTIV conclaves',
+        'Recognition as a Platinum member of ACTIV'
     ]
+};
+
+/** The four audiences a plan can serve. Anything else is read as business. */
+const AUDIENCES = ['business', 'aspirant', 'student', 'platinum'];
+const audienceOf = (value) => {
+    const a = str(value).toLowerCase();
+    return AUDIENCES.includes(a) ? a : 'business';
+};
+
+/** The three kinds of applicant a plan can be RESOLVED for. Platinum is granted, never resolved. */
+const kindOf = ({ kind, isAspirant } = {}) => {
+    const k = str(kind).toLowerCase();
+    if (k === 'student' || k === 'aspirant' || k === 'business') return k;
+    return isAspirant ? 'aspirant' : 'business';
 };
 
 /**
@@ -114,12 +142,25 @@ const SEED_FEATURES = {
  * the Super Admin has set: once a key exists here, the frozen table is dead to
  * it. That is what makes this safe to run on every read.
  */
+/*
+ * Once every built-in key is known to exist, this process never needs to ask
+ * again: seeding only INSERTS ABSENT keys, and plans are retired, never
+ * deleted. Asking on every read cost a whole extra Atlas round trip on
+ * `/membership/plans` and on every payment-price lookup.
+ */
+let seededThisProcess = false;
+
 const ensureSeeded = async() => {
+    if (seededThisProcess) return;
     const existing = await MembershipPlan.find({}, { key: 1 }).lean().catch(() => []);
     const known = new Set((existing || []).map((row) => str(row.key).toLowerCase()).filter(Boolean));
 
     const missing = Object.values(FROZEN).filter((plan) => !known.has(plan.id));
-    if (!missing.length) return;
+    if (!missing.length) {
+        // Only on a real answer: a failed read (`[]`) lists every key as missing.
+        if (existing && existing.length) seededThisProcess = true;
+        return;
+    }
 
     const docs = missing.map((plan) => {
         const band = SEED_BANDS[plan.id] || { minYears: 0, maxYears: null, order: 99 };
@@ -127,7 +168,7 @@ const ensureSeeded = async() => {
         return {
             key: plan.id,
             name: plan.name,
-            audience: plan.forBusiness ? 'business' : 'aspirant',
+            audience: plan.audience || (plan.forBusiness ? 'business' : 'aspirant'),
             memberType: plan.membershipType || 'annual',
             minYears: band.minYears,
             maxYears: band.maxYears,
@@ -158,7 +199,8 @@ const toPlan = (doc = {}) => ({
     name: doc.name || '',
     description: doc.tagline || '',
     price: rupees(doc.amountPaise),
-    audience: doc.audience === 'aspirant' ? 'aspirant' : 'business',
+    audience: audienceOf(doc.audience),
+    membershipType: doc.memberType === 'lifetime' ? 'lifetime' : 'annual',
     minYears: Number(doc.minYears || 0),
     maxYears: doc.maxYears === null || doc.maxYears === undefined ? null : Number(doc.maxYears),
     experience: bandLabel(doc),
@@ -169,7 +211,7 @@ const toPlan = (doc = {}) => ({
 });
 
 /**
- * "0 – 5 years", "10+ years", "Student / Aspirant".
+ * "0 – 5 years", "10+ years", "Aspirant", "Student", "Lifetime".
  *
  * Derived from the numbers rather than stored beside them, so a Super Admin who
  * moves a band cannot leave a label behind saying the old one. That is the
@@ -177,7 +219,9 @@ const toPlan = (doc = {}) => ({
  * time.
  */
 function bandLabel(doc = {}) {
-    if (doc.audience === 'aspirant') return 'Student / Aspirant';
+    if (doc.audience === 'aspirant') return 'Aspirant';
+    if (doc.audience === 'student') return 'Student';
+    if (doc.audience === 'platinum') return 'Lifetime';
 
     const min = Number(doc.minYears || 0);
     const max = doc.maxYears === null || doc.maxYears === undefined ? null : Number(doc.maxYears);
@@ -245,7 +289,7 @@ class MembershipPlanService {
     /**
      * The plans THIS applicant should be shown, and why.
      *
-     * `isAspirant` wins outright: someone who declared no business has no
+     * A non-business kind (`student` / `aspirant`, or legacy `isAspirant`) wins outright: someone who declared no business has no
      * commencement year, so no band can apply and the aspirant plan is the whole
      * answer.
      *
@@ -255,48 +299,9 @@ class MembershipPlanService {
      * the one outcome worth avoiding, and showing them the choice is honest
      * about the fact that the platform does not know.
      */
-    async resolveForMember({ commencementYear, isAspirant = false } = {}) {
+    async resolveForMember({ commencementYear, kind, isAspirant = false } = {}) {
         const [plans, settings] = await Promise.all([this.listActive(), this.getSettings()]);
-
-        const years = yearsTrading(commencementYear);
-        const audience = isAspirant ? 'aspirant' : 'business';
-        const forAudience = plans.filter((plan) => plan.audience === audience);
-
-        if (settings.showAllPlans) {
-            return {
-                plans: forAudience,
-                matched: null,
-                years,
-                reason: 'all',
-                showAllPlans: true
-            };
-        }
-
-        if (audience === 'aspirant') {
-            return {
-                plans: forAudience,
-                matched: forAudience[0] || null,
-                years: null,
-                reason: 'aspirant',
-                showAllPlans: false
-            };
-        }
-
-        const matched = forAudience.find((plan) => inBand(plan, years)) || null;
-
-        if (!matched) {
-            return {
-                plans: forAudience,
-                matched: null,
-                years,
-                // Named so the screen can say WHY it is showing a choice rather
-                // than one price: the year is missing, or no band covers it.
-                reason: years === null ? 'no-year' : 'no-band',
-                showAllPlans: false
-            };
-        }
-
-        return { plans: [matched], matched, years, reason: 'band', showAllPlans: false };
+        return resolvePlans(plans, settings, { commencementYear, kind: kindOf({ kind, isAspirant }) });
     }
 
     /**
@@ -320,6 +325,8 @@ class MembershipPlanService {
 
         if (!doc) {
             const frozen = FROZEN[key];
+            // Platinum is granted by the Super Admin for a fee received offline.
+            if (frozen && frozen.audience === 'platinum') return null;
             if (frozen) {
                 logger.warn(`Membership plan '${key}' is not in the database; using the built-in price`);
                 return { ...frozen };
@@ -328,13 +335,17 @@ class MembershipPlanService {
         }
 
         if (doc.isActive === false) return null;
+        // Never sold online — see the platinum note in the frozen table.
+        if (doc.audience === 'platinum') return null;
 
+        const audience = audienceOf(doc.audience);
         return {
             id: str(doc.key),
             name: doc.name || '',
             amount: rupees(doc.amountPaise),
-            membershipType: doc.memberType || 'annual',
-            forBusiness: doc.audience !== 'aspirant'
+            membershipType: doc.memberType === 'lifetime' ? 'lifetime' : 'annual',
+            audience,
+            forBusiness: audience === 'business'
         };
     }
 
@@ -364,6 +375,7 @@ class MembershipPlanService {
         const matches = [];
 
         for (const plan of active) {
+            if (plan.audience === 'platinum') continue;   // granted, never paid online
             /* Through `getPlanForPayment`, so this and the charge agree about
                what a plan costs — see the note on that method. */
             const priced = await this.getPlanForPayment(plan.key).catch(() => null);
@@ -400,7 +412,9 @@ class MembershipPlanService {
         }
 
         if (payload.audience !== undefined) {
-            update.audience = str(payload.audience) === 'aspirant' ? 'aspirant' : 'business';
+            update.audience = audienceOf(payload.audience);
+            // The lifetime tier is lifetime by definition; every other plan is a year.
+            update.memberType = update.audience === 'platinum' ? 'lifetime' : 'annual';
         }
 
         if (payload.minYears !== undefined) {
@@ -469,10 +483,13 @@ class MembershipPlanService {
         const proposed = await MembershipPlan.findOne({ key: id }).lean().catch(() => null);
         const merged = { ...(proposed || {}), ...update, key: id };
 
-        if ((merged.audience || 'business') !== 'aspirant' && merged.isActive !== false) {
+        if (audienceOf(merged.audience) === 'business' && merged.isActive !== false) {
+            /* Only company plans have bands. `$in` rather than `$ne: 'aspirant'`:
+               student and platinum rows have no band either, and a row with no
+               audience at all is a business row (the schema default). */
             const others = await MembershipPlan.find({
                 key: { $ne: id },
-                audience: { $ne: 'aspirant' },
+                audience: { $in: ['business', null] },
                 isActive: { $ne: false }
             }).lean().catch(() => []);
 
@@ -548,7 +565,7 @@ class MembershipPlanService {
      */
     async alignBands() {
         const rows = await MembershipPlan.find({
-            audience: { $ne: 'aspirant' },
+            audience: { $in: ['business', null] },
             isActive: { $ne: false }
         }).lean().catch(() => []);
 
@@ -661,7 +678,54 @@ class MembershipPlanService {
     }
 }
 
+/**
+ * WHICH PLANS AN APPLICANT OF THIS KIND IS OFFERED — the rule, with no database.
+ *
+ * `kind` is business / aspirant / student. The two non-business kinds have no
+ * band: the one plan for their audience is the answer. A student falls back to
+ * the aspirant plans while no student plan is active, so a retired student row
+ * can never leave an applicant with nothing to pay for. Platinum is never
+ * offered here — it is granted by the Super Admin — and `showAllPlans` lists
+ * the three sellable audiences, never the lifetime tier.
+ */
+function resolvePlans(plans = [], settings = {}, { commencementYear, kind = 'business' } = {}) {
+    const years = yearsTrading(commencementYear);
+    const sellable = (plans || []).filter((plan) => plan.audience !== 'platinum');
+
+    if (settings.showAllPlans) {
+        return { plans: sellable, matched: null, years, reason: 'all', showAllPlans: true };
+    }
+
+    if (kind === 'student' || kind === 'aspirant') {
+        let forAudience = sellable.filter((plan) => plan.audience === kind);
+        if (kind === 'student' && !forAudience.length) {
+            forAudience = sellable.filter((plan) => plan.audience === 'aspirant');
+        }
+        return { plans: forAudience, matched: forAudience[0] || null, years: null, reason: kind, showAllPlans: false };
+    }
+
+    const forAudience = sellable.filter((plan) => plan.audience === 'business');
+    const matched = forAudience.find((plan) => inBand(plan, years)) || null;
+
+    if (!matched) {
+        return {
+            plans: forAudience,
+            matched: null,
+            years,
+            // Named so the screen can say WHY it is showing a choice rather
+            // than one price: the year is missing, or no band covers it.
+            reason: years === null ? 'no-year' : 'no-band',
+            showAllPlans: false
+        };
+    }
+
+    return { plans: [matched], matched, years, reason: 'band', showAllPlans: false };
+}
+
 module.exports = new MembershipPlanService();
+module.exports.resolvePlans = resolvePlans;
+module.exports.kindOf = kindOf;
+module.exports.audienceOf = audienceOf;
 module.exports.bandLabel = bandLabel;
 module.exports.yearsTrading = yearsTrading;
 module.exports.inBand = inBand;

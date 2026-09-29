@@ -56,6 +56,12 @@ const getSuperOverview = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data));
 });
 
+/** The Hub's figures for a State / District admin — their own region only. */
+const getTeamOverview = asyncHandler(async(req, res) => {
+    const data = await superAdminService.getTeamOverview(req.user || {});
+    res.json(ApiResponse.success(data));
+});
+
 const superSearch = asyncHandler(async(req, res) => {
     const data = await superAdminService.search(req.query.q);
     res.json(ApiResponse.success(data));
@@ -265,6 +271,7 @@ const alignMembershipBands = asyncHandler(async(req, res) => {
 });
 
 module.exports = {
+    getTeamOverview,
     uploadAdminPhoto,
     getDashboardStats,
     getUsers,

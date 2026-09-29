@@ -18,9 +18,28 @@ const notificationLogSchema = new mongoose.Schema({
             'PAYMENT_REQUIRED',
             'PAYMENT_SUCCESS',
             'MEMBERSHIP_ACTIVATED',
+            /*
+             * EVERY EVENT A TEMPLATE CAN RENDER MUST BE LISTED. An event missing
+             * here fails validation on the log write, which `notification.log`
+             * swallows — the message goes out and leaves no row, so the oversight
+             * screen shows nothing for it. The three participant events were
+             * missing exactly that way.
+             */
+            'APPLICATION_ENDORSED',
+            'MEMBERSHIP_RENEWAL_DUE',
+            'ADMIN_NEW_APPLICATION',
+            'PLATINUM_REQUESTED',
+            'ADMIN_PLATINUM_REQUEST',
+            'EVENT_PARTICIPANT_CONFIRMED',
+            'EVENT_PARTICIPANT_REMINDER',
+            'EVENT_PARTICIPANT_CANCELLED',
             'ADMIN_QUEUE_ALERT',
             'EVENT_REGISTERED',
             'EVENT_REMINDER',
+            'EVENT_BOOKING_CONFIRMED',
+            'EVENT_BOOKING_CANCELLED',
+            'EVENT_BOOKING_REMINDER',
+            'EVENT_BOOKING_WAITLISTED',
             'BOT_REPLY',
             'CUSTOM'
         ],
