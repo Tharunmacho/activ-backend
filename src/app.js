@@ -63,6 +63,9 @@ app.use(performanceMonitor);
 // the shared bucket and then be unable to log in at all.
 app.use('/api', (req, res, next) => {
     if (req.path.includes('/auth/')) return next();
+    // The server's own cache warm-up (a per-process secret, see publicCache)
+    // is not a visitor and must not spend the loopback address's quota.
+    if (require('./core/middleware/publicCache').isWarmRequest(req)) return next();
     return apiLimiter(req, res, next);
 });
 

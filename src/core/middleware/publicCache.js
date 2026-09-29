@@ -1,4 +1,5 @@
 const http = require('http');
+const crypto = require('crypto');
 const logger = require('../../config/logger');
 
 /**
@@ -18,9 +19,32 @@ const logger = require('../../config/logger');
  *     that "an admin saves a change and immediately reloads" still holds;
  *   - only 200 JSON answers are kept.
  *
- * WARM: `warm()` re-reads the landing page's endpoints every 45 s, so a visitor
+ * WARM: `warm()` re-reads the public pages' endpoints every 45 s, so a visitor
  * arriving after a quiet spell never pays for the cold read either.
+ *
+ * THE WARM-UP MUST BE GENTLE, and it once was not. It fired all its requests
+ * AT ONCE, each forced past the cache, every 45 s — nineteen simultaneous
+ * database reads that filled the connection pool, so a real page load arriving
+ * in the same second queued behind them for 2–11 s. And because it called the
+ * server over loopback, every warm-up request was counted by the per-IP rate
+ * limiter as the SAME client: 19 × 20 per 15 min, until 127.0.0.1 — and in
+ * development the developer's own browser — was answered 429.
+ *
+ * So now: one request at a time (a round is skipped if the last is still
+ * running), and each carries WARM_TOKEN — random per process, never sent to a
+ * client — which is the only thing that (a) bypasses the cache and (b) is
+ * exempt from the rate limiter. A client sending the header name with any
+ * other value gets neither.
  */
+const WARM_TOKEN = crypto.randomBytes(24).toString('hex');
+const WARM_HEADER = 'x-public-cache-refresh';
+
+/** True only for this process's own warm-up requests. */
+const isWarmRequest = (req) => {
+    const given = String((req && req.headers && req.headers[WARM_HEADER]) || '');
+    if (given.length !== WARM_TOKEN.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(WARM_TOKEN));
+};
 
 const TTL_MS = Math.max(5, parseInt(process.env.PUBLIC_CACHE_SECONDS, 10) || 60) * 1000;
 const MAX_ENTRIES = 500;
@@ -37,7 +61,7 @@ const publicCache = (req, res, next) => {
 
     const key = req.originalUrl;
     // The warm-up asks for a fresh copy without removing the one being served.
-    const hit = req.headers['x-public-cache-refresh'] ? null : store.get(key);
+    const hit = isWarmRequest(req) ? null : store.get(key);
     if (hit && Date.now() - hit.at < TTL_MS) {
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('X-Public-Cache', 'HIT');
@@ -83,16 +107,32 @@ const HOT = [
 ];
 
 let warmTimer = null;
+let warming = false;
+
+/** One warm-up GET; resolves when it has answered (or failed), never rejects. */
+const warmOne = (port, fullPath) => new Promise((resolve) => {
+    const req = http.get({
+        host: '127.0.0.1', port, path: fullPath, timeout: 20000,
+        headers: { [WARM_HEADER]: WARM_TOKEN }
+    }, (r) => { r.resume(); r.on('end', resolve); r.on('error', resolve); });
+    req.on('error', resolve);
+    req.on('timeout', () => { req.destroy(); resolve(); });
+});
+
 const warm = (port, apiPrefix) => {
     if (warmTimer || !enabled()) return;
-    const tick = () => {
-        for (const path of HOT) {
-            const req = http.get({
-                host: '127.0.0.1', port, path: `${apiPrefix}${path}`, timeout: 20000,
-                headers: { 'x-public-cache-refresh': '1' }
-            }, (r) => r.resume());
-            req.on('error', () => null);
-            req.on('timeout', () => req.destroy());
+    const tick = async () => {
+        if (warming) return;          // the previous round is still going: skip, never pile up
+        warming = true;
+        try {
+            for (const path of HOT) {
+                // Sequential, with a breath between: at most ONE warm-up read
+                // is ever in flight, so it cannot crowd out a real visitor.
+                await warmOne(port, `${apiPrefix}${path}`);
+                await new Promise((r) => setTimeout(r, 150));
+            }
+        } finally {
+            warming = false;
         }
     };
     warmTimer = setInterval(tick, 45 * 1000);
@@ -102,4 +142,4 @@ const warm = (port, apiPrefix) => {
     logger.info('Public read cache warming', { every: '45s', endpoints: HOT.length });
 };
 
-module.exports = { publicCache, clearOnWrite, clear, warm, TTL_MS };
+module.exports = { publicCache, clearOnWrite, clear, warm, isWarmRequest, TTL_MS };
