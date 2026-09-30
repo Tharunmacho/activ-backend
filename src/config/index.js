@@ -138,6 +138,24 @@ module.exports = {
             /** Where a reply goes when a region has no staffed admin at all. */
             supportAddress: real(process.env.EMAIL_SUPPORT_ADDRESS) || 'support@activ.org.in',
 
+            /**
+             * THE OFFICE'S COPY. Every email the platform sends — bookings,
+             * reminders, applications, approvals, receipts, admin welcomes,
+             * password resets — also goes to this mailbox, so the association
+             * has its own record of exactly what each person was told.
+             *
+             * BCC by default: a member does not see the office address, and a
+             * "reply all" from a member does not drag it into the thread.
+             * `EMAIL_ARCHIVE_MODE=cc` makes it visible; `EMAIL_ARCHIVE_COPY=off`
+             * turns the copy off.
+             */
+            archiveCopy: (() => {
+                const v = real(process.env.EMAIL_ARCHIVE_COPY);
+                if (v && /^(off|false|none|0)$/i.test(v)) return '';
+                return v || 'info@activ.org.in';
+            })(),
+            archiveMode: String(process.env.EMAIL_ARCHIVE_MODE || '').toLowerCase() === 'cc' ? 'cc' : 'bcc',
+
             get isConfigured() {
                 return !!(this.host && this.user && this.password);
             }

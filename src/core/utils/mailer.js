@@ -62,6 +62,8 @@ const getTransporter = () => {
  *
  * Resolves to `{ sent, skipped, error }` — never rejects.
  */
+const { archiveFields } = require('./archiveCopy');
+
 const send = async({ to, subject, text, html }) => {
     const target = String(to || '').trim();
     if (!target) return { sent: false, skipped: true, error: 'No recipient address' };
@@ -73,6 +75,8 @@ const send = async({ to, subject, text, html }) => {
         await transport.sendMail({
             from: config.email.from,
             to: target,
+            // The office keeps a copy of everything sent (config.email.archiveCopy).
+            ...archiveFields(target),
             subject: subject || 'ACTIV',
             text: text || '',
             html: html || undefined

@@ -189,6 +189,8 @@ class EmailService {
             const info = await transporter.sendMail({
                 from: sender.fromHeader,
                 to: recipient,
+                // The office keeps a copy of everything sent (config.email.archiveCopy).
+                ...require('../../core/utils/archiveCopy').archiveFields(recipient),
                 replyTo: sender.replyTo,
                 subject,
                 // A plain-text alternative is not decoration: a message with no
