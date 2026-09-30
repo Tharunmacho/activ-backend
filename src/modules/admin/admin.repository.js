@@ -285,6 +285,8 @@ const toAdminRow = (doc = {}, source = PRIMARY_COLLECTION) => {
         state: String(doc.state || meta.state || '').trim(),
         district: String(doc.district || meta.district || '').trim(),
         block: String(doc.block || meta.block || '').trim(),
+        // Set by POST /admin/super/profile/photo; '' when none was uploaded.
+        profilePhoto: doc.profilePhoto || '',
         // Both spellings must be false-checked: a document carrying only
         // `active: false` would read as active if we looked at `isActive` alone.
         active: doc.isActive !== false && doc.active !== false,
@@ -600,6 +602,85 @@ const findById = async(adminId) => {
     return row;
 };
 
+/**
+ * Every stored copy of one address, in `sources()` order.
+ *
+ * The same account can sit in both databases (see `legacyCol`). An edit that
+ * reaches only the first copy leaves the second one signing in with the OLD
+ * email and the OLD password — so credential changes go to all of them.
+ * Exact, lowercased match only, for the reason `findRawByEmail` documents.
+ */
+const findAllRawByEmail = async(email) => {
+    const normalized = String(email || '').toLowerCase().trim();
+    if (!normalized) return [];
+    await adminsDb.ensureReady();
+
+    const all = sources();
+    const hits = await Promise.all(all.map(source => source.handle
+        .find({ email: normalized })
+        .limit(10)
+        .toArray()
+        .catch(() => [])));
+
+    const out = [];
+    all.forEach((source, i) => {
+        (hits[i] || []).forEach((doc) => {
+            out.push({ doc, source: source.name, sourceKey: source.key, handle: source.handle, objectId: doc._id });
+        });
+    });
+    return out;
+};
+
+/**
+ * Site-staff roles: platform-level accounts that run one portal each (the
+ * public-site CMS, the events programme). The Super Admin maintains their
+ * credentials; they hold no region and never appear in a geofence.
+ */
+const STAFF_ROLES = ['cms_admin', 'events_admin'];
+
+/** Every spelling a staff role has been stored under, for the query below. */
+const STAFF_ROLE_SPELLINGS = ['cms_admin', 'cmsadmin', 'events_admin', 'eventsadmin', 'event_admin'];
+
+/**
+ * The site-staff accounts, de-duplicated by email, projected (never a hash).
+ *
+ * A dedicated query rather than `findAll()`: that roster drops records without
+ * a `createdVia` stamp, and the CMS account was seeded by a script — a staff
+ * account the Super Admin cannot see is one whose password nobody can reset.
+ */
+const findStaff = async() => {
+    await adminsDb.ensureReady();
+    const all = sources();
+    const filter = {
+        $or: [
+            { role: { $in: STAFF_ROLE_SPELLINGS } },
+            { adminType: { $in: STAFF_ROLE_SPELLINGS } }
+        ]
+    };
+
+    const batches = await Promise.all(all.map(source => source.handle
+        .find(filter, { projection: ROW_PROJECTION })
+        .limit(200)
+        .toArray()
+        .catch((err) => {
+            logger.warn('Staff account scan failed', { collection: source.key, error: err && err.message });
+            return [];
+        })));
+
+    const byEmail = new Map();
+    all.forEach((source, i) => {
+        (batches[i] || []).forEach((doc) => {
+            const row = toAdminRow(doc, source.name);
+            if (!STAFF_ROLES.includes(row.role)) return;
+            row.source = source.key;
+            const key = row.email || row.id;
+            if (!key || byEmail.has(key)) return;
+            byEmail.set(key, row);
+        });
+    });
+    return [...byEmail.values()];
+};
+
 /** True when this email is already taken anywhere. */
 const emailExists = async(email, exceptId = '') => {
     const hit = await findRawByEmail(email);
@@ -758,6 +839,20 @@ const translateUpdate = (update = {}, sourceKey = '') => {
 };
 
 /**
+ * The spellings a write must clear so the value it sets is the one read back.
+ *
+ * For each canonical field in `update`, the name the OTHER generation of
+ * document uses: `password` beside a segregated `passwordHash`, `passwordHash`
+ * beside a unified `password`, and so on.
+ */
+const alternateSpellings = (update = {}, sourceKey = '') => {
+    const isUnified = sourceKey === PRIMARY_COLLECTION;
+    return Object.keys(update)
+        .filter(field => Object.prototype.hasOwnProperty.call(CANONICAL_TO_UNIFIED, field))
+        .map(field => (isUnified ? field : CANONICAL_TO_UNIFIED[field]));
+};
+
+/**
  * Update the document in place, wherever it lives.
  *
  * `hit` comes from a prior `findRawById` / `findRawByEmail`, so the write lands
@@ -777,6 +872,21 @@ const updateById = async(hit, update) => {
     else if (role === 'district_admin') { $unset.block = ''; }
 
     Object.keys($unset).forEach((field) => { delete $set[field]; });
+
+    /*
+     * The other spelling of a translated field is removed in the same write.
+     *
+     * Login reads `password || passwordHash`, and `toAdminRow` reads
+     * `phoneNumber || phone` and false-checks both `isActive` and `active`. A
+     * record carrying BOTH spellings (a plaintext password upgraded on login
+     * lands as `password` even in a segregated collection) would keep answering
+     * with the stale one: a new password set as `passwordHash` would not work,
+     * the old `password` would; a reactivation written as `active: true` would
+     * stay deactivated behind a leftover `isActive: false`.
+     */
+    alternateSpellings(update, hit.sourceKey).forEach((field) => {
+        if (!Object.prototype.hasOwnProperty.call($set, field)) $unset[field] = '';
+    });
 
     const operation = { $set };
     if (Object.keys($unset).length > 0) operation.$unset = $unset;
@@ -830,11 +940,15 @@ module.exports = {
     findRawById,
     findRawByEmail,
     findRawByResetToken,
+    findAllRawByEmail,
+    STAFF_ROLES,
+    findStaff,
     emailExists,
     insert,
     insertMany,
     updateById,
     translateUpdate,
+    alternateSpellings,
     deleteEverywhere,
     invalidate
 };

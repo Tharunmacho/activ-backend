@@ -61,6 +61,11 @@ router.get('/super/admins/bulk/template', requireRole('super_admin'), controller
 router.post('/super/admins/bulk/validate', requireRole('super_admin'), controller.bulkValidate);
 router.post('/super/admins/bulk', requireRole('super_admin'), controller.bulkCommit);
 
+// Site-staff credentials (CMS admin, events admin). Super admin only; the
+// service refuses super_admin and tier-admin records whatever the id.
+router.get('/super/staff-accounts', requireRole('super_admin'), controller.listStaffAccounts);
+router.put('/super/staff-accounts/:id', requireRole('super_admin'), controller.updateStaffAccount);
+
 router.post('/super/admins', requireRole('super_admin'), controller.createAdmin);
 router.get('/super/admins/:id/removal-preview', requireRole('super_admin'), controller.previewAdminRemoval);
 router.put('/super/admins/:id', requireRole('super_admin'), controller.updateAdmin);

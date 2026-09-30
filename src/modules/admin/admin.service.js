@@ -1588,7 +1588,8 @@ class AdminService {
                     state: known.state,
                     district: known.district,
                     block: known.block,
-                    role: known.role || user.role || ''
+                    role: known.role || user.role || '',
+                    profilePhoto: known.profilePhoto || ''
                 };
                 await cacheClient.set(cacheKey, profile, ADMIN_PROFILE_TTL_SECONDS).catch(() => null);
                 return profile;
@@ -1604,7 +1605,8 @@ class AdminService {
                     state: row.state,
                     district: row.district,
                     block: row.block,
-                    role: row.role || user.role || ''
+                    role: row.role || user.role || '',
+                    profilePhoto: hit.doc?.profilePhoto || ''
                 };
                 await cacheClient.set(cacheKey, profile, ADMIN_PROFILE_TTL_SECONDS).catch(() => null);
                 return profile;
@@ -1621,7 +1623,8 @@ class AdminService {
             state: fallback?.state || user.state || '',
             district: fallback?.district || user.district || '',
             block: fallback?.block || user.block || '',
-            role: user.role || fallback?.role || ''
+            role: user.role || fallback?.role || '',
+            profilePhoto: fallback?.profilePhoto || ''
         };
     }
 

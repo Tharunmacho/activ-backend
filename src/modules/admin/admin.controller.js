@@ -1,6 +1,7 @@
 const adminService = require('./admin.service');
 const superAdminService = require('./superadmin.service');
 const adminBulkService = require('./adminBulk.service');
+const staffAccountsService = require('./staffAccounts.service');
 // Membership pricing. Lives beside the plan model rather than here, because the
 // payment path reads the same service and neither owns it.
 const membershipPlanService = require('../members/membershipplan.service');
@@ -85,6 +86,17 @@ const createAdmin = asyncHandler(async(req, res) => {
 const updateAdmin = asyncHandler(async(req, res) => {
     const data = await superAdminService.updateAdmin(req.params.id, req.body || {}, req.user || {});
     res.json(ApiResponse.success(data, 'Admin updated'));
+});
+
+// --- Site-staff accounts (CMS admin, events admin): credentials kept by the Super Admin ---
+const listStaffAccounts = asyncHandler(async(req, res) => {
+    const accounts = await staffAccountsService.list();
+    res.json(ApiResponse.success({ accounts, total: accounts.length }));
+});
+
+const updateStaffAccount = asyncHandler(async(req, res) => {
+    const data = await staffAccountsService.update(req.params.id, req.body || {}, req.user || {});
+    res.json(ApiResponse.success(data, 'Staff account updated'));
 });
 
 const getDirectory = asyncHandler(async(req, res) => {
@@ -184,15 +196,41 @@ const uploadAdminPhoto = asyncHandler(async (req, res) => {
 
     const profilePhotoUrl = `/uploads/${req.file.filename}`;
 
-    const adminHit = await require('./admin.repository').findRawByEmail(req.user.email);
-    if (!adminHit) {
-        return res.status(404).json(ApiResponse.error('Admin not found', 404));
+    /*
+     * The repository hit carries the collection handle at the TOP level
+     * (`hit.handle`); `hit.source` is only the collection's name. Reading
+     * `source.handle` made every upload a 500. A super admin who has no admin
+     * document (authenticated off the User collection) gets the photo written
+     * there instead of a 404. Both writes go through the raw collection, so
+     * strict mode cannot drop `profilePhoto`.
+     */
+    const email = String(req.user?.email || '').toLowerCase();
+    const adminHit = email
+        ? await require('./admin.repository').findRawByEmail(email).catch(() => null)
+        : null;
+
+    if (adminHit?.handle && adminHit.objectId) {
+        await adminHit.handle.updateOne(
+            { _id: adminHit.objectId },
+            { $set: { profilePhoto: profilePhotoUrl } }
+        );
+        // The warm roster answers GET /admin/profile first; let it re-read.
+        const repo = require('./admin.repository');
+        if (typeof repo.invalidate === 'function') repo.invalidate();
+    } else {
+        const User = require('../auth/auth.model');
+        const result = email
+            ? await User.collection.updateOne({ email }, { $set: { profilePhoto: profilePhotoUrl } })
+            : null;
+        if (!result || !result.matchedCount) {
+            return res.status(404).json(ApiResponse.error('Admin not found', 404));
+        }
     }
 
-    await adminHit.source.handle.updateOne(
-        { _id: adminHit.objectId },
-        { $set: { profilePhoto: profilePhotoUrl } }
-    );
+    // GET /admin/profile is cached per email; drop it so the new photo is read back.
+    const cacheClient = require('../../core/cache/cacheClient');
+    const { CACHE_KEYS } = require('../../core/cache/cacheKeys');
+    await cacheClient.del(CACHE_KEYS.ADMIN(email)).catch(() => null);
 
     res.json(ApiResponse.success({ profilePhoto: profilePhotoUrl }, 'Profile photo uploaded successfully'));
 });
@@ -271,6 +309,8 @@ const alignMembershipBands = asyncHandler(async(req, res) => {
 });
 
 module.exports = {
+    listStaffAccounts,
+    updateStaffAccount,
     getTeamOverview,
     uploadAdminPhoto,
     getDashboardStats,
