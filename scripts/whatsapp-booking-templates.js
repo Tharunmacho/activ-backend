@@ -11,6 +11,9 @@
  * Settings -> WhatsApp accounts). The token must carry
  * `whatsapp_business_management`.
  *
+ *   --only=<name>[,<name>] or --only=flex limits any of the three to those
+ *   templates (flex = the flexible event family in whatsappFlex.js).
+ *
  * Nothing is sent to anybody. Creating a template only puts it into review;
  * once `--status` says APPROVED, set its name in backend/.env
  * (BOTBEE_TPL_BOOKING, BOTBEE_TPL_BOOKING_CANCEL, BOTBEE_TPL_BOOKING_REMINDER)
@@ -28,8 +31,16 @@ const version = process.env.META_API_VERSION || 'v21.0';
 const base = (process.env.META_BASE_URL || 'https://graph.facebook.com').replace(/\/+$/, '');
 const language = process.env.META_TEMPLATE_LANGUAGE || 'en_US';
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7);
-const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && (!only || t.name === only));
+/*
+ * `--only=<name>`            one template
+ * `--only=<name>,<name>`     several
+ * `--only=flex`              the flexible event family (whatsappFlex.js), all ten
+ */
+const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7)
+    .split(',').map((s) => s.trim()).filter(Boolean);
+const picked = (t) => !only.length || only.includes(t.name) || (only.includes('flex') && t.flex);
+const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && picked(t));
+const flex = require('../src/modules/notifications/whatsappFlex');
 let imageHandle = process.env.META_TEMPLATE_IMAGE_HANDLE || '';
 
 /**
@@ -142,7 +153,7 @@ const need = () => {
                     timeout: 20000
                 });
                 const rows = (res.data && res.data.data) || [];
-                console.log(`${t.name.padEnd(28)} ${rows.length
+                console.log(`${t.name.padEnd(34)} ${rows.length
                     ? rows.map((r) => `${r.status} (${r.language})${r.rejected_reason && r.rejected_reason !== 'NONE'
                         ? ` - ${r.rejected_reason}` : ''}`).join(', ')
                     : 'not created'}   -> ${t.envKey}=${t.name}`);
@@ -155,12 +166,22 @@ const need = () => {
 
     if (!args.has('--submit')) {
         console.log('\nDRY RUN - these would be submitted for review (add --submit):\n');
+        let problems = 0;
         for (const t of booking) {
-            console.log(`== ${t.name}   (${t.envKey})`);
+            console.log(`== ${t.name}   (${t.envKey})   header: ${t.header || 'none'}   category: UTILITY   language: ${language}`);
             console.log(t.bodyWithVariables);
-            console.log('Samples:', t.samples.map((s, i) => `{{${i + 1}}}=${s}`).join(' | '));
+            console.log(`Footer: ${t.footer || 'ACTIV'}`);
+            console.log('Samples:');
+            t.samples.forEach((s, i) => console.log(`  {{${i + 1}}} = ${s}`));
+            // Meta's rules, checked here so a rejection is not the first sign.
+            const issues = flex.lintTemplate(t);
+            const rendered = flex.renderBody(t.bodyWithVariables, t.samples).length;
+            console.log(`Checks: body ${t.bodyWithVariables.length} chars, rendered sample ${rendered} chars - ${
+                issues.length ? `PROBLEMS: ${issues.join('; ')}` : 'ok'}`);
+            problems += issues.length;
             console.log('');
         }
+        if (problems) console.log(`${problems} problem(s) above - fix before --submit.`);
         return;
     }
 

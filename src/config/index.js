@@ -394,6 +394,24 @@ module.exports = {
                 membershipActive: real(process.env.BOTBEE_TPL_MEMBERSHIP_ACTIVE) || 'activ_membership_active_v1',
                 membershipRenewal: real(process.env.BOTBEE_TPL_MEMBERSHIP_RENEWAL) || 'activ_membership_renewal_v1',
                 adminNewApplication: real(process.env.BOTBEE_TPL_ADMIN_NEW_APPLICATION) || 'activ_admin_new_application_v1',
+                /*
+                 * THE FLEXIBLE EVENT TEMPLATES (notifications/whatsappFlex.js).
+                 * EMPTY BY DEFAULT, deliberately unlike the ones above: they are
+                 * tried FIRST only once named here, i.e. once Meta has approved
+                 * them. Set each to the approved template name (or `true` for
+                 * the default name, e.g. activ_evt_confirmed_v3). `_PLAIN` is the
+                 * same body with no poster header, tried second.
+                 */
+                bookingFlex: real(process.env.BOTBEE_TPL_BOOKING_FLEX),
+                bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN),
+                webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX),
+                webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN),
+                reminderFlex: real(process.env.BOTBEE_TPL_REMINDER_FLEX),
+                reminderFlexPlain: real(process.env.BOTBEE_TPL_REMINDER_FLEX_PLAIN),
+                cancelFlex: real(process.env.BOTBEE_TPL_CANCEL_FLEX),
+                cancelFlexPlain: real(process.env.BOTBEE_TPL_CANCEL_FLEX_PLAIN),
+                waitlistFlex: real(process.env.BOTBEE_TPL_WAITLIST_FLEX),
+                waitlistFlexPlain: real(process.env.BOTBEE_TPL_WAITLIST_FLEX_PLAIN),
                 bookingInPerson: real(process.env.BOTBEE_TPL_BOOKING_INPERSON) || 'cnfrm',
                 bookingOnline: real(process.env.BOTBEE_TPL_BOOKING_ONLINE) || 'ccmsg'
             },

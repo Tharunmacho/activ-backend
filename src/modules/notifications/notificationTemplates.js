@@ -1,4 +1,5 @@
 const config = require('../../config');
+const FLEX = require('./whatsappFlex');
 
 /**
  * What each lifecycle event SAYS, on all three channels, in one place.
@@ -215,12 +216,8 @@ const registerLink = (ctx = {}) => ctx.registerUrl
 // A participant's own name first: their message is about THEIR seat, not the booker's.
 const greetName = (ctx = {}) => oneLine(ctx.participantName || ctx.bookerName || ctx.name || ctx.firstName, 60) || 'Member';
 
-/** "+918220112188" -> "+91 82201 12188"; anything else as typed. */
-const prettyPhone = (value) => {
-    const raw = oneLine(value, 40);
-    const m = raw.replace(/[\s-]/g, '').match(/^(?:\+?91)?(\d{5})(\d{5})$/);
-    return m ? `+91 ${m[1]} ${m[2]}` : raw;
-};
+/** "+918220112188" -> "+91 82201 12188"; anything else as typed. (One copy, in whatsappFlex.) */
+const { prettyPhone } = FLEX;
 
 /** "Rajesh · +91 82201 12188 · events@activ.org.in" — only what the organiser gave, phone tidied. */
 const organiserLine = (ctx = {}) => [oneLine(ctx.contactName, 80), prettyPhone(ctx.contactPhone), oneLine(ctx.contactEmail, 120)]
@@ -277,12 +274,7 @@ const tipPair = (ctx = {}) => {
  *   join      a direct meeting link (zoom.us/j/…, meet.google.com/…, teams …/l/meetup-join).
  *   none      nothing yet.
  */
-const onlineLinkKind = (url) => {
-    const u = String(url || '').toLowerCase();
-    if (!u) return 'none';
-    if (/register|registration|forms\.|\/form|lu\.ma|eventbrite/.test(u)) return 'register';
-    return 'join';
-};
+const { onlineLinkKind } = FLEX;
 
 /** "join at 2:55 PM IST, 5 minutes before the 3:00 PM IST start" — a real time, never just "the start". */
 /*
@@ -549,12 +541,46 @@ const posterTemplate = (ctx = {}) => {
  * template if Meta refuses it (still in review), the generic notice last. Once
  * the custom one is approved it is the only one ever sent — no redeploy.
  */
+/*
+ * THE FLEXIBLE TEMPLATES (whatsappFlex.js) go FIRST, once switched on. Which
+ * config slot names each: the poster-header variant, then the no-header one.
+ * A value of `true` means "the default name"; `none` or empty means off.
+ */
+const FLEX_CONFIG = {
+    confirmed: ['bookingFlex', 'bookingFlexPlain'],
+    online: ['webinarFlex', 'webinarFlexPlain'],
+    reminder: ['reminderFlex', 'reminderFlexPlain'],
+    cancelled: ['cancelFlex', 'cancelFlexPlain'],
+    waitlist: ['waitlistFlex', 'waitlistFlexPlain']
+};
+const flexOn = (value, fallbackName) => {
+    const v = tplOn(value);
+    return v && /^(true|1|yes|on)$/i.test(v) ? fallbackName : v;
+};
+const flexNames = (kind, ctx = {}) => {
+    const message = FLEX.messageFor(kind, ctx);
+    const [image, plain] = FLEX_CONFIG[message] || [];
+    if (!image) return {};
+    return { image: flexOn(TPL[image], FLEX.NAMES[message].image), plain: flexOn(TPL[plain], FLEX.NAMES[message].plain) };
+};
+/** A step keeps the poster header unless it is the no-header variant. */
+const withHeader = (image) => ({ noHeader, ...step }) => (noHeader ? step : { ...step, headerImage: image });
+
+/**
+ * An existing chain with the flexible steps put in front of it. Used by the
+ * messages that do not go through `richBookingWhatsApp` (cancellation, waitlist).
+ */
+const withFlex = (kind, ctx, chain, skipped) => FLEX.flexSteps(kind, ctx, flexNames(kind, ctx), skipped)
+    .map(withHeader(ctx.posterUrl || DEFAULT_WHATSAPP_POSTER()))
+    .reduceRight((next, step) => ({ ...step, fallback: next }), chain);
+
 const richBookingWhatsApp = (kind, eventParams, ctx = {}) => {
     const image = ctx.posterUrl || DEFAULT_WHATSAPP_POSTER();
     const skipped = [];
-    const steps = [...customTemplates(kind, ctx, skipped), posterTemplate(ctx)]
+    const flexFirst = FLEX.flexSteps(kind, ctx, flexNames(kind, ctx), skipped);
+    const steps = [...flexFirst, ...customTemplates(kind, ctx, skipped), posterTemplate(ctx)]
         .filter(Boolean)
-        .map((s) => ({ ...s, headerImage: image }));
+        .map(withHeader(image));
     steps.push({ template: TPL.event, params: eventParams });
     const chain = steps.reduceRight((next, step) => (next ? { ...step, fallback: next } : step), null);
     // Which richer templates were passed over for a blank value — logged by
@@ -863,6 +889,29 @@ const TEMPLATES = {
 
     EVENT_BOOKING_CANCELLED: (ctx) => {
         const title = ctx.eventTitle || 'the event';
+        const skipped = [];
+        const cancelChain = withFlex('cancelled', ctx,
+            /*
+             * The cancellation template ends "questions? {6}". With no
+             * contact saved on the event there is nothing true to put
+             * there, so the dedicated template is skipped for the generic
+             * notice — never "the ACTIV office" standing in for a person.
+             */
+            bookingWhatsApp(organiserLine(ctx) ? TPL.bookingCancel : '', [
+                greetName(ctx),
+                ctx.bookingRef || 'your booking',
+                clause(title, 120) || 'the event',
+                orDash(ctx.whenLabel, 'Date to be confirmed'),
+                orDash(ctx.reason, 'No reason was given'),
+                oneLine(organiserLine(ctx), 300)
+            ], [
+                ctx.firstName || 'Member',
+                `the CANCELLATION of your booking ${ctx.bookingRef} for ${clause(title, 110)}`,
+                ctx.whenLabel || 'the scheduled date'
+            ], ctx.posterUrl), skipped);
+        if (!organiserLine(ctx) && tplOn(TPL.bookingCancel)) {
+            skipped.push(`${TPL.bookingCancel} skipped: organiser contact not on the event`);
+        }
         return {
             inApp: {
                 title: 'Booking cancelled',
@@ -894,26 +943,9 @@ const TEMPLATES = {
                 ]
             },
             whatsapp: {
-                /*
-                 * The cancellation template ends "questions? {6}". With no
-                 * contact saved on the event there is nothing true to put
-                 * there, so the dedicated template is skipped for the generic
-                 * notice — never "the ACTIV office" standing in for a person.
-                 */
-                ...bookingWhatsApp(organiserLine(ctx) ? TPL.bookingCancel : '', [
-                    greetName(ctx),
-                    ctx.bookingRef || 'your booking',
-                    clause(title, 120) || 'the event',
-                    orDash(ctx.whenLabel, 'Date to be confirmed'),
-                    orDash(ctx.reason, 'No reason was given'),
-                    oneLine(organiserLine(ctx), 300)
-                ], [
-                    ctx.firstName || 'Member',
-                    `the CANCELLATION of your booking ${ctx.bookingRef} for ${clause(title, 110)}`,
-                    ctx.whenLabel || 'the scheduled date'
-                ], ctx.posterUrl),
-                skipped: !organiserLine(ctx) && tplOn(TPL.bookingCancel)
-                    ? [`${TPL.bookingCancel} skipped: organiser contact not on the event`] : [],
+                // Flexible template first (once approved), then the fixed ones.
+                ...cancelChain,
+                skipped,
                 text: '*Booking cancelled*\n\n'
                     + `Hello ${ctx.firstName || 'Member'},\n`
                     + `Your booking for *${title}* has been cancelled by the organiser.\n\n`
@@ -931,6 +963,16 @@ const TEMPLATES = {
 
     EVENT_BOOKING_WAITLISTED: (ctx) => {
         const title = ctx.eventTitle || 'the event';
+        const skipped = [];
+        // Flexible waitlist template first (once approved), then the generic notice.
+        const waitChain = withFlex('waitlist', ctx, {
+            template: TPL.event,
+            params: [
+                ctx.firstName || 'Member',
+                `your WAITLIST request ${ctx.bookingRef} for ${clause(title, 110)} (event full, nothing charged)`,
+                ctx.whenLabel || 'the scheduled date'
+            ]
+        }, skipped);
         return {
             inApp: {
                 title: 'You are on the waitlist',
@@ -949,12 +991,8 @@ const TEMPLATES = {
                 facts: bookingFacts(ctx, { payment: false, seatsLabel: 'Seats requested' })
             },
             whatsapp: {
-                template: TPL.event,
-                params: [
-                    ctx.firstName || 'Member',
-                    `your WAITLIST request ${ctx.bookingRef} for ${clause(title, 110)} (event full, nothing charged)`,
-                    ctx.whenLabel || 'the scheduled date'
-                ],
+                ...waitChain,
+                skipped,
                 text: "*You're on the waitlist*\n\n"
                     + `Hello ${ctx.firstName || 'Member'},\n`
                     + `*${title}* is fully booked, so your request is on the waitlist. `
@@ -1498,6 +1536,12 @@ WHATSAPP_TEMPLATES.unshift(...Object.entries(PREVIOUS).map(([next, prev]) => {
 
 /* The membership journey's own templates — `meta: true`, so the booking script submits them too. */
 WHATSAPP_TEMPLATES.unshift(...MEMBERSHIP.WHATSAPP_TEMPLATES);
+
+/*
+ * The flexible event templates (whatsappFlex.js), listed first — `flex: true`,
+ * so `scripts/whatsapp-booking-templates.js --only=flex` submits just these.
+ */
+WHATSAPP_TEMPLATES.unshift(...FLEX.TEMPLATE_DEFS);
 
 /**
  * The template used when the one an event asks for is not on the account.
