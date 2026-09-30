@@ -27,7 +27,9 @@
     "test:plans": "node tests/membership-plans.test.js",
     "test:members": "node tests/members-state.test.js",
     "test:donations": "node tests/donations.test.js",
-    "test:my-events": "node tests/my-event-registrations.test.js"
+    "test:my-events": "node tests/my-event-registrations.test.js",
+    "test:delivery": "node tests/booking-delivery.test.js",
+    "test:checkin": "node tests/event-checkin.test.js"
   },
   "keywords": [
     "activ",
@@ -50,6 +52,7 @@
     "helmet": "^7.1.0",
     "joi": "^17.11.0",
     "jsonwebtoken": "^9.0.2",
+    "mongodb": "^7.7.0",
     "mongoose": "^8.0.0",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",

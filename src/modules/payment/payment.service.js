@@ -170,7 +170,7 @@ class PaymentService {
                 /* Omitted entirely when there is none — see above. */
                 ...(normalisedPhone ? { phone: normalisedPhone } : {}),
                 redirect_url: redirectUrl || `${config.frontendUrl}/payment-success`,
-                webhook: webhookUrl || `${config.backendUrl}/api/v1/webhook/instamojo`,
+                webhook: webhookUrl || require('../../config/publicUrl').instamojoWebhookUrl(),
                 send_email: 'True',
                 send_sms: 'True',
                 /* "False" as a STRING — see the note above the class. */
@@ -380,6 +380,14 @@ class PaymentService {
             }
 
             if (order.orderType === 'event_booking') {
+                // The same floor the return page and the reconcile apply: the
+                // gateway must say at least the order's amount was credited.
+                if (!(paidAmount + 0.001 >= Number(order.amount || 0))) {
+                    logger.error('Event booking webhook amount is below the order amount', {
+                        orderId: order.orderId, paid: paidAmount, expected: order.amount
+                    });
+                    return { success: false, message: 'Amount mismatch' };
+                }
                 const booking = await this.settleEventBookingOrder(order, payment_id);
                 return {
                     success: true,
@@ -618,6 +626,93 @@ class PaymentService {
             // The readable address to send the buyer to (events/eventSlug.js).
             eventSlug
         };
+    }
+
+    /**
+     * =====================================================================
+     * THE SAFETY NET: a payer who paid and closed the tab is still confirmed
+     * =====================================================================
+     *
+     * A paid booking used to confirm on exactly two signals — Instamojo's
+     * webhook (which never arrived: it was addressed to a dead host) or the
+     * payer's browser returning to /payment-success. A payer who paid and shut
+     * the tab had their money taken and heard nothing.
+     *
+     * This asks Instamojo about each event-booking order still `created`,
+     * ONE AT A TIME, and settles it through the same idempotent path the
+     * webhook and the return page use — so the confirmation goes out exactly
+     * once whichever of the three gets there first.
+     *
+     * NEVER MARKS ANYTHING PAID ON ITS OWN SAY. `verifyPaymentWithGateway` must
+     * report a Credit payment of at least the order's amount; anything else —
+     * including a network error — leaves the order alone for the next pass.
+     *
+     * Window: orders created in the last `PAYMENT_RECONCILE_LOOKBACK_HOURS`
+     * (default 48). That is wider than the 30-minute hold on purpose:
+     * `completePayment` accepts a lapsed hold, because money that verifiably
+     * moved wins over a timer.
+     */
+    async reconcilePendingEventOrders({ limit = 20 } = {}) {
+        if (!this.isConfigured()) return { checked: 0, settled: 0 };
+
+        const PaymentOrder = require('./paymentorder.model');
+        const hours = Math.max(1, parseInt(process.env.PAYMENT_RECONCILE_LOOKBACK_HOURS, 10) || 48);
+        const orders = await PaymentOrder.find({
+            orderType: 'event_booking',
+            status: 'created',
+            provider: 'instamojo',
+            createdAt: { $gte: new Date(Date.now() - hours * 60 * 60 * 1000) },
+            // Only a real Instamojo request id can be asked about.
+            gatewayPaymentId: { $exists: true, $nin: ['', null], $not: /^ord_/ }
+        })
+            .sort({ createdAt: 1 })
+            .limit(Math.max(1, Math.min(limit, 50)))
+            .catch(() => []);
+
+        let settled = 0;
+        // An order that verified as paid but could not be settled (its booking
+        // was cancelled meanwhile) is reported once, not every five minutes.
+        this.reconcileGaveUp = this.reconcileGaveUp || new Set();
+        for (const order of orders || []) {
+            if (this.reconcileGaveUp.has(order.orderId)) continue;
+            try {
+                const verdict = await this.verifyPaymentWithGateway(String(order.gatewayPaymentId), '', order.amount);
+                if (!verdict.paid) continue;
+                await this.settleEventBookingOrder(order, verdict.paymentId);
+                settled += 1;
+                logger.warn('Paid event booking confirmed by the reconcile (no webhook, no return visit)', {
+                    orderId: order.orderId, bookingRef: order.bookingRef, paymentId: verdict.paymentId
+                });
+            } catch (error) {
+                this.reconcileGaveUp.add(order.orderId);
+                logger.error('Reconcile could not settle a verified event payment — needs a person', {
+                    orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
+                });
+            }
+        }
+        return { checked: (orders || []).length, settled };
+    }
+
+    /** Start the reconcile timer. Idempotent; `server.js` calls it once. */
+    startReconcileScheduler() {
+        if (this.reconcileTimer) return;
+        if (String(process.env.PAYMENT_RECONCILE_ENABLED || 'true').toLowerCase() === 'false') return;
+        if (!this.isConfigured()) return;
+
+        const every = Math.max(2, parseInt(process.env.PAYMENT_RECONCILE_INTERVAL_MINUTES, 10) || 5) * 60 * 1000;
+        let running = false;
+        const tick = () => {
+            if (running) return; // a slow gateway never stacks passes
+            running = true;
+            this.reconcilePendingEventOrders()
+                .catch((error) => logger.warn('Payment reconcile pass failed', { error: error && error.message }))
+                .finally(() => { running = false; });
+        };
+
+        this.reconcileTimer = setInterval(tick, every);
+        if (this.reconcileTimer.unref) this.reconcileTimer.unref();
+        const first = setTimeout(tick, 60 * 1000);
+        if (first.unref) first.unref();
     }
 
     /**

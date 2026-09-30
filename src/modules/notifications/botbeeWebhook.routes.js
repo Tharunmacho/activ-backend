@@ -1,6 +1,7 @@
 const express = require('express');
 const logger = require('../../config/logger');
 const webhookService = require('./botbeeWebhook.service');
+const deliveryStatus = require('./deliveryStatus.service');
 
 /**
  * The BotBee inbound webhook — the ONE unauthenticated notification route.
@@ -69,6 +70,13 @@ router.post('/webhook', (req, res) => {
     // the `.catch` is there so that a future change to it cannot take the
     // process down with an unhandled rejection.
     Promise.resolve()
+        /*
+         * DELIVERY STATUSES FIRST. When BotBee relays Meta's envelope, the
+         * `statuses` array (sent / delivered / read / failed) arrives on this
+         * same POST. It used to be ignored — see deliveryStatus.service.js.
+         * `handleInbound` below still ignores a status-only body.
+         */
+        .then(() => deliveryStatus.applyFromWebhook(req.body || {}))
         .then(() => webhookService.handleInbound(req.body || {}))
         .then((result) => {
             if (result && result.handled) {

@@ -61,6 +61,35 @@ const shareImage = (req, raw) => {
     }
 };
 
+/**
+ * The picture's real size and type. Facebook shows a GREY box on the first
+ * share of an image it has not seen yet unless og:image:width/height are in
+ * the page — it measures in the background and only the next share gets the
+ * picture. Measured once per URL and remembered; never blocks the card for
+ * more than 3 s, and a failure just leaves the tags out.
+ */
+const imageInfoCache = new Map();
+const imageInfo = async(url) => {
+    if (!url) return null;
+    if (imageInfoCache.has(url)) return imageInfoCache.get(url);
+    let info = null;
+    try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+            const meta = await require('sharp')(Buffer.from(await res.arrayBuffer())).metadata();
+            if (meta && meta.width && meta.height) {
+                const type = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }[meta.format] || '';
+                info = { width: meta.width, height: meta.height, type };
+            }
+        }
+    } catch {
+        info = null;
+    }
+    if (imageInfoCache.size > 200) imageInfoCache.delete(imageInfoCache.keys().next().value);
+    if (info) imageInfoCache.set(url, info);
+    return info;
+};
+
 const validDate = (value) => {
     const d = value ? new Date(value) : null;
     return d && !Number.isNaN(d.getTime()) ? d : null;
@@ -104,7 +133,7 @@ const eventCard = (event) => {
     return { title, description, image: event.imageUrl || (event.media && event.media.url) || '', alt: name };
 };
 
-const page = ({ title, description, image, alt, url, type = 'article' }) => {
+const page = ({ title, description, image, alt, url, type = 'article', imageMeta = null }) => {
     const tags = [
         ['property', 'og:type', type],
         ['property', 'og:site_name', SITE_NAME],
@@ -113,6 +142,9 @@ const page = ({ title, description, image, alt, url, type = 'article' }) => {
         ['property', 'og:url', url],
         ['property', 'og:image', image],
         ['property', 'og:image:secure_url', image.startsWith('https://') ? image : ''],
+        ['property', 'og:image:type', (imageMeta && imageMeta.type) || ''],
+        ['property', 'og:image:width', imageMeta ? String(imageMeta.width) : ''],
+        ['property', 'og:image:height', imageMeta ? String(imageMeta.height) : ''],
         ['property', 'og:image:alt', alt || title],
         ['property', 'og:locale', 'en_IN'],
         ['name', 'twitter:card', image ? 'summary_large_image' : 'summary'],
@@ -165,7 +197,8 @@ router.get(['/events/:slug', '/events/:slug/book'], async(req, res) => {
         if (!event) return fallback(req, res, `/events/${encodeURIComponent(slug)}`);
         const url = `${siteOrigin(req)}/events/${encodeURIComponent(event.slug || event.id || slug)}`;
         const card = eventCard(event);
-        return send(res, page({ ...card, image: shareImage(req, card.image), url }));
+        const image = shareImage(req, card.image);
+        return send(res, page({ ...card, image, url, imageMeta: await imageInfo(image) }));
     } catch {
         return fallback(req, res, `/events/${encodeURIComponent(slug)}`);
     }
@@ -178,10 +211,12 @@ router.get(['/gallery/:slug', '/gallery/:slug/photo/:n'], async(req, res) => {
         if (!item) return fallback(req, res, `/gallery/${encodeURIComponent(slug)}`);
         const url = `${siteOrigin(req)}/gallery/${encodeURIComponent(item.slug || item._id || slug)}`;
         const title = oneLine(item.title) || 'ACTIV gallery';
+        const image = shareImage(req, item.media && item.media.url);
         return send(res, page({
             title,
             description: oneLine(item.caption).slice(0, 300),
-            image: shareImage(req, item.media && item.media.url),
+            image,
+            imageMeta: await imageInfo(image),
             alt: title,
             url,
         }));
@@ -208,11 +243,12 @@ const areaPage = (kind) => async(req, res) => {
         const name = oneLine(kind === 'states' ? doc.stateName : (doc.regionName || doc.label));
         const title = oneLine(seo.metaTitle) || `ACTIV ${name}`.trim();
         const hero = (doc.heroCarousel || [])[0];
-        const image = seo.ogImageUrl || (hero && hero.media && hero.media.url) || (doc.explore && doc.explore.imageUrl) || '';
+        const image = shareImage(req, seo.ogImageUrl || (hero && hero.media && hero.media.url) || (doc.explore && doc.explore.imageUrl) || '');
         return send(res, page({
             title,
             description: (oneLine(seo.metaDescription) || oneLine(doc.shortDescription)).slice(0, 300),
-            image: shareImage(req, image),
+            image,
+            imageMeta: await imageInfo(image),
             alt: title,
             url: `${siteOrigin(req)}/${kind}/${encodeURIComponent(doc.slug || slug)}`,
             type: 'website',

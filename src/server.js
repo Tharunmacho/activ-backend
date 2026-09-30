@@ -124,6 +124,21 @@ const startServer = async() => {
             logger.warn('Event reminder scheduler not started', { error: error && error.message });
         }
 
+        /*
+         * The public API address Instamojo and Meta are handed, probed once
+         * (and every 6 h) so a dead BACKEND_URL is noticed — config/publicUrl.js.
+         * Then the paid-booking reconcile: an unpaid event-booking order whose
+         * payer closed the tab is asked of Instamojo directly, and confirmed
+         * only when Instamojo says the money is credited.
+         * `PAYMENT_RECONCILE_ENABLED=false` turns the reconcile off.
+         */
+        try {
+            require('./config/publicUrl').startValidation();
+            require('./modules/payment/payment.service').startReconcileScheduler();
+        } catch (error) {
+            logger.warn('Payment reconcile not started', { error: error && error.message });
+        }
+
         // Renewal reminders: 30 days, 7 days, and on expiry.
         // `MEMBERSHIP_RENEWAL_REMINDERS=false` turns it off.
         try {

@@ -528,6 +528,35 @@ const toBooking = (doc = {}, joining = null) => ({
 
 
 /**
+ * The entry passes for a booking's email: `ticketUrl` / `registrationNo` for a
+ * one-seat booking (the QR in the ticket stub), and `passes` — one per seat —
+ * for the booker of several. See `eventPass.js`.
+ */
+const passesFor = (b = {}, kind = '', isOnline = false) => {
+    const none = { ticketUrl: '', registrationNo: '', passes: [] };
+    const { admissibility, seatCount, personAt } = require('./eventcheckin.service');
+    if (isOnline || !['confirmed', 'reminder'].includes(kind) || !b._id) return none;
+    if (!admissibility(b, 0).ok) return none;
+    const eventPass = require('./eventPass');
+    const passes = [];
+    for (let i = 0; i < seatCount(b); i += 1) {
+        const token = eventPass.signPass(String(b._id), i);
+        if (!token) continue;
+        passes.push({
+            index: i,
+            name: personAt(b, i).name,
+            registrationNo: eventPass.registrationNo(b.bookingRef, i),
+            url: eventPass.passUrl(token),
+            cid: `pass-qr-${i}`
+        });
+    }
+    if (!passes.length) return none;
+    return passes.length === 1
+        ? { ticketUrl: passes[0].url, registrationNo: passes[0].registrationNo, passes }
+        : { ticketUrl: '', registrationNo: '', passes };
+};
+
+/**
  * An uploaded file's path as a full URL on this server's public address.
  *
  * `/uploads/x.png` means nothing to Gmail or to Meta, which fetch the image
@@ -547,8 +576,15 @@ const absoluteMediaUrl = (value) => {
     const i = raw.indexOf('/uploads/');
     if (i > 0 && /^https?:\/\/[^/]*\.sslip\.io\//i.test(raw)) raw = raw.slice(i);
     if (/^https?:\/\//i.test(raw)) return raw;
-    const base = String(require('../../config').backendUrl || '').replace(/\/+$/, '');
-    if (!base || /localhost|127\.0\.0\.1/.test(base)) return '';
+    /*
+     * The VALIDATED public origin, not BACKEND_URL: on the live deployment
+     * BACKEND_URL names a host that does not resolve, and a poster Meta cannot
+     * download makes it FAIL the whole template after accepting it. The site's
+     * own origin serves `/uploads` (see config/publicUrl.js).
+     */
+    const publicUrl = require('../../config/publicUrl');
+    const base = publicUrl.isPublic() ? publicUrl.publicOrigin() : '';
+    if (!base) return '';
     return `${base}${raw.startsWith('/') ? raw : `/${raw}`}`;
 };
 
@@ -1729,10 +1765,19 @@ class EventBookingService {
                 ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
                 : '',
             eventUrl: eventId ? appUrl(`/events/${publicId}`) : '',
-            // What the email's QR ticket opens: this booking, for check-in at the desk.
-            ticketUrl: eventId && b.bookingRef
-                ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
-                : '',
+            /*
+             * THE ENTRY PASSES. Each seat's QR opens the website's harmless
+             * `/checkin/<token>` page — never this booking, whose page shows
+             * every name on it to whoever scans. Only the events staff, signed
+             * in to the ACTIV app, can turn the token into a name and let the
+             * holder in (eventcheckin.service).
+             *
+             * One seat: its pass is the QR in the ticket stub. Several: the stub
+             * carries none and the booker's email lists one QR per participant
+             * (`passes`); each participant's own email gets theirs (`announce`).
+             * None for a webinar (no door) or a booking that holds no seat.
+             */
+            ...passesFor(b, kind, isOnline),
             bookedByLine: [b.bookedBy && b.bookedBy.name, b.bookedBy && b.bookedBy.phone]
                 .filter(Boolean).join(' · '),
             bookedOnLabel: b.createdAt
@@ -1769,6 +1814,25 @@ class EventBookingService {
             const email = (booking.bookedBy && booking.bookedBy.email) || '';
             const phone = (booking.bookedBy && booking.bookedBy.phone) || '';
             if (!email && !phone) return;
+
+            /*
+             * A CONFIRMATION GOES OUT ONCE PER BOOKING. Every path that settles
+             * a paid booking (webhook, return page, reconcile, mock, the
+             * organiser's "confirm") ends here; the payment claim already makes
+             * one of them win, and this claim makes it impossible for a second
+             * call — a retried webhook, a future caller — to send it twice.
+             * A booking with no `_id` (a test double) is not guarded.
+             */
+            if (resolvedKind === 'confirmed' && booking._id && !extra.resend) {
+                const claim = await EventBooking.updateOne(
+                    { _id: booking._id, confirmationSentAt: null },
+                    { $set: { confirmationSentAt: new Date() } }
+                ).catch(() => null);
+                if (claim && claim.matchedCount === 0 && claim.modifiedCount === 0) {
+                    logger.info('Booking confirmation already sent; not sending again', { bookingRef: booking.bookingRef });
+                    return;
+                }
+            }
 
             const ctx = await this.messageContext(booking, resolvedKind, extra);
             const eventName = {
@@ -1815,13 +1879,16 @@ class EventBookingService {
                 if (!toPhone || !documents.length || !template || String(template).toLowerCase() === 'none') return;
                 const whatsappTemplate = require('../notifications/whatsappTemplate');
                 for (const doc of documents) {
-                    const sent = await whatsappTemplate.sendTemplateMessage(toPhone, template, [
+                    const docParams = [
                         str(toName) || 'Member',
                         doc.name,
                         ctx.eventTitle || 'the event',
                         ctx.whenLabel || 'Date to be confirmed',
                         ctx.bookingRef || '-'
-                    ], 'en', '', { headerDocument: { link: doc.url, filename: doc.name } }).catch((e) => ({ success: false, error: e && e.message }));
+                    ];
+                    const headerDocument = { link: doc.url, filename: doc.name };
+                    const sent = await whatsappTemplate.sendTemplateMessage(toPhone, template, docParams, 'en', '', { headerDocument })
+                        .catch((e) => ({ success: false, error: e && e.message }));
                     await notificationService.log({
                         user: booking.userId || null,
                         event: `EVENT_DOCUMENT_${resolvedKind.toUpperCase()}`,
@@ -1830,9 +1897,18 @@ class EventBookingService {
                         templateId: template,
                         subject: doc.name,
                         status: sent.success ? 'sent' : 'failed',
+                        mock: !!sent.mock,
                         providerMessageId: sent.messageId,
                         lastError: sent.error,
-                        data: { bookingRef: booking.bookingRef, document: doc.url }
+                        provider: sent.provider,
+                        deliveryStatus: sent.mock ? undefined : (sent.success ? 'accepted' : 'failed'),
+                        bookingRef: booking.bookingRef,
+                        eventId: String(booking.eventId || ''),
+                        eventTitle: ctx.eventTitle,
+                        recipientName: str(toName),
+                        resendOf: extra.resendOf,
+                        // Everything a replay needs to send the same file again.
+                        data: { bookingRef: booking.bookingRef, document: doc.url, params: docParams, headerDocument }
                     }).catch(() => {});
                 }
             };
@@ -1859,6 +1935,11 @@ class EventBookingService {
                     phone: str(person.phone)
                 }, {
                     ...ctx,
+                    // THEIR entry pass only — never the booker's list of everybody's.
+                    ...(() => {
+                        const own = (ctx.passes || []).find((p) => p.index === (booking.participants || []).indexOf(person));
+                        return { ticketUrl: own ? own.url : '', registrationNo: own ? own.registrationNo : '', passes: [] };
+                    })(),
                     // The message is about THEIR seat, booked by somebody else.
                     participantName: str(person.name),
                     participantEmail: str(person.email),
@@ -1899,6 +1980,141 @@ class EventBookingService {
      * seat taken an hour before the start has just had its confirmation, and
      * "starts tomorrow" then would be wrong.
      */
+    /**
+     * The booking a delivery-log row was about.
+     *
+     * Rows written since delivery tracking carry `bookingRef`. Older ones do
+     * not, so they are matched the way a person would: the most recent booking
+     * made before the message, by the address it went to (booker or
+     * participant, email or last ten digits of the phone).
+     */
+    async bookingForLogRow(row = {}) {
+        const ref = str(row.bookingRef || (row.data && row.data.bookingRef)).toUpperCase();
+        if (ref) return EventBooking.findOne({ bookingRef: ref }).lean().catch(() => null);
+
+        const recipient = str(row.recipient);
+        if (!recipient) return null;
+        const isEmail = recipient.includes('@');
+        const digits = phoneKey(recipient);
+        const who = isEmail
+            ? [{ 'bookedBy.email': new RegExp(`^${recipient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+                { 'participants.email': new RegExp(`^${recipient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }]
+            : (digits ? [{ 'bookedBy.phone': new RegExp(`${digits}$`) }, { 'participants.phone': new RegExp(`${digits}$`) }] : []);
+        if (!who.length) return null;
+        return EventBooking.findOne({ $or: who, createdAt: { $lte: row.createdAt || new Date() } })
+            .sort({ createdAt: -1 }).lean().catch(() => null);
+    }
+
+    /**
+     * RESEND ONE LOGGED BOOKING MESSAGE, built fresh from the live booking.
+     *
+     * The Super Admin's "Resend" on a failed confirmation / reminder /
+     * cancellation / document row. Replaying the stored template parameters
+     * would repeat whatever was wrong with them; rebuilding from the booking
+     * and the event as they stand now sends the customised message (online vs
+     * in-person, booker vs participant) the code sends in the first place —
+     * on the ONE channel of the row, to the ONE person, as a NEW log row.
+     *
+     * Refuses a message the booking no longer supports: a confirmation for a
+     * booking that was since cancelled would tell somebody they hold a seat
+     * they do not.
+     *
+     * Resolves `{ row, outcome }` or `{ skipped, reason }`; never sends to
+     * anybody but the row's own recipient.
+     */
+    async resendLoggedMessage(row = {}) {
+        const booking = await this.bookingForLogRow(row);
+        if (!booking) return { skipped: true, reason: 'The booking this message was about could not be found' };
+
+        const event = String(row.event || '');
+        const kind = /REMINDER$/.test(event) ? 'reminder'
+            : /CANCELLED$/.test(event) ? 'cancelled'
+                : /WAITLISTED$/.test(event) ? 'waitlist' : 'confirmed';
+        const paid = ['paid', 'not_required'].includes((booking.payment && booking.payment.status) || '');
+        const allowed = {
+            confirmed: booking.status === 'active' && paid,
+            reminder: booking.status === 'active' && paid,
+            cancelled: booking.status === 'cancelled',
+            waitlist: booking.status === 'waitlist'
+        }[kind];
+        if (!allowed) {
+            return { skipped: true, reason: `Not re-sent: booking ${booking.bookingRef} is now ${booking.status}${paid ? '' : ' and unpaid'}` };
+        }
+
+        const channel = row.channel === 'email' ? 'email' : 'whatsapp';
+        const notificationService = require('../notifications/notification.service');
+
+        /* A DOCUMENT: the same file, same template, to the same number. */
+        if (/^EVENT_DOCUMENT_/.test(event)) {
+            const data = row.data || {};
+            if (!row.templateId || !data.headerDocument || !data.headerDocument.link) {
+                return { skipped: true, reason: 'This document row predates resend support — send the confirmation again instead' };
+            }
+            const whatsappTemplate = require('../notifications/whatsappTemplate');
+            const outcome = await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '',
+                { headerDocument: data.headerDocument }).catch((e) => ({ success: false, error: e && e.message }));
+            const fresh = await notificationService.log({
+                user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
+                templateId: row.templateId, subject: row.subject, status: outcome.success ? 'sent' : 'failed',
+                mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error,
+                provider: outcome.provider,
+                deliveryStatus: outcome.mock ? undefined : (outcome.success ? 'accepted' : 'failed'),
+                bookingRef: booking.bookingRef, eventId: String(booking.eventId || ''), eventTitle: row.eventTitle,
+                recipientName: row.recipientName, resendOf: row._id, data
+            });
+            return { row: fresh, outcome };
+        }
+
+        const ctx = await this.messageContext(booking, kind);
+
+        /* The booker, or the participant the row went to. */
+        const recipient = str(row.recipient).toLowerCase();
+        const matches = (p = {}) => (recipient.includes('@')
+            ? str(p.email).toLowerCase() === recipient
+            : !!phoneKey(p.phone) && phoneKey(p.phone) === phoneKey(recipient));
+        const participantRow = /^EVENT_PARTICIPANT_/.test(event);
+        const bookedBy = booking.bookedBy || {};
+        const person = participantRow ? (booking.participants || []).find(matches) : null;
+        if (participantRow && !person) {
+            return { skipped: true, reason: 'That participant is no longer on the booking (names may have been changed)' };
+        }
+
+        const eventName = participantRow
+            ? { confirmed: 'EVENT_PARTICIPANT_CONFIRMED', reminder: 'EVENT_PARTICIPANT_REMINDER', cancelled: 'EVENT_PARTICIPANT_CANCELLED' }[kind]
+            : { confirmed: 'EVENT_BOOKING_CONFIRMED', reminder: 'EVENT_BOOKING_REMINDER', cancelled: 'EVENT_BOOKING_CANCELLED', waitlist: 'EVENT_BOOKING_WAITLISTED' }[kind];
+        if (!eventName) return { skipped: true, reason: 'This kind of message cannot be re-sent' };
+
+        const target = person
+            ? { id: '', name: str(person.name), email: str(person.email), phone: str(person.phone) }
+            : { id: booking.userId || '', name: str(bookedBy.name), email: str(bookedBy.email), phone: str(bookedBy.phone) };
+
+        const payload = person
+            ? {
+                ...ctx,
+                ...(() => {
+                    const own = (ctx.passes || []).find((p) => p.index === (booking.participants || []).indexOf(person));
+                    return { ticketUrl: own ? own.url : '', registrationNo: own ? own.registrationNo : '', passes: [] };
+                })(),
+                participantName: str(person.name),
+                participantEmail: str(person.email),
+                participantPhone: str(person.phone),
+                bookerName: str(bookedBy.name),
+                bookerEmail: str(person.email)
+            }
+            : ctx;
+
+        const result = await notificationService.dispatchLifecycleEvent(eventName, target, {
+            ...payload,
+            onlyChannel: channel,
+            resendOf: row._id
+        });
+        const outcome = result.channels[channel];
+        if (!outcome) {
+            return { skipped: true, reason: `Nothing to send: the booking has no ${channel === 'email' ? 'email address' : 'WhatsApp number'} for this person` };
+        }
+        return { row: result.rows[channel] || null, outcome };
+    }
+
     async sendDueReminders() {
         const now = Date.now();
         const rawDefault = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined
@@ -2657,3 +2873,4 @@ module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
 module.exports.describeSchedule = describeSchedule;
 module.exports.bookingAsRegistration = bookingAsRegistration;
 module.exports.ownerClause = ownerClause;
+module.exports.passesFor = passesFor;

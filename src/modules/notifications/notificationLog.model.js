@@ -40,6 +40,15 @@ const notificationLogSchema = new mongoose.Schema({
             'EVENT_BOOKING_CANCELLED',
             'EVENT_BOOKING_REMINDER',
             'EVENT_BOOKING_WAITLISTED',
+            /*
+             * The event's documents (agenda PDF …), sent as WhatsApp files after
+             * a confirmation or reminder. `eventbooking.service` has always
+             * logged them under these names and they were missing here, so every
+             * document row failed validation and vanished — the exact failure
+             * the note above describes.
+             */
+            'EVENT_DOCUMENT_CONFIRMED',
+            'EVENT_DOCUMENT_REMINDER',
             'BOT_REPLY',
             'CUSTOM'
         ],
@@ -100,6 +109,68 @@ const notificationLogSchema = new mongoose.Schema({
         type: Number,
         default: 1
     },
+    /*
+     * ======================================================================
+     * DELIVERY — what happened AFTER the provider said yes
+     * ======================================================================
+     *
+     * `status: 'sent'` only ever meant "Meta / the SMTP server accepted the
+     * request". Meta then reports, asynchronously, whether the message was sent
+     * to the handset network, delivered, read — or FAILED (a header image it
+     * could not fetch, a number with no WhatsApp, a template paused for quality).
+     * Those callbacks were thrown away, so a message that never arrived stayed a
+     * green "sent" row forever. `deliveryStatus` is the latest thing the
+     * provider told us, and `statusHistory` is every step with its time.
+     *
+     *   accepted   provider accepted it (all we will ever know for email)
+     *   sent       WhatsApp sent it towards the handset
+     *   delivered  on the phone
+     *   read       opened
+     *   failed     with `failureCode` / `failureReason`
+     *
+     * A later `failed` also flips `status` to `failed`, so the health counts
+     * stop reporting a message that did not arrive as a success.
+     */
+    deliveryStatus: {
+        type: String,
+        enum: ['accepted', 'sent', 'delivered', 'read', 'failed'],
+        index: true
+    },
+    statusHistory: [{
+        _id: false,
+        status: String,
+        at: Date,
+        code: String,
+        title: String,
+        detail: String
+    }],
+    deliveredAt: Date,
+    readAt: Date,
+    failedAt: Date,
+    failureCode: String,
+    failureReason: String,
+    /** 'meta' | 'botbee' | 'smtp' — which provider answered. */
+    provider: String,
+    /*
+     * WHICH BOOKING AND WHICH EVENT the message was about, as first-class
+     * fields so the Super Admin can filter by them. They used to exist only
+     * inside `data` for document rows and not at all for the confirmation
+     * itself, so "did this booker hear from us?" had no query that answered it.
+     */
+    bookingRef: { type: String, index: true },
+    eventId: { type: String, index: true },
+    eventTitle: String,
+    /** The person's name, for searching — the recipient is an address. */
+    recipientName: String,
+    /**
+     * Which WhatsApp template actually went, and which richer ones were
+     * skipped because a value they print (organiser name, a note) was not on
+     * the event. Readable text, for the oversight screen.
+     */
+    templatePath: String,
+    /** A resend writes a new row; the two point at each other. */
+    resendOf: { type: mongoose.Schema.Types.ObjectId },
+    resentAs: { type: mongoose.Schema.Types.ObjectId },
     data: mongoose.Schema.Types.Mixed
 }, {
     timestamps: true
@@ -113,5 +184,7 @@ const notificationLogSchema = new mongoose.Schema({
 notificationLogSchema.index({ createdAt: -1 });
 notificationLogSchema.index({ status: 1, createdAt: -1 });
 notificationLogSchema.index({ channel: 1, createdAt: -1 });
+// A delivery callback names the provider's message id and nothing else.
+notificationLogSchema.index({ providerMessageId: 1 });
 
 module.exports = mongoose.model('NotificationLog', notificationLogSchema);

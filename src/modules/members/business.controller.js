@@ -89,6 +89,11 @@ const COMPANY_TEXT_FIELDS = [
     'gstNumber',
     'turnoverOther',
     'msmeUdyamNumber',
+    // Both are String paths on the Company schema and both are sent by the
+    // website's CompanyForm and the app's shared company form. Absent from this
+    // list they were dropped on every save with a 200 — additive fix.
+    'nsicRegistrationNumber',
+    'itrYears',
     'exportCouncilName',
     'exportCouncilRegNumber',
     'otherRegistrationDetails',

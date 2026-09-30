@@ -219,7 +219,9 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         email: buyerEmail,
         phone: buyerPhone,
         redirectUrl: returnUrl,
-        webhookUrl: `${process.env.BACKEND_URL}/api/v1/webhook/instamojo`
+        // The VALIDATED public address — BACKEND_URL named a dead host, so no
+        // Instamojo webhook ever arrived. See config/publicUrl.js.
+        webhookUrl: require('../../config/publicUrl').instamojoWebhookUrl()
     };
 
     const result = await paymentService.createPaymentRequest(paymentData);

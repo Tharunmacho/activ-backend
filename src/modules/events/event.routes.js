@@ -2,6 +2,8 @@ const express = require('express');
 const controller = require('./event.controller');
 const upload = require('../../core/middleware/upload');
 const { verifyToken, requireRole } = require('../../core/middleware/auth');
+const asyncHandler = require('../../core/utils/asyncHandler');
+const ApiResponse = require('../../core/utils/ApiResponse');
 
 const { resolveEventParam } = require('./eventSlug');
 
@@ -125,6 +127,35 @@ router.get('/:id/bookings', requireRole(...BOOKING_VIEWERS), controller.listBook
  */
 router.get('/:id/bookings/export', requireRole(...BOOKING_VIEWERS), controller.exportBookings);
 router.get('/:id/attendees', requireRole(...BOOKING_VIEWERS), controller.listAttendees);
+/*
+ * ATTENDANCE — who has been let in at the door (event-checkin), per event.
+ *
+ * Open to the events admin as well as the super admin, because the events
+ * admin runs the door. What the events admin does NOT get is what
+ * BOOKING_VIEWERS protects: attendees' email and mobile. The service masks the
+ * number for them (last four digits) and leaves email out; the super admin's
+ * rows and CSV carry both. `/attendance/export` before nothing that could
+ * capture it — `attendance` is a literal after `/:id`, at its own depth.
+ */
+const ATTENDANCE_VIEWERS = ['super_admin', 'events_admin'];
+router.get('/:id/attendance', requireRole(...ATTENDANCE_VIEWERS), asyncHandler(async(req, res) => {
+    const { liveService } = require('./eventcheckin.service');
+    const data = await liveService().attendance(req.params.id, {
+        q: String(req.query.q || ''),
+        status: ['in', 'out'].includes(req.query.status) ? req.query.status : 'all',
+        includeContact: req.user && req.user.role === 'super_admin'
+    });
+    res.json(ApiResponse.success(data));
+}));
+router.get('/:id/attendance/export', requireRole(...ATTENDANCE_VIEWERS), asyncHandler(async(req, res) => {
+    const { liveService } = require('./eventcheckin.service');
+    const { filename, csv } = await liveService().attendanceCsv(req.params.id, {
+        includeContact: req.user && req.user.role === 'super_admin'
+    });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+}));
 router.get('/:id/bookings/:ref', requireRole(...BOOKING_VIEWERS), controller.getBooking);
 router.post('/:id/bookings/:ref/record-payment', requireRole(...BOOKING_VIEWERS), controller.recordBookingPayment);
 router.post('/:id/bookings/:ref/cancel', requireRole(...BOOKING_VIEWERS), controller.cancelBooking);

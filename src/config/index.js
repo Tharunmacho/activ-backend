@@ -208,6 +208,13 @@ module.exports = {
             apiVersion: real(process.env.META_API_VERSION) || 'v21.0',
             baseUrl: (real(process.env.META_BASE_URL) || 'https://graph.facebook.com').replace(/\/+$/, ''),
             timeoutMs: parseInt(process.env.META_TIMEOUT_MS, 10) || 15000,
+            /*
+             * The delivery-status webhook (/notifications/meta/webhook): the
+             * token typed into the Meta app's webhook setup, and the app secret
+             * that signs every callback (X-Hub-Signature-256).
+             */
+            webhookVerifyToken: real(process.env.META_WEBHOOK_VERIFY_TOKEN),
+            appSecret: real(process.env.META_APP_SECRET),
             isConfigured: !!(accessToken && phoneNumberId)
         };
     })(),

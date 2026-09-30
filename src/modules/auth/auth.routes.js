@@ -91,6 +91,10 @@ router.get('/oauth/:provider/start', authLimiter, (req, res) => {
         res.redirect(oauthService.startUrl(String(req.params.provider || '').toLowerCase(), req, res));
     } catch (err) {
         const reason = err && err.statusCode === 404 ? 'unavailable' : 'not_configured';
+        // The mobile app (`?client=app`, allowlisted) gets its answer on its own
+        // deep link; with no client this branch is skipped and nothing changes.
+        const client = oauthService.clientFrom(req.query && req.query.client);
+        if (client) return res.redirect(oauthService.toClient(client, { error: reason }));
         const base = String(require('../../config').frontendUrl || '').replace(/\/+$/, '');
         res.redirect(`${base}/auth/social#error=${reason}`);
     }
@@ -99,7 +103,13 @@ router.get('/oauth/:provider/start', authLimiter, (req, res) => {
 router.get('/oauth/:provider/callback', authLimiter, async(req, res) => {
     const target = await oauthService
         .handleCallback(String(req.params.provider || '').toLowerCase(), req, res)
-        .catch(() => `${String(require('../../config').frontendUrl || '').replace(/\/+$/, '')}/auth/social#error=failed`);
+        .catch(() => {
+            // Same rule as above: only a state token this server issued for the
+            // app sends the failure there; everything else is unchanged.
+            const client = oauthService.clientFromState(req.query && req.query.state);
+            if (client) return oauthService.toClient(client, { error: 'failed' });
+            return `${String(require('../../config').frontendUrl || '').replace(/\/+$/, '')}/auth/social#error=failed`;
+        });
     res.redirect(target);
 });
 

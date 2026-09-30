@@ -44,7 +44,17 @@ app.use(persistUploadsMiddleware);
 setupSecurity(app);
 
 // Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+    limit: '10mb',
+    /*
+     * Meta signs its webhook over the RAW bytes (X-Hub-Signature-256), which a
+     * parsed-and-restringified body does not reproduce. Kept for that one path
+     * only, so no other request carries a second copy of its body.
+     */
+    verify: (req, res, buf) => {
+        if (String(req.originalUrl || '').includes('/notifications/meta/webhook')) req.rawBody = buf;
+    }
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Compression

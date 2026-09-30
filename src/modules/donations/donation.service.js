@@ -242,7 +242,7 @@ class DonationService {
                     email: form.donor.email,
                     phone: form.donor.phone,
                     redirectUrl: `${siteBase}/donate/thank-you?orderId=${encodeURIComponent(orderId)}`,
-                    webhookUrl: `${config.backendUrl || process.env.BACKEND_URL}/api/v1/webhook/instamojo`
+                    webhookUrl: require('../../config/publicUrl').instamojoWebhookUrl()
                 });
                 paymentUrl = result.payment_url || '';
                 requestId = result.payment_request_id || '';

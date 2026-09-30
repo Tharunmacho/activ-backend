@@ -79,6 +79,14 @@ router.use('/share', require('./modules/share/share.routes'));
 router.use('/event-bookings', eventBookingRoutes);
 
 /**
+ * Event check-in at the door (QR entry passes). Above `businessRoutes` for the
+ * same reason: `/pass/:token` and `/qr/:token.png` are public — a phone camera
+ * that opens the pass page holds no ACTIV token. The staff endpoints carry
+ * their own `verifyToken` + role gate. See `eventcheckin.routes.js`.
+ */
+router.use('/event-checkin', require('./modules/events/eventcheckin.routes'));
+
+/**
  * The BotBee inbound WhatsApp webhook.
  *
  * ABOVE `businessRoutes` for exactly the reason `/regions` and `/cms` are:
@@ -94,6 +102,13 @@ router.use('/event-bookings', eventBookingRoutes);
  * routers do not collide — this one owns `/botbee/*` and nothing else.
  */
 router.use('/notifications/botbee', botbeeWebhookRoutes);
+
+/*
+ * Meta's WhatsApp delivery-status webhook (sent / delivered / read / failed).
+ * Above the auth gate for the same reason as BotBee's — Meta holds no token.
+ * It only annotates NotificationLog rows; see metaWebhook.routes.js.
+ */
+router.use('/notifications/meta', require('./modules/notifications/metaWebhook.routes'));
 
 router.use('/members', memberRoutes);
 

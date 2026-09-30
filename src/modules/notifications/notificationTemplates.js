@@ -135,12 +135,15 @@ const documentsHtml = (ctx = {}) => {
 const beforeYouComeHtml = (ctx = {}) => documentsHtml(ctx) + beforeYouComeInner(ctx);
 const beforeYouComeInner = (ctx = {}) => {
     const notes = noteLinesOf(ctx);
-    // The same timed advice WhatsApp gives, so the two channels never disagree.
-    const standing = standingTips(ctx).map((t) => `${t}.`);
-    if (!ctx.isOnline) standing.push('Show the QR code above at the registration desk for quick check-in.');
-    if (ctx.settledVia && ctx.settledVia !== 'free') {
-        standing.push('Fees are non-refundable; participant names can be changed.');
-    }
+    /*
+     * ONLY THE ORGANISER'S NOTES, plus the one line about THIS email's own QR
+     * ticket. The standing advice that used to follow ("arrive 30 minutes
+     * early", "carry a government photo ID", "fees are non-refundable") was
+     * written by nobody for this event — see `tipPair`.
+     */
+    const standing = [];
+    if (!ctx.isOnline && ctx.ticketUrl) standing.push('Show the QR code above at the registration desk for quick check-in.');
+    if (!notes.length && !standing.length) return '';
     /*
      * NEVER SAY IT TWICE. A standing tip the organiser's own note already
      * covers ("Carry a government photo ID" and "Carry a photo ID for each
@@ -204,7 +207,9 @@ const amountDigits = (ctx = {}) => String(ctx.amountLabel || '').replace(/[^\d.,
  * joining link). Until the organiser has added one, the booking page.
  */
 const registerLink = (ctx = {}) => ctx.registerUrl
-    || `${ctx.viewUrl || ctx.eventUrl || appUrl('/events')} (the registration link will be added here soon)`;
+    // No promise that it "will be added soon" — nobody has said so. What is
+    // true is that the organiser has not published one yet.
+    || `${ctx.viewUrl || ctx.eventUrl || appUrl('/events')} (the organiser has not published the registration link yet)`;
 
 /** "Dear Tharun" — the full name the booker gave, first name as a fallback. */
 // A participant's own name first: their message is about THEIR seat, not the booker's.
@@ -221,21 +226,46 @@ const prettyPhone = (value) => {
 const organiserLine = (ctx = {}) => [oneLine(ctx.contactName, 80), prettyPhone(ctx.contactPhone), oneLine(ctx.contactEmail, 120)]
     .filter(Boolean).join(' · ') || ctx.contactLine || '';
 
-/** The organiser, as three separate values — name, phone, email — each on its own line. */
+/**
+ * The organiser, as three separate values — name, phone, email — EXACTLY as
+ * the editor saved them on the event, and EMPTY when they did not.
+ *
+ * =====================================================================
+ * NO INVENTED CONTACT, EVER
+ * =====================================================================
+ *
+ * This used to fill a blank with "ACTIV Office", a fixed phone number and
+ * enquiry@activ.org.in. A webinar whose editor left the name blank then told
+ * every registrant "👤 Name: ACTIV Office" — a person who does not exist, on a
+ * message the association signs. A blank here is handled by the caller: a
+ * template that prints the three on separate lines is SKIPPED (see
+ * `customTemplates`), and the text message leaves the line out.
+ */
 const contactParts = (ctx = {}) => [
-    oneLine(ctx.contactName, 80) || 'ACTIV Office',
-    prettyPhone(ctx.contactPhone) || '+91 82201 12188',
-    oneLine(ctx.contactEmail, 120) || 'enquiry@activ.org.in'
+    oneLine(ctx.contactName, 80),
+    prettyPhone(ctx.contactPhone),
+    oneLine(ctx.contactEmail, 120)
 ];
 
-/** Exactly two "Please note" points: the organiser's own first, the standing advice after. */
+/**
+ * The "Please note" points — the ORGANISER's own, and nothing else.
+ *
+ * A standing list ("carry a government photo ID", "arrive 30 minutes early",
+ * "use a stable internet connection") used to pad this to two. None of it was
+ * written by anyone for the event in question, and each of those sentences is
+ * an instruction a booker acts on. The event video, when there is one, is a
+ * real thing on the event and may stand as a point.
+ *
+ * Returns the notes as they are — zero, one or two entries. A template that
+ * needs two is skipped when there are fewer (`customTemplates`).
+ */
 const tipPair = (ctx = {}) => {
-    const notes = noteLinesOf(ctx).map((n) => clause(n, 180));
-    const standing = standingTips(ctx);
-    const list = [...notes, ...standing].filter(Boolean);
-    const second = notes.length > 1 ? notes.slice(1).join('; ') : (list[1] || standing[1]);
-    // An event video is worth more than a standing tip: it takes the second point.
-    return [list[0] || standing[0], ctx.videoUrl ? `Watch the event video: ${ctx.videoUrl}` : second];
+    const notes = noteLinesOf(ctx).map((n) => clause(n, 180)).filter(Boolean);
+    const video = ctx.videoUrl ? `Watch the event video: ${ctx.videoUrl}` : '';
+    if (!notes.length) return video ? [video] : [];
+    if (notes.length === 1) return video ? [notes[0], video] : [notes[0]];
+    // Two points: the first note, then the rest — the video beats nothing typed.
+    return [notes[0], video || notes.slice(1).join('; ')];
 };
 
 /**
@@ -255,9 +285,12 @@ const onlineLinkKind = (url) => {
 };
 
 /** "join at 2:55 PM IST, 5 minutes before the 3:00 PM IST start" — a real time, never just "the start". */
-const joinWhen = (ctx = {}) => (ctx.joinTimeLabel && ctx.startClock
-    ? `join at ${ctx.joinTimeLabel}, 5 minutes before the ${ctx.startClock} start`
-    : 'join 5 minutes before the webinar begins');
+/*
+ * The START, which is on the event — not an invented "join 5 minutes early".
+ */
+const joinWhen = (ctx = {}) => (ctx.startClock
+    ? `join for the ${ctx.startClock} start`
+    : 'join at the start time');
 
 /** The three pieces of the webinar message that depend on the link kind. */
 const webinarLinkLines = (ctx = {}) => {
@@ -275,19 +308,21 @@ const webinarLinkLines = (ctx = {}) => {
         return [
             `Your ${platform} joining link`,
             ctx.registerUrl,
-            `Tap the link to ${joinWhen(ctx)}, and check your audio and video. Please keep it to yourself`
+            `Tap the link to ${joinWhen(ctx)}`
         ];
     }
+    // No link on the event yet. Say exactly that — never promise when or
+    // where one will arrive, because nobody has decided.
     return [
         'Your joining link',
-        'The organiser will share it here before the webinar starts',
+        'Not published by the organiser yet',
         `Your seat is saved. Keep your booking ID handy: ${ctx.bookingRef || ''}`.trim()
     ];
 };
 
 /** The fee, or — to a participant, who did not pay — who booked the seat for them. */
 const feeOrBooker = (ctx = {}, rupee = 'Rs ') => (ctx.forParticipant
-    ? `Booked for you by ${oneLine(ctx.bookerName, 60) || 'your organisation'}`
+    ? (oneLine(ctx.bookerName, 60) ? `Booked for you by ${oneLine(ctx.bookerName, 60)}` : 'Booked for you')
     : orDash(feeLine(ctx, rupee)));
 
 /**
@@ -345,14 +380,42 @@ const PREVIOUS = {
 };
 const withPrevious = (steps) => steps.flatMap((s) => (PREVIOUS[s.template] ? [s, { ...s, template: PREVIOUS[s.template] }] : [s]));
 
-const customTemplates = (kind, ctx = {}) => {
+/**
+ * =====================================================================
+ * A TEMPLATE THAT WOULD PRINT A BLANK IS SKIPPED, NOT PADDED
+ * =====================================================================
+ *
+ * Meta refuses an empty parameter, and the old answer was to fill it with
+ * something plausible: "ACTIV Office", the association's switchboard number,
+ * "carry a government photo ID". Each of those went out as a fact about an
+ * event nobody had said it about.
+ *
+ * Now each step names the values its fixed wording PRINTS (`needs`). When one
+ * is empty on the event the step is dropped and the chain moves on to a
+ * template that has no such line — the approved poster template, then the
+ * generic notice — and the session-text copy simply leaves the line out. The
+ * skip is recorded (`skipped`) so the delivery log can say which richer
+ * message was passed over and why.
+ */
+const keepComplete = (steps, skipped) => steps.filter((step) => {
+    const missing = Object.entries(step.needs || {}).filter(([, value]) => !String(value || '').trim()).map(([k]) => k);
+    if (missing.length && Array.isArray(skipped)) skipped.push(`${step.template} skipped: ${missing.join(', ')} not on the event`);
+    return !missing.length;
+}).map(({ needs, ...step }) => step); // eslint-disable-line no-unused-vars
+
+const customTemplates = (kind, ctx = {}, skipped = []) => {
     const title = clause(ctx.eventTitle, 120) || 'the event';
     const date = orDash(ctx.dateLabel, 'Date to be confirmed');
     const time = orDash(ctx.timeLabel, 'Time to be confirmed');
     const ref = ctx.bookingRef || 'See your email';
-    const [tip1, tip2] = tipPair(ctx);
+    const tips = tipPair(ctx);
+    const [tip1 = '', tip2 = ''] = tips;
+    const notesLine = tips.join('; ');
     const [cName, cPhone, cEmail] = contactParts(ctx);
-    const orgLine = orDash(ctx.contactLine, 'the ACTIV office, +91 82201 12188');
+    // Only the contact details the editor saved — no office fallback.
+    const orgLine = oneLine(organiserLine(ctx), 300);
+    const contactNeeds = { 'organiser name': cName, 'organiser phone': cPhone, 'organiser email': cEmail };
+    const tipNeeds = { 'first note for attendees': tip1, 'second note for attendees': tip2 };
     const steps = [];
 
     /*
@@ -364,11 +427,12 @@ const customTemplates = (kind, ctx = {}) => {
         if (tplOn(TPL.bookingParticipant)) {
             steps.push({
                 template: TPL.bookingParticipant,
-                params: [greetName(ctx), oneLine(ctx.bookerName, 60) || 'Your organisation', title, date, time,
+                needs: { 'booker name': oneLine(ctx.bookerName, 60), ...tipNeeds, ...contactNeeds },
+                params: [greetName(ctx), oneLine(ctx.bookerName, 60), title, date, time,
                     orDash(whereLine(ctx)), label, orDash(plink, 'See your email'), ref, tip1, tip2, cName, cPhone, cEmail]
             });
         }
-        return [...withPrevious(steps), ...customTemplates('confirmed', ctx)];
+        return [...keepComplete(withPrevious(steps), skipped), ...customTemplates('confirmed', ctx, skipped)];
     }
 
     if (kind === 'confirmed' && ctx.isOnline) {
@@ -376,6 +440,7 @@ const customTemplates = (kind, ctx = {}) => {
         if (tplOn(TPL.bookingWebinar)) {
             steps.push({
                 template: TPL.bookingWebinar,
+                needs: contactNeeds,
                 params: [greetName(ctx), title, date, time, orDash(ctx.onlinePlatform, 'Online'), ref,
                     head, orDash(link), orDash(ctx.videoUrl ? `${how}. Watch the event video: ${ctx.videoUrl}` : how),
                     cName, cPhone, cEmail]
@@ -383,6 +448,7 @@ const customTemplates = (kind, ctx = {}) => {
         }
         steps.push({
             template: V2.webinar,
+            needs: { 'organiser contact': orgLine },
             params: [greetName(ctx), title, date, time, orDash(ctx.onlinePlatform, 'Online'), ref,
                 registerLink(ctx), oneLine(ctx.bookerEmail, 120) || 'the email address you register with', orgLine]
         });
@@ -390,36 +456,40 @@ const customTemplates = (kind, ctx = {}) => {
         if (tplOn(TPL.booking)) {
             steps.push({
                 template: TPL.booking,
+                needs: { ...tipNeeds, ...contactNeeds },
                 params: [greetName(ctx), title, date, time,
                     orDash(ctx.venueLabel, 'Venue to be announced'),
-                    orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
+                    orDash(ctx.mapUrl || ctx.viewUrl),
                     orDash(seatsLine(ctx)), feeOrBooker(ctx), ref,
                     tip1, tip2, cName, cPhone, cEmail]
             });
         }
         steps.push({
             template: V2.inPerson,
+            needs: { 'note for attendees': notesLine, 'organiser contact': orgLine },
             params: [greetName(ctx), title, date, time,
                 orDash(ctx.venueLabel, 'Venue to be announced'),
-                orDash(ctx.mapUrl || ctx.viewUrl, 'Shared before the event'),
-                orDash(`${seatsLine(ctx)} | ${feeOrBooker(ctx)}`), ref, `${tip1}; ${tip2}`, orgLine]
+                orDash(ctx.mapUrl || ctx.viewUrl),
+                orDash(`${seatsLine(ctx)} | ${feeOrBooker(ctx)}`), ref, notesLine, orgLine]
         });
     } else if (kind === 'reminder') {
         const [head, link] = ctx.isOnline ? webinarLinkLines(ctx) : ['Directions', ctx.mapUrl || ctx.viewUrl];
         if (tplOn(TPL.bookingReminder)) {
             steps.push({
                 template: TPL.bookingReminder,
+                needs: { ...tipNeeds, ...contactNeeds },
                 params: [greetName(ctx), title, ctx.startsInLabel || 'soon', date, time, orDash(whereLine(ctx)),
                     head, orDash(link, 'See your booking email'), ref, tip1, tip2, cName, cPhone, cEmail]
             });
         }
         steps.push({
             template: V2.reminder,
+            needs: { 'note for attendees': notesLine, 'organiser contact': orgLine },
             params: [greetName(ctx), title, ctx.startsInLabel || 'soon', date, time, orDash(whereLine(ctx)),
-                orDash(link, 'See your booking email'), ref, `${tip1}; ${tip2}`, orgLine]
+                orDash(link, 'See your booking email'), ref, notesLine, orgLine]
         });
     }
-    return withPrevious(steps.filter((s) => s.template));
+    return keepComplete(withPrevious(steps.filter((s) => s.template)), skipped);
 };
 
 /**
@@ -481,11 +551,15 @@ const posterTemplate = (ctx = {}) => {
  */
 const richBookingWhatsApp = (kind, eventParams, ctx = {}) => {
     const image = ctx.posterUrl || DEFAULT_WHATSAPP_POSTER();
-    const steps = [...customTemplates(kind, ctx), posterTemplate(ctx)]
+    const skipped = [];
+    const steps = [...customTemplates(kind, ctx, skipped), posterTemplate(ctx)]
         .filter(Boolean)
         .map((s) => ({ ...s, headerImage: image }));
     steps.push({ template: TPL.event, params: eventParams });
-    return steps.reduceRight((next, step) => (next ? { ...step, fallback: next } : step), null);
+    const chain = steps.reduceRight((next, step) => (next ? { ...step, fallback: next } : step), null);
+    // Which richer templates were passed over for a blank value — logged by
+    // `notification.service` on the delivery row.
+    return { ...chain, skipped };
 };
 
 /**
@@ -520,15 +594,18 @@ const bookingFacts = (ctx = {}, { payment = true, seatsLabel = 'Seats' } = {}) =
     { label: 'Date', value: ctx.dateLabel },
     { label: 'Time', value: ctx.timeLabel },
     // When to be at the desk — a real clock time, not "before the start".
-    { label: 'Reporting time', value: !ctx.isOnline && ctx.reportTimeLabel ? `${ctx.reportTimeLabel} (30 minutes early, for registration)` : '' },
+    // (No "reporting time": a desk opening 30 minutes early was invented here,
+    // never set by an organiser.)
     { label: 'Format', value: ctx.formatLabel },
     ctx.isOnline
         ? { label: 'Registration link', value: ctx.registerUrl || (ctx.kind === 'confirmed' || ctx.kind === 'reminder'
-            ? 'Shared with you soon' : '') }
+            ? 'Not published by the organiser yet' : '') }
         : { label: 'Venue', value: ctx.venueLabel || 'To be announced' },
     { label: 'Topic', value: ctx.topic },
     { label: 'Language', value: ctx.language },
     { label: seatsLabel, value: seatsLine(ctx) },
+    // The seat's own number, beside the QR (one-seat bookings and participants).
+    { label: 'Registration no.', value: ctx.registrationNo },
     // ONE row for the money: "Free", or "₹500 · Paid online".
     ...(payment ? [{ label: ctx.settledVia === 'free' ? 'Entry' : 'Fee', value: feeLine(ctx) }] : []),
     { label: 'Organiser', value: organiserLine(ctx) }
@@ -553,20 +630,11 @@ const whereLine = (ctx = {}) => (ctx.isOnline
     : (ctx.venueLabel || 'Venue to be announced'));
 
 
-/** The standing advice, worded for a webinar or for a hall. */
-const standingTips = (ctx = {}) => (ctx.isOnline
-    ? [
-        ctx.joinTimeLabel && ctx.startClock
-            ? `Join by ${ctx.joinTimeLabel} (the webinar starts at ${ctx.startClock}) to check your audio and video`
-            : 'Join 5 minutes before the webinar begins to check your audio and video',
-        'Use a laptop or phone with a stable internet connection'
-    ]
-    : [
-        ctx.reportTimeLabel && ctx.startClock
-            ? `Please report by ${ctx.reportTimeLabel} for registration; the programme starts at ${ctx.startClock}`
-            : 'Please arrive 30 minutes before the programme begins, for registration',
-        'Carry this booking (on your phone or printed) and a valid government-issued photo ID'
-    ]);
+/*
+ * (`standingTips` — generic arrival / ID / internet advice — was removed: it was
+ * printed as the organiser's instruction on events whose organiser never gave
+ * it. Only `registrationNote` from the event form is an instruction.)
+ */
 
 /**
  * The written-out WhatsApp message (session window / text fallback) for a
@@ -591,11 +659,19 @@ const bookingText = (ctx = {}, { heading, lead, closing }) => {
             ['🏷', [ctx.topic, ctx.language].filter(Boolean).join(' · ')],
             ['🎟', seatsLine(ctx)],
             ['💳', ctx.kind === 'reminder' ? '' : feeOrBooker(ctx, '₹')],
-            ['🔖', ctx.bookingRef ? `Booking ID: ${ctx.bookingRef}` : '']
+            ['🔖', ctx.bookingRef ? `Booking ID: ${ctx.bookingRef}` : ''],
+            // The entry pass as a link (it opens the QR on the website) — one seat only.
+            ['🎫', ctx.ticketUrl && ctx.registrationNo ? `Entry pass ${ctx.registrationNo}: ${ctx.ticketUrl}` : '']
         ])
-        + `\n\n📌 *${notes.length ? 'Please note' : (online ? 'Before the webinar' : 'Before you come')}*\n`
-        + tips.map((n) => `• ${n}`).join('\n')
-        + `\n\n📞 *Need help? Contact the organiser*\n👤 *Name:* ${cName}\n📱 *Phone:* ${cPhone}\n📧 *Email:* ${cEmail}`
+        // The organiser's notes, when they wrote any — no heading over nothing.
+        + (tips.length ? `\n\n📌 *${notes.length ? 'Please note' : 'Event video'}*\n${tips.map((n) => `• ${n}`).join('\n')}` : '')
+        // Each contact line only when the editor saved that value.
+        + (cName || cPhone || cEmail
+            ? '\n\n📞 *Need help? Contact the organiser*'
+                + (cName ? `\n👤 *Name:* ${cName}` : '')
+                + (cPhone ? `\n📱 *Phone:* ${cPhone}` : '')
+                + (cEmail ? `\n📧 *Email:* ${cEmail}` : '')
+            : '')
         + (ctx.viewUrl ? `\n🔎 Your booking: ${ctx.viewUrl}` : '')
         + `\n\n${closing}\n— ${ORG_SIGNATURE}`;
 };
@@ -757,7 +833,7 @@ const TEMPLATES = {
                             ? '<p style="margin:12px 0 0 0;"><strong>One last step:</strong> complete your registration'
                                 + `${ctx.onlinePlatform ? ` on ${esc(ctx.onlinePlatform)}` : ''} with the button below.`
                                 + ' Your personal joining link will then be emailed to you.</p>'
-                            : '<p style="margin:12px 0 0 0;">The registration link will reach you soon.</p>')
+                            : '<p style="margin:12px 0 0 0;">The organiser has not published the registration link yet.</p>')
                     : `<p style="margin:0;">Thank you for booking.${settledSentence(ctx)} We look forward to welcoming you.</p>`,
                 facts: bookingFacts(ctx),
                 actionButton: online && ctx.registerUrl
@@ -818,18 +894,26 @@ const TEMPLATES = {
                 ]
             },
             whatsapp: {
-                ...bookingWhatsApp(TPL.bookingCancel, [
+                /*
+                 * The cancellation template ends "questions? {6}". With no
+                 * contact saved on the event there is nothing true to put
+                 * there, so the dedicated template is skipped for the generic
+                 * notice — never "the ACTIV office" standing in for a person.
+                 */
+                ...bookingWhatsApp(organiserLine(ctx) ? TPL.bookingCancel : '', [
                     greetName(ctx),
                     ctx.bookingRef || 'your booking',
                     clause(title, 120) || 'the event',
                     orDash(ctx.whenLabel, 'Date to be confirmed'),
                     orDash(ctx.reason, 'No reason was given'),
-                    orDash(ctx.contactLine, 'the ACTIV office')
+                    oneLine(organiserLine(ctx), 300)
                 ], [
                     ctx.firstName || 'Member',
                     `the CANCELLATION of your booking ${ctx.bookingRef} for ${clause(title, 110)}`,
                     ctx.whenLabel || 'the scheduled date'
                 ], ctx.posterUrl),
+                skipped: !organiserLine(ctx) && tplOn(TPL.bookingCancel)
+                    ? [`${TPL.bookingCancel} skipped: organiser contact not on the event`] : [],
                 text: '*Booking cancelled*\n\n'
                     + `Hello ${ctx.firstName || 'Member'},\n`
                     + `Your booking for *${title}* has been cancelled by the organiser.\n\n`
@@ -861,8 +945,7 @@ const TEMPLATES = {
                 highlight: { label: 'Waitlist reference', value: ctx.bookingRef },
                 actionButton: ctx.eventUrl ? { label: 'View the event', url: ctx.eventUrl } : undefined,
                 bodyHtml: `<p style="margin:0;">This event is fully booked, so your request is on the waitlist.
-                    <strong>No seat is held and nothing has been charged</strong> — the organiser will contact
-                    you if a place opens up.</p>`,
+                    <strong>No seat is held and nothing has been charged.</strong></p>`,
                 facts: bookingFacts(ctx, { payment: false, seatsLabel: 'Seats requested' })
             },
             whatsapp: {
@@ -915,7 +998,7 @@ const TEMPLATES = {
                     ? `<p style="margin:0;">${ctx.registerUrl
                         ? 'Your place is reserved. Not registered on the platform yet? Do it now with the button below —'
                             + ' your personal joining link is then emailed to you.'
-                        : 'Your place is reserved. The registration link will reach you shortly.'}</p>`
+                        : 'Your place is reserved. The organiser has not published the registration link yet.'}</p>`
                     : '<p style="margin:0;">Your seat is reserved — we look forward to seeing you.</p>',
                 facts: bookingFacts(ctx, { payment: false }),
                 actionButton: online && ctx.registerUrl
@@ -953,7 +1036,7 @@ const TEMPLATES = {
         const ctx = asParticipant(raw);
         const title = ctx.eventTitle || 'the event';
         const online = !!ctx.isOnline;
-        const booker = ctx.bookerName || 'Your organisation';
+        const booker = ctx.bookerName || 'Someone';
         return {
             email: {
                 subject: `${booker} booked a seat for you: ${title}`,
@@ -974,11 +1057,11 @@ const TEMPLATES = {
                         ? (onlineLinkKind(ctx.registerUrl) === 'register'
                             ? '<p style="margin:12px 0 0 0;"><strong>One step for you:</strong> register with the button below'
                                 + ' — your personal joining link appears as soon as you submit the form.</p>'
-                            : '<p style="margin:12px 0 0 0;">Join with the button below, 5–10 minutes before the start.</p>')
+                            : '<p style="margin:12px 0 0 0;">Join with the button below at the start time.</p>')
                         : ''),
                 facts: [
                     ...bookingFacts(ctx, { payment: false, seatsLabel: 'Your seat' }),
-                    { label: 'Booked by', value: booker }
+                    { label: 'Booked by', value: ctx.bookerName || '' }
                 ],
                 actionButton: online && ctx.registerUrl
                     ? { label: onlineLinkKind(ctx.registerUrl) === 'register'
@@ -1016,7 +1099,7 @@ const TEMPLATES = {
         const out = TEMPLATES.EVENT_BOOKING_CANCELLED({ ...ctx, settledVia: 'free' });
         delete out.inApp;
         out.email.bodyHtml = `<p style="margin:0 0 12px 0;">The booking <strong>${esc(ctx.bookingRef)}</strong> that `
-            + `${esc(ctx.bookerName || 'your organisation')} made for you has been cancelled by the organiser, `
+            + `${ctx.bookerName ? esc(ctx.bookerName) : 'someone'} made for you has been cancelled by the organiser, `
             + 'so your seat is released.</p>'
             + (ctx.reason ? `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${esc(ctx.reason)}</p>` : '')
             + '<p style="margin:0;">Questions? Reply to this email or contact the organiser below.</p>';
@@ -1448,11 +1531,48 @@ const FALLBACK_TEMPLATE = {
 };
 
 /** Render one event. Returns `null` for a name with no template. */
+/**
+ * ENTRY PASSES for a booking of several seats — one QR per participant, in the
+ * BOOKER's confirmation and reminder (each participant's own email carries
+ * only theirs, in the ticket stub). The QR images are drawn by
+ * notification.service from `passQrs` and embedded as `cid:pass-qr-<n>`.
+ * Each QR opens the website's harmless pass page; only the events staff's app
+ * can read a name from it. See `events/eventPass.js`.
+ */
+const WITH_PASSES = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER'];
+const passesHtml = (passes = []) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                   style="background-color:#f5f8ff; border:1px solid #dbe4fb; border-radius:14px; border-collapse:separate; margin-bottom:16px;">
+        <tr><td style="padding:18px 20px 6px 20px; font-size:15px; font-weight:700; color:#0f172a;">🎫 Entry passes</td></tr>
+        <tr><td style="padding:0 20px 10px 20px; font-size:13px; line-height:1.5; color:#475569;">
+          One pass per participant. Forward each person their own pass — it is scanned at the entrance.
+          Each attendee should carry their pass (on the phone or printed) and a valid government-issued photo ID.</td></tr>
+        ${passes.map((p) => `<tr><td style="padding:8px 20px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background-color:#ffffff; border:1px solid #dbe4fb; border-radius:12px; border-collapse:separate;">
+            <tr>
+              <td width="132" valign="middle" style="padding:10px;">
+                <img src="cid:${esc(p.cid)}" width="112" height="112" alt="Entry pass QR code"
+                     style="display:block; width:112px; height:112px;" /></td>
+              <td valign="middle" style="padding:10px 14px 10px 0; font-size:14px; line-height:1.5; color:#334155;">
+                <div style="font-weight:700; color:#0f172a;">${esc(p.name || `Participant ${Number(p.index) + 1}`)}</div>
+                <div>Participant ${Number(p.index) + 1}</div>
+                <div style="font-family:Consolas,Menlo,monospace; color:#1e3a8a;">${esc(p.registrationNo)}</div>
+                <div><a href="${esc(p.url)}" target="_blank" style="color:#1d4ed8;">Open this pass</a></div>
+              </td>
+            </tr></table></td></tr>`).join('')}
+        <tr><td style="padding:0 0 10px 0; font-size:0; line-height:0;">&nbsp;</td></tr>
+      </table>`;
+
 const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER'];
 const render = (eventName, ctx = {}) => {
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
     const out = builder(ctx);
+    if (out && out.email && WITH_PASSES.includes(eventName)
+        && Array.isArray(ctx.passes) && ctx.passes.length > 1) {
+        out.email.passQrs = ctx.passes.map((p) => ({ cid: p.cid, url: p.url }));
+        out.email.afterHtml = passesHtml(ctx.passes) + (out.email.afterHtml || '');
+    }
     if (out && WITH_DOCUMENTS.includes(eventName)) {
         if (out.email) out.email.fileAttachments = emailFiles(ctx);
         const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];

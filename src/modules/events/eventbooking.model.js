@@ -296,6 +296,14 @@ const eventBookingSchema = new mongoose.Schema({
     remindersSent: { type: [Number], default: [] },
 
     /**
+     * When the CONFIRMATION was sent. Claimed with a conditional update before
+     * sending (`announce`), so a paid booking is confirmed exactly once even
+     * when the Instamojo webhook, the payer's return page and the reconcile
+     * all settle it at the same moment.
+     */
+    confirmationSentAt: { type: Date, default: null },
+
+    /**
      * The secret that lets a GUEST change their own booking.
      *
      * A member is identified by `userId` and needs none of this. A guest has no

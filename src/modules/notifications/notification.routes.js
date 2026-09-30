@@ -65,8 +65,31 @@ router.get('/logs', requireRole('super_admin'), asyncHandler(async(req, res) => 
         channel: req.query.channel,
         status: req.query.status,
         event: req.query.event,
-        search: req.query.search
+        search: String(req.query.search || '').slice(0, 120),
+        delivery: req.query.delivery,
+        group: req.query.group,
+        eventId: req.query.eventId,
+        bookingRef: req.query.bookingRef,
+        from: req.query.from,
+        to: req.query.to
     });
+    res.json(ApiResponse.success(result));
+}));
+
+/**
+ * Every automated message about one booking — booker, participants,
+ * documents — with its delivery timeline. The Super Admin bookings page's
+ * per-booking panel.
+ */
+router.get('/logs/booking/:bookingRef', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    const result = await notificationService.bookingDelivery(String(req.params.bookingRef || '').slice(0, 60));
+    res.json(ApiResponse.success(result));
+}));
+
+/** Latest email / WhatsApp status for up to 200 bookings — the bookings table column. */
+router.get('/delivery-summary', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    const refs = String(req.query.bookingRefs || '').split(',').map((r) => r.trim()).filter(Boolean).slice(0, 200);
+    const result = await notificationService.deliverySummary(refs);
     res.json(ApiResponse.success(result));
 }));
 
@@ -107,7 +130,12 @@ router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(re
             textEndpoint: config.botbee.sendTextPath,
             authStyle: config.botbee.authStyle,
             webhookConfigured: !!config.botbee.webhookVerifyToken,
-            webhookUrl: `${config.backendUrl}/api/${config.apiVersion}/notifications/botbee/webhook`
+            webhookUrl: `${require('../../config/publicUrl').publicApiBase()}/notifications/botbee/webhook`,
+            // Where a Meta app's `messages` webhook can point for delivery
+            // statuses (sent / delivered / read / failed).
+            metaStatusWebhookUrl: `${require('../../config/publicUrl').publicApiBase()}/notifications/meta/webhook`,
+            metaStatusWebhookConfigured: !!config.metaCloud.webhookVerifyToken,
+            instamojoWebhookUrl: require('../../config/publicUrl').instamojoWebhookUrl()
         }
     }));
 }));
@@ -117,12 +145,14 @@ router.post('/retry/:id', requireRole('super_admin'), asyncHandler(async(req, re
     const result = await notificationService.retryLog(req.params.id);
     if (!result) throw ApiError.notFound('No such notification log entry');
 
+    const { withEffectiveStatus } = require('./deliveryQuery');
+    const plain = (row) => (row && row.toObject ? row.toObject() : row);
     if (result.skipped) {
-        return res.json(ApiResponse.success(result.row, result.reason));
+        return res.json(ApiResponse.success(withEffectiveStatus(plain(result.row) || {}), result.reason));
     }
 
     res.json(ApiResponse.success(
-        result.row,
+        withEffectiveStatus(plain(result.row) || {}),
         result.outcome.success ? 'Re-sent' : `Still failing: ${result.outcome.error}`
     ));
 }));

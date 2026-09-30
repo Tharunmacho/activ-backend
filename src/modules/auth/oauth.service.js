@@ -133,6 +133,48 @@ const readCookie = (req, name) => {
 
 const isHttps = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').startsWith('https');
 
+/*
+ * ============================================================================
+ * THE MOBILE APP AS A SECOND RETURN ADDRESS — additive, opt-in, allowlisted
+ * ============================================================================
+ *
+ * The website is, and stays, the default: with no `client` the start URL, the
+ * state token and every callback redirect are exactly what they always were.
+ *
+ * `GET /oauth/:provider/start?client=app` names the ACTIV mobile app instead.
+ * The choice rides inside the SIGNED state token (`c`), so the callback reads
+ * it from something the server itself issued — a crafted callback cannot pick
+ * the destination, and the destinations are a fixed allowlist, never a URL a
+ * request supplies. The app receives the same hand-off fields in a QUERY string
+ * (a custom scheme reaches no server, so the fragment's reason does not apply,
+ * and a query string survives every Android/iOS deep-link path intact).
+ */
+const CLIENT_TARGETS = {
+    app: () => (env('OAUTH_APP_REDIRECT') || 'activ://auth/social')
+};
+
+/** An allowlisted client key, or '' for the website default. */
+const clientFrom = (value) => {
+    const key = String(value || '').toLowerCase().trim();
+    return Object.prototype.hasOwnProperty.call(CLIENT_TARGETS, key) ? key : '';
+};
+
+/** The client named inside a state token this server signed; '' when none/invalid. */
+const clientFromState = (state) => {
+    if (!state) return '';
+    try {
+        const claims = jwt.verify(String(state), config.jwt.secret);
+        return claims && claims.t === 'oauth-state' ? clientFrom(claims.c) : '';
+    } catch (e) {
+        return '';
+    }
+};
+
+/** Where an allowlisted client is sent; the website when `client` is ''. */
+const toClient = (client, fields) => (client
+    ? `${CLIENT_TARGETS[client]()}?${new URLSearchParams(fields).toString()}`
+    : toFrontend(fields));
+
 /** Which providers the website should offer. */
 const listProviders = () => Object.keys(PROVIDERS)
     .map((key) => ({ key, label: PROVIDERS[key].label, enabled: isConfigured(key) }));
@@ -144,7 +186,13 @@ const startUrl = (provider, req, res) => {
     if (!isConfigured(provider)) throw ApiError.badRequest(`${p.label} sign-in is not set up yet.`);
 
     const nonce = crypto.randomBytes(16).toString('hex');
-    const state = jwt.sign({ n: nonce, p: provider, t: 'oauth-state' }, config.jwt.secret, { expiresIn: STATE_TTL_S });
+    // `c` is added only for an allowlisted client, so the website's state token
+    // carries exactly the claims it always did.
+    const client = clientFrom(req && req.query && req.query.client);
+    const claims = client
+        ? { n: nonce, p: provider, t: 'oauth-state', c: client }
+        : { n: nonce, p: provider, t: 'oauth-state' };
+    const state = jwt.sign(claims, config.jwt.secret, { expiresIn: STATE_TTL_S });
 
     res.cookie(COOKIE, nonce, {
         httpOnly: true,
@@ -175,10 +223,13 @@ const toFrontend = (fields) => `${frontendCallback()}#${new URLSearchParams(fiel
 const handleCallback = async(provider, req, res) => {
     const p = PROVIDERS[provider];
     res.clearCookie(COOKIE, { path: '/' });
-    if (!p || !isConfigured(provider)) return toFrontend({ error: 'unavailable' });
+    // '' (the website) unless this server's own state token named the app.
+    const client = clientFromState(req && req.query && req.query.state);
+    const back = (fields) => toClient(client, fields);
+    if (!p || !isConfigured(provider)) return back({ error: 'unavailable' });
 
     const { code, state, error } = req.query || {};
-    if (error) return toFrontend({ error: 'cancelled', provider });
+    if (error) return back({ error: 'cancelled', provider });
 
     let claims = null;
     try {
@@ -189,7 +240,7 @@ const handleCallback = async(provider, req, res) => {
     const cookieNonce = readCookie(req, COOKIE);
     if (!claims || claims.t !== 'oauth-state' || claims.p !== provider || !cookieNonce || claims.n !== cookieNonce) {
         logger.warn('OAuth callback with a bad or missing state', { provider });
-        return toFrontend({ error: 'expired', provider });
+        return back({ error: 'expired', provider });
     }
 
     let who;
@@ -200,23 +251,23 @@ const handleCallback = async(provider, req, res) => {
             provider, status: err.response && err.response.status,
             error: (err.response && JSON.stringify(err.response.data)) || err.message
         });
-        return toFrontend({ error: 'failed', provider });
+        return back({ error: 'failed', provider });
     }
 
     const email = String((who && who.email) || '').toLowerCase().trim();
-    if (!email || !who.verified) return toFrontend({ error: 'no_email', provider });
+    if (!email || !who.verified) return back({ error: 'no_email', provider });
 
     const member = await MemberAuth.findOne({ email }).select('_id isActive').lean().catch(() => null);
     if (!member) {
         const admin = await adminRepository.findRawByEmail(email).catch(() => null);
-        if (admin) return toFrontend({ error: 'admin', provider });
-        return toFrontend({ error: 'no_account', provider, email, name: String(who.name || '') });
+        if (admin) return back({ error: 'admin', provider });
+        return back({ error: 'no_account', provider, email, name: String(who.name || '') });
     }
 
     const jti = crypto.randomBytes(12).toString('hex');
     const handoff = jwt.sign({ t: 'oauth-handoff', e: email, p: provider, jti }, config.jwt.secret, { expiresIn: HANDOFF_TTL_S });
     logger.info('Social sign-in verified', { provider, email });
-    return toFrontend({ code: handoff, provider });
+    return back({ code: handoff, provider });
 };
 
 /** Trade the hand-off code for a normal member session. Single use. */
@@ -250,4 +301,7 @@ const exchange = async(code) => {
     return session;
 };
 
-module.exports = { listProviders, startUrl, handleCallback, exchange, isConfigured, PROVIDERS };
+module.exports = {
+    listProviders, startUrl, handleCallback, exchange, isConfigured, PROVIDERS,
+    clientFrom, clientFromState, toClient
+};

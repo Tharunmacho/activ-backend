@@ -7,6 +7,9 @@ const botbeeService = require('./botbee.service');
 const whatsappTemplate = require('./whatsappTemplate');
 const regionalContacts = require('./regionalContacts.service');
 const templates = require('./notificationTemplates');
+const {
+    EFFECTIVE_STATUS_EXPR, buildLogQuery, withEffectiveStatus, summarise, matchLegacyRows
+} = require('./deliveryQuery');
 const logger = require('../../config/logger');
 const config = require('../../config');
 
@@ -112,6 +115,20 @@ class NotificationService {
                 mock: !!entry.mock,
                 providerMessageId: entry.providerMessageId,
                 lastError: entry.lastError,
+                // Delivery tracking and the booking it belongs to — see the model.
+                provider: entry.provider,
+                deliveryStatus: entry.deliveryStatus,
+                statusHistory: entry.deliveryStatus
+                    ? [{ status: entry.deliveryStatus, at: new Date(), detail: entry.deliveryStatus === 'failed' ? String(entry.lastError || '').slice(0, 500) : undefined }]
+                    : undefined,
+                failedAt: entry.deliveryStatus === 'failed' ? new Date() : undefined,
+                failureReason: entry.deliveryStatus === 'failed' ? String(entry.lastError || '').slice(0, 1000) || undefined : undefined,
+                bookingRef: entry.bookingRef ? String(entry.bookingRef).toUpperCase() : undefined,
+                eventId: entry.eventId ? String(entry.eventId) : undefined,
+                eventTitle: entry.eventTitle,
+                recipientName: entry.recipientName,
+                templatePath: entry.templatePath,
+                resendOf: entry.resendOf && mongoose.Types.ObjectId.isValid(String(entry.resendOf)) ? entry.resendOf : undefined,
                 data: entry.data
             });
         } catch (error) {
@@ -159,6 +176,8 @@ class NotificationService {
         const result = {
             event: eventName,
             channels: { in_app: null, email: null, whatsapp: null },
+            // The log rows written, by channel — a resend reports the new one.
+            rows: {},
             contact: null
         };
 
@@ -256,8 +275,28 @@ class NotificationService {
 
             const jobs = [];
 
+            /*
+             * What every log row of this dispatch carries: the booking and event
+             * it was about, and the person's name — so the Super Admin can find
+             * "every message to this booker" without knowing their address.
+             */
+            const about = payload.data || {};
+            const trace = {
+                bookingRef: about.bookingRef || payload.bookingRef || undefined,
+                eventId: about.eventId || payload.eventId || undefined,
+                eventTitle: payload.eventTitle || undefined,
+                recipientName: name || undefined,
+                resendOf: payload.resendOf || undefined
+            };
+            /*
+             * A RESEND names one channel (`onlyChannel`): the Super Admin pressed
+             * Resend on one failed WhatsApp row, and the booker must not also get
+             * a second email and a second bell entry for it.
+             */
+            const only = payload.onlyChannel || '';
+
             /* ------------------------------------------------------- the bell */
-            if (rendered.inApp && userId) {
+            if (rendered.inApp && userId && !only) {
                 jobs.push((async() => {
                     const created = await this.safeCreate(userId, {
                         title: rendered.inApp.title,
@@ -275,13 +314,14 @@ class NotificationService {
                         subject: rendered.inApp.title,
                         status: created ? 'sent' : 'failed',
                         providerMessageId: created ? String(created._id) : undefined,
-                        lastError: created ? undefined : 'Notification row not created'
+                        lastError: created ? undefined : 'Notification row not created',
+                        ...trace
                     });
                 })());
             }
 
             /* ------------------------------------------------------ the email */
-            if (rendered.email && email) {
+            if (rendered.email && email && (!only || only === 'email')) {
                 jobs.push((async() => {
                     /*
                      * A QR TICKET, when the email asks for one (`ticketQr` = the
@@ -302,6 +342,26 @@ class NotificationService {
                             highlight = { ...highlight, qrSrc: 'cid:ticket-qr' };
                         } catch (qrError) {
                             logger.warn('Ticket QR not drawn', { event: eventName, error: qrError && qrError.message });
+                        }
+                    }
+                    /*
+                     * ENTRY PASSES (several seats): one QR per participant, as
+                     * `cid:pass-qr-<n>` inside the template's passes block. A
+                     * code that cannot be drawn is dropped; the email still goes.
+                     */
+                    if (Array.isArray(rendered.email.passQrs)) {
+                        const QRCode = require('qrcode');
+                        for (const qr of rendered.email.passQrs.slice(0, 50)) {
+                            if (!qr || !qr.cid || !qr.url) continue;
+                            try {
+                                const content = await QRCode.toBuffer(String(qr.url), {
+                                    type: 'png', width: 280, margin: 1, errorCorrectionLevel: 'M',
+                                    color: { dark: '#000000', light: '#ffffff' }
+                                });
+                                inlineImages.push({ cid: String(qr.cid), filename: `${qr.cid}.png`, content });
+                            } catch (qrError) {
+                                logger.warn('Entry pass QR not drawn', { event: eventName, error: qrError && qrError.message });
+                            }
                         }
                     }
 
@@ -331,7 +391,7 @@ class NotificationService {
                     });
 
                     result.channels.email = sent;
-                    await this.log({
+                    result.rows.email = await this.log({
                         user: userId,
                         event: eventName,
                         channel: 'email',
@@ -343,13 +403,14 @@ class NotificationService {
                         mock: !!sent.mock,
                         providerMessageId: sent.messageId,
                         /*
-                         * A template failure is recorded even when the session
-                         * text rescued the delivery. The member heard, so the
-                         * row is `sent` and not a false alarm — but the
-                         * template is still broken, and a green row carrying no
-                         * error is how it stays broken.
+                         * SMTP ACCEPTED OR REFUSED, with the server's own words
+                         * ("Invalid login: 535 …"). Email has no delivery
+                         * receipt, so `accepted` is the furthest it can go.
                          */
                         lastError: sent.error,
+                        provider: 'smtp',
+                        deliveryStatus: sent.mock ? undefined : (sent.success ? 'accepted' : 'failed'),
+                        ...trace,
                         data: {
                             recipientName: ctx.name,
                             bodyHtml: rendered.email.bodyHtml,
@@ -361,7 +422,7 @@ class NotificationService {
             }
 
             /* --------------------------------------------------- the WhatsApp */
-            if (rendered.whatsapp && rendered.whatsapp.template && phone) {
+            if (rendered.whatsapp && rendered.whatsapp.template && phone && (!only || only === 'whatsapp')) {
                 jobs.push((async() => {
                     /*
                      * BOTH ARE SENT, AND THE TEMPLATE'S OUTCOME IS THE OUTCOME.
@@ -423,6 +484,10 @@ class NotificationService {
                      * none. Walked until one is accepted.
                      */
                     let tried = rendered.whatsapp.template;
+                    // The values that went WITH the template that went — a
+                    // retry must replay those, not the first step's.
+                    let usedParams = rendered.whatsapp.params;
+                    let usedHeader = rendered.whatsapp.headerImage || '';
                     let fb = rendered.whatsapp.fallback;
                     const refused = [];
                     while (!sent.success && fb && fb.template) {
@@ -436,11 +501,30 @@ class NotificationService {
                                 { headerImage: fb.headerImage || '' }
                             );
                             tried = fb.template;
+                            usedParams = fb.params;
+                            usedHeader = fb.headerImage || '';
                         }
                         fb = fb.fallback;
                     }
                     if (sent.success && refused.length) {
                         sent = { ...sent, error: `Sent on "${tried}" after ${refused.join('; ')}` };
+                    }
+
+                    /*
+                     * WHICH PATH, in words: richer templates skipped because the
+                     * event lacks a value they print, templates Meta refused, and
+                     * the one that went. Logged here and kept on the row.
+                     */
+                    const skippedSteps = Array.isArray(rendered.whatsapp.skipped) ? rendered.whatsapp.skipped : [];
+                    const templatePath = [
+                        ...skippedSteps,
+                        ...refused.map((r) => `refused ${r}`),
+                        sent.success ? `sent on "${tried}"` : `failed on "${tried}"`
+                    ].join(' | ').slice(0, 2000);
+                    if (skippedSteps.length) {
+                        logger.info('WhatsApp template chosen without inventing missing values', {
+                            event: eventName, bookingRef: trace.bookingRef, templatePath
+                        });
                     }
 
                     /*
@@ -477,7 +561,7 @@ class NotificationService {
                     }
 
                     result.channels.whatsapp = sent;
-                    await this.log({
+                    result.rows.whatsapp = await this.log({
                         user: userId,
                         event: eventName,
                         channel: 'whatsapp',
@@ -495,11 +579,21 @@ class NotificationService {
                          * error is how it stays broken.
                          */
                         lastError: sent.error,
+                        provider: sent.provider,
+                        // Meta's API answer is `accepted`; what happens on the
+                        // handset arrives later through the status webhook.
+                        deliveryStatus: sent.mock ? undefined : (sent.success ? 'accepted' : 'failed'),
+                        templatePath,
+                        ...trace,
                         // The rendered parameters and the session-window
                         // fallback text, so a replay has something to send
                         // without re-running the whole lifecycle event.
                         data: {
-                            params: rendered.whatsapp.params,
+                            // The SENT template's values and header, so a
+                            // replay of this row is the same message.
+                            params: usedParams,
+                            headerImage: usedHeader || undefined,
+                            firstParams: rendered.whatsapp.params,
                             text: rendered.whatsapp.text,
                             // Whether the readable copy also went, and its own
                             // id. Recorded rather than merged into the row
@@ -546,25 +640,27 @@ class NotificationService {
     //  Super Admin oversight
     // ======================================================================
 
-    /** One page of the delivery log, newest first, plus platform-wide health. */
-    async listLogs({ page = 1, limit = 50, channel, status, event, search } = {}) {
+    /**
+     * One page of the delivery log, newest first, plus platform-wide health —
+     * and, for the Super Admin's Automation view, the counts of the FILTERED
+     * set by what actually happened to each message.
+     *
+     * Filters (all optional): channel, status (legacy sent/failed/queued),
+     * delivery (accepted/sent/delivered/read/failed/mock), event, group
+     * (automation | booking | membership), eventId, bookingRef, from / to
+     * (YYYY-MM-DD, IST days, inclusive), search (recipient, name, booking ref,
+     * subject, event title).
+     */
+    async listLogs({
+        page = 1, limit = 50, channel, status, event, search,
+        delivery, group, eventId, bookingRef, from, to
+    } = {}) {
         const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
         const safePage = Math.max(parseInt(page, 10) || 1, 1);
 
-        const query = {};
-        if (channel) query.channel = channel;
-        if (status) query.status = status;
-        if (event) query.event = event;
-        if (search) {
-            // The recipient is what an operator has in hand when a member says
-            // "I never got it" — an address or a phone number, not an id.
-            // Escaped: a '+' in a phone number is a quantifier, and an
-            // unescaped one throws rather than matching nothing.
-            const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            query.recipient = new RegExp(escaped, 'i');
-        }
+        const query = buildLogQuery({ channel, status, event, search, delivery, group, eventId, bookingRef, from, to });
 
-        const [rows, total, counts] = await Promise.all([
+        const [rows, total, counts, filtered, events] = await Promise.all([
             NotificationLog.find(query)
                 .sort({ createdAt: -1 })
                 .skip((safePage - 1) * safeLimit)
@@ -579,6 +675,19 @@ class NotificationService {
              */
             NotificationLog.aggregate([
                 { $group: { _id: { status: '$status', mock: '$mock' }, n: { $sum: 1 } } }
+            ]).catch(() => []),
+            // The Automation view's tiles: THIS filter, by effective status.
+            NotificationLog.aggregate([
+                { $match: query },
+                { $group: { _id: { channel: '$channel', s: EFFECTIVE_STATUS_EXPR }, n: { $sum: 1 } } }
+            ]).catch(() => []),
+            // Events that have messages, for the event filter.
+            NotificationLog.aggregate([
+                { $match: { eventId: { $exists: true, $nin: ['', null] } } },
+                { $sort: { createdAt: 1 } },
+                { $group: { _id: '$eventId', title: { $last: '$eventTitle' }, count: { $sum: 1 }, last: { $max: '$createdAt' } } },
+                { $sort: { last: -1 } },
+                { $limit: 200 }
             ]).catch(() => [])
         ]);
 
@@ -594,9 +703,25 @@ class NotificationService {
             else if (health[key.status] !== undefined) health[key.status] += n;
         }
 
+        const blank = () => ({ total: 0, accepted: 0, sent: 0, delivered: 0, read: 0, failed: 0, mock: 0, queued: 0 });
+        const tally = { total: 0, delivery: blank(), byChannel: { email: blank(), whatsapp: blank(), in_app: blank() } };
+        for (const row of filtered || []) {
+            const n = Number(row.n || 0);
+            const { channel: ch, s } = row._id || {};
+            tally.total += n;
+            if (tally.delivery[s] !== undefined) tally.delivery[s] += n;
+            if (tally.byChannel[ch]) {
+                tally.byChannel[ch].total += n;
+                if (tally.byChannel[ch][s] !== undefined) tally.byChannel[ch][s] += n;
+            }
+        }
+        delete tally.delivery.total;
+
         return {
-            logs: rows,
+            logs: (rows || []).map(withEffectiveStatus),
             health,
+            counts: tally,
+            events: (events || []).map((e) => ({ eventId: String(e._id), title: e.title || 'Untitled event', count: e.count })),
             pagination: {
                 page: safePage,
                 limit: safeLimit,
@@ -604,6 +729,54 @@ class NotificationService {
                 pages: Math.max(1, Math.ceil(total / safeLimit))
             }
         };
+    }
+
+    /**
+     * Every automated message about ONE booking — to the booker, each
+     * participant, and each document — newest first, plus the latest status
+     * per channel. Rows written before delivery tracking carry no
+     * `bookingRef`; they are matched by address (`matchLegacyRows`).
+     */
+    async bookingDelivery(bookingRef) {
+        const ref = String(bookingRef || '').trim().toUpperCase();
+        if (!ref) return { bookingRef: '', rows: [], summary: {} };
+        const map = await this.deliveryRowsForBookings([ref]);
+        const rows = (map.get(ref) || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        return { bookingRef: ref, rows: rows.map(withEffectiveStatus), summary: summarise(rows) };
+    }
+
+    /** Latest status per channel for many bookings at once — the bookings table's column. */
+    async deliverySummary(bookingRefs = []) {
+        const refs = [...new Set((Array.isArray(bookingRefs) ? bookingRefs : String(bookingRefs || '').split(','))
+            .map((r) => String(r || '').trim().toUpperCase()).filter(Boolean))].slice(0, 200);
+        const map = await this.deliveryRowsForBookings(refs);
+        const summaries = {};
+        refs.forEach((ref) => { summaries[ref] = summarise(map.get(ref) || []); });
+        return { summaries };
+    }
+
+    /** `Map<bookingRef, rows[]>` for the given refs — tracked rows and legacy matches. */
+    async deliveryRowsForBookings(refs = []) {
+        const out = new Map(refs.map((r) => [r, []]));
+        if (!refs.length) return out;
+
+        const tracked = await NotificationLog.find({
+            $or: [{ bookingRef: { $in: refs } }, { 'data.bookingRef': { $in: refs } }],
+            channel: { $in: ['email', 'whatsapp'] }
+        }).sort({ createdAt: -1 }).limit(5000).lean().catch(() => []);
+        const seen = new Set();
+        for (const row of tracked || []) {
+            const ref = String(row.bookingRef || (row.data && row.data.bookingRef) || '').toUpperCase();
+            if (out.has(ref)) { out.get(ref).push(row); seen.add(String(row._id)); }
+        }
+
+        const legacy = await matchLegacyRows(refs).catch(() => new Map());
+        legacy.forEach((rows, ref) => rows.forEach((row) => {
+            if (seen.has(String(row._id)) || !out.has(ref)) return;
+            seen.add(String(row._id));
+            out.get(ref).push({ ...row, matchedBy: 'recipient' });
+        }));
+        return out;
     }
 
     /**
@@ -631,6 +804,27 @@ class NotificationService {
         const data = row.data || {};
         let outcome;
 
+        /*
+         * AN EVENT-BOOKING MESSAGE IS REBUILT FROM THE BOOKING, not replayed.
+         *
+         * Its email is a designed ticket (details card, QR, notes) that the
+         * stored `bodyHtml` alone does not reproduce, and its WhatsApp template
+         * has a poster header the bare replay below never sent — so a replayed
+         * row was a different, broken message. `resendLoggedMessage` sends the
+         * real one on this row's channel, to this row's person, as a NEW row;
+         * this row records that it was re-sent and by which row.
+         */
+        if (/^EVENT_(BOOKING|PARTICIPANT|DOCUMENT)_/.test(String(row.event || ''))) {
+            const bookingService = require('../events/eventbooking.service');
+            const resent = await bookingService.resendLoggedMessage(row.toObject ? row.toObject() : row);
+            if (resent.skipped) return { row, skipped: true, reason: resent.reason };
+
+            row.attempts = Number(row.attempts || 1) + 1;
+            if (resent.row && resent.row._id) row.resentAs = resent.row._id;
+            await row.save().catch(() => null);
+            return { row: resent.row || row, outcome: resent.outcome || { success: false, error: 'Not sent' } };
+        }
+
         if (row.channel === 'email') {
             const html = emailService.buildHtmlTemplate({
                 title: row.subject || 'ACTIV',
@@ -653,7 +847,12 @@ class NotificationService {
             });
         } else {
             outcome = row.templateId
-                ? await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [])
+                // The header the template was approved with, when recorded —
+                // Meta refuses an image-header template sent without one.
+                ? await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '', {
+                    headerImage: data.headerImage || '',
+                    headerDocument: data.headerDocument || undefined
+                })
                 : await botbeeService.sendTextMessage(row.recipient, data.text || 'ACTIV notification');
         }
 
@@ -662,6 +861,12 @@ class NotificationService {
         row.providerMessageId = outcome.messageId || row.providerMessageId;
         row.lastError = outcome.error;
         row.attempts = Number(row.attempts || 1) + 1;
+        // A replay is a new message: its delivery starts again from `accepted`.
+        if (!outcome.mock) {
+            row.deliveryStatus = outcome.success ? 'accepted' : 'failed';
+            row.statusHistory = [...(row.statusHistory || []), { status: row.deliveryStatus, at: new Date(), detail: outcome.success ? 'Re-sent' : String(outcome.error || '').slice(0, 500) }];
+            row.failureReason = outcome.success ? undefined : String(outcome.error || '').slice(0, 1000);
+        }
         await row.save().catch(() => null);
 
         return { row, outcome };
