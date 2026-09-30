@@ -13,7 +13,7 @@
     "test:dashboard": "node tests/member-dashboard.test.js",
     "test:e2e": "node tests/e2e-approval-flow.test.js",
     "test:messaging": "node tests/messaging.test.js",
-    "test:cms": "node tests/cms-content.test.js",
+    "test:cms": "node tests/cms-content.test.js && node tests/cms-field-survival.test.js",
     "test:contact": "node tests/contact-offices.test.js",
     "lint": "eslint src/**/*.js",
     "lint:fix": "eslint src/**/*.js --fix",

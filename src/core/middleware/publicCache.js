@@ -1,5 +1,8 @@
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const logger = require('../../config/logger');
 
 /**
@@ -50,10 +53,51 @@ const TTL_MS = Math.max(5, parseInt(process.env.PUBLIC_CACHE_SECONDS, 10) || 60)
 const MAX_ENTRIES = 500;
 const store = new Map();
 
+/*
+ * What the BROWSER may do with an answer. It was `max-age=15,
+ * stale-while-revalidate=120`, which lets a browser show the page as it was
+ * for over two minutes after a save — the reload an editor makes to check
+ * their change is exactly the one that gets the stale copy. The server-side
+ * cache above is where the speed comes from; the browser revalidates.
+ */
+const BROWSER_CACHE = 'no-cache';
+
 const enabled = () => String(process.env.PUBLIC_CACHE || 'true').toLowerCase() !== 'false';
 
-/** Drop everything — a write happened. */
-const clear = () => store.clear();
+/*
+ * ONE CLEAR FOR EVERY WORKER.
+ *
+ * pm2 runs this server in cluster mode (`instances: 'max'`), and `store` is per
+ * process. A save cleared only the worker that took it; every other worker kept
+ * answering with the page as it was for up to TTL_MS, so an editor who saved
+ * and reloaded saw the change or did not depending on which worker answered —
+ * "I changed it in the CMS and the website does not show it".
+ *
+ * So a clear also touches a stamp file every worker on this machine can see,
+ * and a cached entry older than the stamp is a miss. A stat is microseconds;
+ * the round trip it saves is 400 ms+. Checked at most every 250 ms.
+ */
+const STAMP_FILE = path.join(os.tmpdir(), `activ-public-cache-${process.env.PORT || 5000}.stamp`);
+let stampAt = 0;
+let stampCheckedAt = 0;
+const lastClear = () => {
+    const now = Date.now();
+    if (now - stampCheckedAt > 250) {
+        stampCheckedAt = now;
+        try { stampAt = fs.statSync(STAMP_FILE).mtimeMs; } catch { /* no clear yet */ }
+    }
+    return stampAt;
+};
+
+/** Drop everything — a write happened — here and in every other worker. */
+const clear = () => {
+    store.clear();
+    try {
+        fs.writeFileSync(STAMP_FILE, String(Date.now()));
+        stampAt = Date.now();
+        stampCheckedAt = stampAt;
+    } catch { /* this worker is still cleared */ }
+};
 
 /** Read-through cache for one route group. Mount before the router. */
 const publicCache = (req, res, next) => {
@@ -62,10 +106,10 @@ const publicCache = (req, res, next) => {
     const key = req.originalUrl;
     // The warm-up asks for a fresh copy without removing the one being served.
     const hit = isWarmRequest(req) ? null : store.get(key);
-    if (hit && Date.now() - hit.at < TTL_MS) {
+    if (hit && Date.now() - hit.at < TTL_MS && hit.at > lastClear()) {
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('X-Public-Cache', 'HIT');
-        res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=120');
+        res.setHeader('Cache-Control', BROWSER_CACHE);
         res.setHeader('Vary', 'Authorization');
         return res.status(200).send(hit.body);
     }
@@ -79,7 +123,7 @@ const publicCache = (req, res, next) => {
                 if (store.size >= MAX_ENTRIES) store.delete(store.keys().next().value);
                 store.set(key, { at: Date.now(), body: typeof body === 'string' ? body : Buffer.from(body) });
                 res.setHeader('X-Public-Cache', 'MISS');
-                res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=120');
+                res.setHeader('Cache-Control', BROWSER_CACHE);
                 res.setHeader('Vary', 'Authorization');
             }
         } catch { /* caching is an optimisation */ }

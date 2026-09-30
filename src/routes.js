@@ -59,6 +59,10 @@ router.use('/regions', publicCache, regionRoutes);
 // `publicCache`: anonymous reads answered from memory — see the middleware.
 router.use('/cms', publicCache, cmsRoutes);
 
+// Link-preview pages for crawlers (WhatsApp, Facebook, LinkedIn…). Public, so
+// above `businessRoutes` like `/cms`. See `modules/share/share.routes.js`.
+router.use('/share', require('./modules/share/share.routes'));
+
 /**
  * Public event bookings — the "Book Now" flow.
  *

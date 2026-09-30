@@ -2322,6 +2322,14 @@ class CmsService {
 
         const startAt = this.toStartAt(payload);
         if (startAt) update.startAt = startAt;
+        /*
+         * A date the editor CLEARED. `if (startAt)` alone kept the old date: the
+         * form sends `startAt: ''` for "no date yet", the save answered 200, and
+         * the site went on printing the date that had just been removed. Blank
+         * is `null` — "Date to be confirmed" — never the epoch. An unreadable
+         * value still leaves the stored date alone.
+         */
+        else if (payload.startAt !== undefined && !str(payload.startAt) && !str(payload.date)) update.startAt = null;
         if (payload.endAt !== undefined) update.endAt = payload.endAt ? new Date(payload.endAt) : null;
 
         // Only the detail keys actually present in this payload, so saving the

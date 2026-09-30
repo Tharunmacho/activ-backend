@@ -415,6 +415,75 @@ class AuthService {
         }
     }
 
+    /**
+     * A signed-in member session for an account whose credential has ALREADY
+     * been proven — by the password in `login`, or by Google / Facebook /
+     * LinkedIn in `oauth.service`. Null when there is no member profile.
+     *
+     * One body for both, so the payment reconcile, the blocked check and the
+     * portal check cannot drift between the two ways in.
+     */
+    async memberSession(normalizedEmail, portal = '') {
+        let memberDetails = await MemberDetails.findOne({ email: normalizedEmail });
+
+        /* Sign-in decides paid vs unpaid dashboard from this record: a paid
+           status whose payment was deleted is reset first (paymentReconcile). */
+        if (memberDetails) {
+            const { paymentIsGone, reconcileMember } = require('../members/paymentReconcile');
+            if (await paymentIsGone(memberDetails)) {
+                await reconcileMember(memberDetails.toObject());
+                memberDetails = await MemberDetails.findOne({ email: normalizedEmail });
+            }
+        }
+
+        /*
+         * BOTH records decide. A member is a credential plus a profile, and
+         * an admin blocking someone writes to both — but a record blocked
+         * before that was true, or by a script, or by a future path that
+         * touches only one of them, would otherwise still sign in. The check
+         * sits after the password so a wrong password on a blocked account
+         * still answers "Invalid credentials".
+         */
+        if (memberDetails && memberDetails.isActive === false) {
+            throw ApiError.forbidden(BLOCKED_MESSAGE);
+        }
+
+        if (!memberDetails) return null;
+
+        const userRole = normalizeRole(memberDetails.role);
+        /* The member screen only — see `assertPortal`. */
+        this.assertPortal(portal, userRole);
+        // Location claims must ride in the token: the geofenced admin
+        // dashboards read them off req.user to scope every query.
+        const tokens = this.generateTokens({
+            _id: memberDetails._id,
+            email: memberDetails.email,
+            role: userRole,
+            block: memberDetails.block,
+            district: memberDetails.district,
+            state: memberDetails.state
+        });
+
+        await cacheClient.set(
+            CACHE_KEYS.USER(memberDetails._id),
+            memberDetails.toJSON(),
+            CACHE_TTL.HOUR
+        );
+
+        return {
+            user: {
+                id: memberDetails._id,
+                memberId: memberDetails._id,
+                email: memberDetails.email,
+                fullName: memberDetails.fullName,
+                role: userRole
+            },
+            memberDetails: memberDetails.toJSON(),
+            token: tokens.accessToken,
+            role: userRole
+        };
+    }
+
     async login(identifier, password, { portal = '' } = {}) {
         // `identifier` is an email or a Member ID; see resolveLoginEmail.
         const normalizedEmail = await this.resolveLoginEmail(identifier);

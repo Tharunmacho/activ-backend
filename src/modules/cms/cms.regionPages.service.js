@@ -3,6 +3,7 @@ const { RegionPage, StatePage, GalleryItem } = require('./cms.models');
 const {
     REGIONS, NATIONAL, isNational, slugify, findRegion, findState, statesOf, allStates,
 } = require('./cms.regionMap');
+const { cleanFields, toFields } = require('./cms.contentHelpers');
 
 /**
  * The Regions & States section of the public site.
@@ -724,6 +725,7 @@ const toRegionPage = (doc, options = {}) => {
         },
         feedbackEnabled: doc.feedbackEnabled !== false,
         seo: toSeo(doc.seo),
+        extraFields: toFields(doc.extraFields),
         status: doc.status || 'draft',
         updatedAt: doc.updatedAt || null,
         updatedBy: (doc.updatedBy && doc.updatedBy.email) || '',
@@ -769,6 +771,7 @@ const toStatePage = (doc, options = {}) => {
         },
         feedbackEnabled: doc.feedbackEnabled !== false,
         seo: toSeo(doc.seo),
+        extraFields: toFields(doc.extraFields),
         status: doc.status || 'draft',
         updatedAt: doc.updatedAt || null,
         updatedBy: (doc.updatedBy && doc.updatedBy.email) || '',
@@ -806,6 +809,10 @@ const commonUpdates = (payload = {}) => ({
     ...pick(payload, 'regionContactGroups', (v) => cleanList(v, cleanContactGroup, contactGroupIsEmpty)),
     ...pick(payload, 'districtContactGroups', (v) => cleanList(v, cleanContactGroup, contactGroupIsEmpty)),
     ...pick(payload, 'seo', cleanSeo),
+    /* "Your own fields" on both editors. On the schema and edited on screen,
+       and in neither mapper, so every save dropped them and the editor
+       reopened to an empty list. */
+    ...pick(payload, 'extraFields', cleanFields),
     ...pick(payload, 'status', (v) => (str(v) === 'published' ? 'published' : 'draft')),
 });
 

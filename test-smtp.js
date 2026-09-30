@@ -6,7 +6,7 @@ const transporter = nodemailer.createTransport({
     secure: true,
     auth: {
         user: 'events@activ.org.in',
-        pass: 'RXac69Ud3CTOX'
+        pass: 'aHk3NnZGdHpyNTRQa0p1ODdCdnpndHJmemQK'
     }
 });
 
