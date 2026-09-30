@@ -1,6 +1,7 @@
 /**
- * LINK PREVIEWS for the public website — `/api/v1/share/events/:slug` and
- * `/api/v1/share/gallery/:slug`.
+ * LINK PREVIEWS for the public website — `/api/v1/share/events/:slug`,
+ * `/api/v1/share/gallery/:slug`, `/api/v1/share/news[/:slug]` and the state and
+ * zone (`/regions/:slug`) pages.
  *
  * WhatsApp, Facebook, LinkedIn, X, Telegram… never run the site's JavaScript.
  * They fetch the pasted URL and read the <meta property="og:*"> tags in the
@@ -226,6 +227,65 @@ router.get(['/gallery/:slug', '/gallery/:slug/photo/:n'], async(req, res) => {
 });
 
 /**
+ * News: one article's own card — headline as the title, the date and place the
+ * newsroom prints, then the summary; the article's picture, else its first
+ * photo. `getArticle` throws for a draft exactly as the public page does, so a
+ * preview never shows an article the page would not.
+ */
+const newsCard = (article) => {
+    const title = oneLine(article.title) || 'ACTIV news';
+    const published = validDate(article.publishedAt);
+    const when = oneLine(article.displayDate) || (published ? longDate(published) : '');
+    const where = oneLine(article.location) || [oneLine(article.district), oneLine(article.state)].filter(Boolean).join(', ');
+    const details = [when ? `📅 ${when}` : '', where ? `📍 ${where}` : ''].filter(Boolean).join('  ');
+    const about = oneLine(article.summary) || oneLine(article.body);
+    const description = [details, about].filter(Boolean).join(' — ').slice(0, 300);
+    const photo = (article.photos || []).find((m) => m && m.url);
+    const image = (article.image && article.image.url) || (photo && photo.url) || '';
+    return { title, description, image, alt: oneLine(article.image && article.image.alt) || title };
+};
+
+router.get('/news/:slug', async(req, res) => {
+    const slug = str(req.params.slug);
+    const path = `/news/${encodeURIComponent(slug)}`;
+    try {
+        const article = await require('../cms/cms.news.service').getArticle(slug, {});
+        if (!article) return fallback(req, res, path);
+        const card = newsCard(article);
+        const image = shareImage(req, card.image);
+        return send(res, page({
+            ...card,
+            image,
+            imageMeta: await imageInfo(image),
+            url: `${siteOrigin(req)}/news/${encodeURIComponent(article.slug || slug)}`,
+        }));
+    } catch {
+        return fallback(req, res, path);
+    }
+});
+
+/** The newsroom itself: the heading, description and hero picture its editor set. */
+router.get('/news', async(req, res) => {
+    try {
+        const settings = await require('../cms/cms.news.service').getSettings();
+        const heading = [oneLine(settings.heading), oneLine(settings.headingHighlight)].filter(Boolean).join(' ');
+        const title = heading || 'ACTIV News';
+        const image = shareImage(req, settings.heroImage && settings.heroImage.url);
+        return send(res, page({
+            title,
+            description: (oneLine(settings.description) || 'News, chapters and announcements from ACTIV.').slice(0, 300),
+            image,
+            imageMeta: await imageInfo(image),
+            alt: title,
+            url: `${siteOrigin(req)}/news`,
+            type: 'website',
+        }));
+    } catch {
+        return fallback(req, res, '/news');
+    }
+});
+
+/**
  * State and region pages: the editor's "When the page is shared" fields
  * (`seo`), falling back to the page's own name, summary and hero picture —
  * the same choices StatePage / RegionPage make in the browser.
@@ -261,4 +321,4 @@ router.get(['/states/:slug', '/states/:slug/:type'], areaPage('states'));
 router.get(['/regions/:slug', '/regions/:slug/:type'], areaPage('regions'));
 
 module.exports = router;
-module.exports._test = { eventCard, shareImage, page };
+module.exports._test = { eventCard, newsCard, shareImage, page };
