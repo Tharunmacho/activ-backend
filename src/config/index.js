@@ -8,6 +8,15 @@ module.exports = {
     db: {
         uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/activ-db',
         testUri: process.env.MONGODB_TEST_URI || 'mongodb://localhost:27017/activ-test',
+        /*
+         * The main connection's own database. Nothing is stored in it: every
+         * model and collection is placed by config/dataLayout.js (eight
+         * databases, one per area) and the server refuses to boot with a model
+         * outside that map. It is named, not read from the URI, because a URI
+         * with no database path (Dokploy's, `…:27017/?authSource=admin`)
+         * would otherwise open the driver's default `test` database.
+         */
+        name: 'activ_system',
         options: {
             /**
              * Connection pool sizing, tuned for a remote Atlas cluster.
@@ -395,23 +404,25 @@ module.exports = {
                 membershipRenewal: real(process.env.BOTBEE_TPL_MEMBERSHIP_RENEWAL) || 'activ_membership_renewal_v1',
                 adminNewApplication: real(process.env.BOTBEE_TPL_ADMIN_NEW_APPLICATION) || 'activ_admin_new_application_v1',
                 /*
-                 * THE FLEXIBLE EVENT TEMPLATES (notifications/whatsappFlex.js).
-                 * EMPTY BY DEFAULT, deliberately unlike the ones above: they are
-                 * tried FIRST only once named here, i.e. once Meta has approved
-                 * them. Set each to the approved template name (or `true` for
-                 * the default name, e.g. activ_evt_confirmed_v3). `_PLAIN` is the
-                 * same body with no poster header, tried second.
+                 * THE FLEXIBLE EVENT TEMPLATES (notifications/whatsappFlex.js),
+                 * tried FIRST. ON BY DEFAULT now that Meta has APPROVED every
+                 * one of them (checked 2026-10-01). They used to be empty until
+                 * named in the env, and only the webinar ones ever were — so a
+                 * paid in-person booking fell through to `cnfrm` (#132005 "too
+                 * long") and then the MARKETING notice Meta throttles on Indian
+                 * numbers: the member got no WhatsApp. Set a key to `none` to
+                 * switch one off. `_PLAIN` is the same body with no poster.
                  */
-                bookingFlex: real(process.env.BOTBEE_TPL_BOOKING_FLEX),
-                bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN),
-                webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX),
-                webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN),
-                reminderFlex: real(process.env.BOTBEE_TPL_REMINDER_FLEX),
-                reminderFlexPlain: real(process.env.BOTBEE_TPL_REMINDER_FLEX_PLAIN),
-                cancelFlex: real(process.env.BOTBEE_TPL_CANCEL_FLEX),
-                cancelFlexPlain: real(process.env.BOTBEE_TPL_CANCEL_FLEX_PLAIN),
-                waitlistFlex: real(process.env.BOTBEE_TPL_WAITLIST_FLEX),
-                waitlistFlexPlain: real(process.env.BOTBEE_TPL_WAITLIST_FLEX_PLAIN),
+                bookingFlex: real(process.env.BOTBEE_TPL_BOOKING_FLEX) || 'activ_evt_confirmed_v3',
+                bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN) || 'activ_evt_confirmed_plain_v3',
+                webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX) || 'activ_evt_online_v1',
+                webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN) || 'activ_evt_online_plain_v1',
+                reminderFlex: real(process.env.BOTBEE_TPL_REMINDER_FLEX) || 'activ_evt_reminder_v1',
+                reminderFlexPlain: real(process.env.BOTBEE_TPL_REMINDER_FLEX_PLAIN) || 'activ_evt_reminder_plain_v1',
+                cancelFlex: real(process.env.BOTBEE_TPL_CANCEL_FLEX) || 'activ_evt_cancelled_v1',
+                cancelFlexPlain: real(process.env.BOTBEE_TPL_CANCEL_FLEX_PLAIN) || 'activ_evt_cancelled_plain_v1',
+                waitlistFlex: real(process.env.BOTBEE_TPL_WAITLIST_FLEX) || 'activ_evt_waitlist_v1',
+                waitlistFlexPlain: real(process.env.BOTBEE_TPL_WAITLIST_FLEX_PLAIN) || 'activ_evt_waitlist_plain_v1',
                 bookingInPerson: real(process.env.BOTBEE_TPL_BOOKING_INPERSON) || 'cnfrm',
                 bookingOnline: real(process.env.BOTBEE_TPL_BOOKING_ONLINE) || 'ccmsg'
             },

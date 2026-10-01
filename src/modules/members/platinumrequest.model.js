@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * A member asking for Platinum — the ₹2,00,000 lifetime tier.
@@ -29,10 +30,10 @@ const platinumRequestSchema = new mongoose.Schema({
     notes: { type: String, trim: true, default: '' },
     handledBy: { type: String, trim: true, default: '' },
     handledAt: { type: Date }
-}, { collection: 'platinum_requests', timestamps: true });
+}, { timestamps: true });
 
 platinumRequestSchema.index({ status: 1, createdAt: -1 });
 
-module.exports = mongoose.model('PlatinumRequest', platinumRequestSchema);
+module.exports = dataLayout.model('PlatinumRequest', platinumRequestSchema);
 module.exports.STATUSES = STATUSES;
 module.exports.CONTACT = CONTACT;

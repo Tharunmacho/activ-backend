@@ -28,7 +28,6 @@ const SEARCH_LIMIT = 8;
 
 // Admin accounts are spread over five collections in two databases; every read
 // and write goes through the repository so this module never has to know that.
-const PRIMARY_ADMIN_COLLECTION = adminRepository.PRIMARY_COLLECTION;
 
 const MANAGEABLE_ROLES = adminRepository.MANAGEABLE_ROLES;
 
@@ -203,7 +202,6 @@ const ROLE_LABELS = adminRepository.ROLE_LABELS;
  */
 const HOLDING_ALL_TIERS = 'Block, District and State';
 
-const col = adminRepository.col;
 
 /**
  * How long a Hub answer is reused. The dashboards' number, deliberately.
@@ -377,24 +375,38 @@ class SuperAdminService {
         const scope = await actorScope(actor);
         if (scope.role === 'super_admin') return this.getOverview();
         let filter = null;
-        if (scope.role === 'state_admin' && scope.state) filter = adminService.buildGeoFilter('state', scope.state);
-        else if (scope.role === 'district_admin' && scope.district) filter = adminService.buildGeoFilter('district', scope.district);
-        if (!filter) {
-            // No resolvable patch: an honest empty answer, never the whole country.
-            return this.computeOverview({ _id: null }, scope);
+        let memberFilter = null;
+        // Member records carry their region at the top level only.
+        const memberGeo = (field, value) => ({ [field]: new RegExp(`^${escapeRegex(value)}$`, 'i') });
+        if (scope.role === 'state_admin' && scope.state) {
+            filter = adminService.buildGeoFilter('state', scope.state);
+            memberFilter = memberGeo('state', scope.state);
+        } else if (scope.role === 'district_admin' && scope.district) {
+            filter = adminService.buildGeoFilter('district', scope.district);
+            memberFilter = memberGeo('district', scope.district);
         }
-        return this.computeOverview(filter, scope);
+        if (!filter || !memberFilter) {
+            // No resolvable patch: an honest empty answer, never the whole country.
+            return this.computeOverview({ _id: null }, scope, { _id: null });
+        }
+        return this.computeOverview(filter, scope, memberFilter);
     }
 
-    async computeOverview(appFilter = {}, scope = null) {
-        const [totalMembers, applications, allAdminsRaw] = await Promise.all([
-            Member.countDocuments().catch(() => 0),
+    async computeOverview(appFilter = {}, scope = null, memberFilter = {}) {
+        const coverageFor = await regionService.coverageResolver().catch(() => null);
+        const [totalMembers, applications, allAdminsRaw, totals] = await Promise.all([
+            // MEMBER RECORDS, as the "Total members" tiles say. This was
+            // computed and then discarded for the application count.
+            Member.countDocuments(memberFilter || {}).catch(() => 0),
             Application.find(appFilter)
             .sort({ createdAt: -1 })
             .limit(GLOBAL_FETCH_LIMIT)
             .lean()
             .catch(() => []),
-            this.allAdminRows()
+            this.allAdminRows(),
+            // Exact over the whole filter — `applications` is capped for the
+            // bottleneck list and must not decide the totals.
+            adminService.countApplicationBuckets(appFilter, coverageFor)
         ]);
         // A team admin's Hub counts the admins of their own patch only.
         const allAdmins = scope && scope.role !== 'super_admin'
@@ -434,7 +446,10 @@ class SuperAdminService {
             // level, which classifies by the Block's verdict, so all three
             // cards printed the Block's answer.
             ['block', 'district', 'state'].forEach((tier) => {
-                const stage = classifyForLevel(app, tier);
+                const coverage = typeof coverageFor === 'function'
+                    ? coverageFor({ state: app?.state, district: app?.district, block: app?.block })
+                    : null;
+                const stage = classifyForLevel(app, tier, coverage);
                 tierStats[tier].total += 1;
                 if (stage === 'pending') tierStats[tier].pending += 1;
                 else if (stage === 'approved') tierStats[tier].approved += 1;
@@ -447,6 +462,18 @@ class SuperAdminService {
                 stuck.push({ app, stuckDays, since, status });
             }
         });
+
+        // The row tallies above are a fallback for a failed count query only.
+        if (totals) {
+            counts.pending = Number(totals?.outcome?.pending || 0);
+            counts.approved = Number(totals?.outcome?.approved || 0);
+            counts.rejected = Number(totals?.outcome?.rejected || 0);
+            ['block', 'district', 'state'].forEach((tier) => {
+                const exact = totals?.byLevel?.[tier];
+                if (exact) tierStats[tier] = { ...exact };
+            });
+        }
+        const totalApplications = totals ? Number(totals.total || 0) : (applications || []).length;
 
         const tierQueue = { block: counts.pending, district: counts.pending, state: counts.pending };
 
@@ -484,8 +511,8 @@ class SuperAdminService {
 
         return {
             stats: {
-                totalMembers: (applications || []).length, // Forced to match totalApplications to fix UI cache issue
-                totalApplications: (applications || []).length,
+                totalMembers: Number(totalMembers || 0),
+                totalApplications,
                 pendingApplications: counts.pending,
                 approvedApplications: counts.approved,
                 rejectedApplications: counts.rejected,
@@ -581,11 +608,20 @@ class SuperAdminService {
             .limit(SEARCH_LIMIT)
             .lean()
             .catch(() => []),
-            col(PRIMARY_ADMIN_COLLECTION)
-            .find(anyOf(['fullName', 'name', 'email', 'block', 'district', 'state']))
-            .limit(SEARCH_LIMIT)
-            .toArray()
-            .catch(() => [])
+            /*
+             * Every tier collection. This searched only the old unified
+             * `admins` collection, which no account lives in — so the global
+             * search never found an admin.
+             */
+            require('./adminsDb').ensureReady()
+                .then(() => Promise.all(adminRepository.sources().map(source => source.handle
+                    .find(anyOf(['fullName', 'name', 'email', 'block', 'district', 'state']))
+                    .limit(SEARCH_LIMIT)
+                    .toArray()
+                    .then(docs => docs.map(doc => ({ doc, source: source.name })))
+                    .catch(() => []))))
+                .then(groups => [].concat(...groups).slice(0, SEARCH_LIMIT))
+                .catch(() => [])
         ]);
 
         const place = (...parts) => parts.filter(Boolean).join(', ');
@@ -606,8 +642,8 @@ class SuperAdminService {
                 status: normalizeStatus(doc.status),
                 location: place(doc.block, doc.district, doc.state)
             })),
-            admins: (adminDocs || []).map(doc => {
-                const row = toAdminRow(doc);
+            admins: (adminDocs || []).map(({ doc, source }) => {
+                const row = toAdminRow(doc, source);
                 return {
                     id: row.id,
                     fullName: row.fullName,

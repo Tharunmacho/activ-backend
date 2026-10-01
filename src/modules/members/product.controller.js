@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const Product = require('../../models/Product');
 const { stockState } = require('../../models/Product');
 const StockMovement = require('./stockmovement.model');
-const { recordView } = require('../common/engagement.model');
+const { recordView, isNewView } = require('../common/engagement.model');
 const Company = require('./company.model');
 /* The trust list is a member's own collection; Analytics only ever asks it
    HOW MANY, never who. */
@@ -729,17 +729,21 @@ const recordProductView = asyncHandler(async (req, res) => {
   const product = await Product.findById(id).select('userId isActive').lean().catch(() => null);
 
   if (product && product.isActive) {
-    await recordView({
+    const result = await recordView({
       kind: 'product',
       targetId: id,
       ownerId: String(product.userId || ''),
-      viewerId: String(req.user.userId || '')
+      viewerId: String(req.user?.userId || '')
     });
 
     // The denormalised counter on the product, which Discover sorts by. Kept in
-    // step with the engagement rows rather than incremented independently, so
-    // the two cannot disagree about which line is the most looked at.
-    await Product.updateOne({ _id: id }, { $inc: { views: 1 } }).catch(() => null);
+    // step with the engagement rows: it moves ONLY when `recordView` inserted a
+    // new row — a first view by this viewer today. It used to `$inc` on every
+    // request, so a hover, a refresh, or the owner checking their own listing
+    // each counted, and the two figures disagreed by an order of magnitude.
+    if (isNewView(result)) {
+      await Product.updateOne({ _id: id }, { $inc: { views: 1 } }).catch(() => null);
+    }
   }
 
   res.json({ success: true, data: { recorded: !!(product && product.isActive) } });

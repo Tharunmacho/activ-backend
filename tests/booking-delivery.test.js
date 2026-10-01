@@ -129,8 +129,13 @@ const testRealInfoOnly = () => {
         contactLine: 'K. Ravi · +918220112188 · events@activ.org.in',
         attendeeNote: 'Bring your visiting cards\nLunch is provided'
     }));
-    const first = chainOf(full.whatsapp)[0];
-    check('with a full contact + two notes the detailed template is first', /event_booking_v4$/.test(first.template), first.template);
+    // The approved flexible templates lead by default (they are what Meta
+    // actually delivers); the detailed template is the first step after them.
+    const steps = chainOf(full.whatsapp);
+    check('the approved flexible confirmation is tried first by default',
+        steps[0].template === 'activ_evt_confirmed_v3', steps.map((s) => s.template).join(' > '));
+    const first = steps.find((s) => !/^activ_evt_/.test(s.template)) || {};
+    check('with a full contact + two notes the detailed template is first after them', /event_booking_v4$/.test(first.template), first.template);
     check('its values are the organiser\'s own',
         first.params.includes('K. Ravi') && first.params.includes('events@activ.org.in')
         && first.params.includes('Bring your visiting cards') && first.params.includes('Lunch is provided'), JSON.stringify(first.params));

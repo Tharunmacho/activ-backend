@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * Every change to a stock level, and why (BUS-002).
@@ -61,11 +62,10 @@ const stockMovementSchema = new mongoose.Schema({
     note: { type: String, trim: true, default: '' },
     productName: { type: String, trim: true, default: '' }
 }, {
-    collection: 'stock_movements',
     timestamps: true
 });
 
 stockMovementSchema.index({ userId: 1, createdAt: -1 });
 stockMovementSchema.index({ productId: 1, createdAt: -1 });
 
-module.exports = mongoose.model('StockMovement', stockMovementSchema);
+module.exports = dataLayout.model('StockMovement', stockMovementSchema);

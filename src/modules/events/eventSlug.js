@@ -58,7 +58,8 @@ const uniqueSlug = async(Model, event = {}) => {
 const resolveEventId = async(idOrSlug) => {
     const value = String(idOrSlug || '').trim();
     if (!value || isObjectId(value)) return value;
-    const Event = mongoose.model('Event');
+    // Required here, not at the top: event.model requires this file.
+    const Event = require('./event.model');
     const doc = await Event.findOne({ slug: value.toLowerCase() }).select('_id').lean().catch(() => null);
     return doc ? String(doc._id) : value;
 };

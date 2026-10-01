@@ -22,16 +22,20 @@ const { dayKey } = Engagement;
 
 const DEFAULT_WINDOW_DAYS = 30;
 
-/** The `YYYY-MM-DD` keys for the last N days, oldest first. */
+/**
+ * The `YYYY-MM-DD` keys for the last N days, oldest first.
+ *
+ * Stepped in whole days from now and keyed on the IST calendar by `dayKey`.
+ * IST has no daylight saving, so 24h steps land on consecutive IST days;
+ * stepping a server-local date did not when the server's zone differed.
+ */
+const DAY_MS = 24 * 60 * 60 * 1000;
 const dayRange = (days) => {
     const keys = [];
-    const cursor = new Date();
-    cursor.setHours(12, 0, 0, 0);
+    const now = Date.now();
 
     for (let i = days - 1; i >= 0; i -= 1) {
-        const day = new Date(cursor);
-        day.setDate(cursor.getDate() - i);
-        keys.push(dayKey(day));
+        keys.push(dayKey(new Date(now - i * DAY_MS)));
     }
     return keys;
 };

@@ -1,4 +1,5 @@
 const MembershipPlan = require('./membershipplan.model');
+const dataLayout = require('../../config/dataLayout');
 const { PLANS: FROZEN } = require('../payment/membershipPlans');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
@@ -54,10 +55,9 @@ const settingsSchema = new mongoose.Schema({
      * showing all of them, with no code change and no different screen.
      */
     showAllPlans: { type: Boolean, default: false }
-}, { collection: 'membershipSettings', timestamps: true });
+}, { timestamps: true });
 
-const MembershipSettings = mongoose.models.MembershipSettings
-    || mongoose.model('MembershipSettings', settingsSchema);
+const MembershipSettings = dataLayout.model('MembershipSettings', settingsSchema);
 
 const SETTINGS_ID = 'membership';
 

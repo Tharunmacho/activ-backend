@@ -140,6 +140,30 @@ router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(re
     }));
 }));
 
+/**
+ * Is email actually going out, and is the automatic retry on? The Automation
+ * screens show a red banner when the mail server refuses the login.
+ */
+router.get('/health', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    const guard = require('./deliveryGuard');
+    // A fresh check when asked — the banner should not wait 15 minutes to clear.
+    if (String(req.query.refresh || '') === '1') await guard.checkEmail();
+    res.json(ApiResponse.success(guard.getHealth()));
+}));
+
+/**
+ * "Retry all failed" — every failed message from the last `sinceHours`
+ * (default 7 days, max 30) whose cause can heal, sent again one at a time.
+ * Permanent failures (not on WhatsApp, address refused) are reported, not sent.
+ */
+router.post('/retry-failed', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    const guard = require('./deliveryGuard');
+    const sinceHours = Math.min(Math.max(parseInt(req.body && req.body.sinceHours, 10) || 168, 1), 720);
+    await guard.checkEmail();
+    const summary = await guard.retryFailed({ sinceHours, auto: false, limit: 200 });
+    res.json(ApiResponse.success({ ...summary, health: guard.getHealth() }));
+}));
+
 /** Send one failed row again. */
 router.post('/retry/:id', requireRole('super_admin'), asyncHandler(async(req, res) => {
     const result = await notificationService.retryLog(req.params.id);

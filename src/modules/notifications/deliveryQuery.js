@@ -12,6 +12,8 @@ const escapeRe = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '
 /** Everything a Super Admin means by "automation": email + WhatsApp, not the bot. */
 const NOT_AUTOMATION = ['BOT_REPLY', 'CUSTOM'];
 const BOOKING_EVENT_RE = /^EVENT_(BOOKING|PARTICIPANT|DOCUMENT)_/;
+/** Account and donation mail (core/utils/mailer) — their own Super Admin tab. */
+const ACCOUNT_EVENTS = ['PASSWORD_RESET', 'ADMIN_WELCOME', 'DONATION_RECEIPT', 'DONATION_STATEMENT'];
 
 /**
  * The status a row is SHOWN with, as an aggregation expression — the same rule
@@ -47,6 +49,14 @@ const deliveryClause = (delivery) => {
         return { ...notMock, $or: [{ deliveryStatus: 'accepted' }, { deliveryStatus: { $exists: false }, status: 'sent' }] };
     }
     if (['sent', 'delivered', 'read'].includes(d)) return { ...notMock, deliveryStatus: d };
+    /* `reached`: left the server and did not fail — the Automation view's
+       single "Sent" answer (accepted, sent, delivered and read together). */
+    if (d === 'reached') {
+        return {
+            ...notMock,
+            $nor: [{ deliveryStatus: 'failed' }, { deliveryStatus: { $exists: false }, status: { $in: ['failed', 'queued'] } }]
+        };
+    }
     return null;
 };
 
@@ -68,11 +78,14 @@ const buildLogQuery = ({ channel, status, event, search, delivery, group, eventI
     if (event) and.push({ event: String(event) });
 
     const g = String(group || '').toLowerCase();
-    if (g === 'automation' || g === 'booking' || g === 'membership') {
+    if (g === 'automation' || g === 'booking' || g === 'membership' || g === 'account') {
         if (!ch) and.push({ channel: { $in: ['email', 'whatsapp'] } });
         and.push({ event: { $nin: NOT_AUTOMATION } });
         if (g === 'booking') and.push({ event: { $regex: BOOKING_EVENT_RE.source } });
-        if (g === 'membership') and.push({ event: { $not: BOOKING_EVENT_RE } }, { event: { $not: /^EVENT_/ } });
+        if (g === 'membership') {
+            and.push({ event: { $not: BOOKING_EVENT_RE } }, { event: { $not: /^EVENT_/ } }, { event: { $nin: ACCOUNT_EVENTS } });
+        }
+        if (g === 'account') and.push({ event: { $in: ACCOUNT_EVENTS } });
     }
 
     const dc = deliveryClause(delivery);
@@ -112,7 +125,15 @@ const buildLogQuery = ({ channel, status, event, search, delivery, group, eventI
 };
 
 /** A row as the API returns it: with the one status to show. */
-const withEffectiveStatus = (row = {}) => ({ ...row, effectiveStatus: effectiveStatus(row) });
+/*
+ * `recipientName` falls back to the name stored in `data` — rows logged before
+ * the top-level field existed carry it only there, and showed as "No name".
+ */
+const withEffectiveStatus = (row = {}) => ({
+    ...row,
+    recipientName: row.recipientName || (row.data && row.data.recipientName) || '',
+    effectiveStatus: effectiveStatus(row)
+});
 
 /** Latest row per channel → `{ status, at, reason, count }`. */
 const summarise = (rows = []) => {

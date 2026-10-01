@@ -17,7 +17,12 @@ const logger = require('../../config/logger');
  * why `admin.repository` reads both and treats them as one namespace.
  */
 
-const uri = String(config.db.uri || '').replace(/\/activ-db(\?|$)/, '/adminsdb$1');
+/*
+ * Same server as the main database; the database is NAMED (`dbName`, from
+ * config/dataLayout.js) rather than spliced into the URI, which silently
+ * failed for a URI without a `/activ-db` path.
+ */
+const uri = String(config.db.uri || '');
 
 let connection = null;
 
@@ -26,6 +31,7 @@ const getConnection = () => {
 
     try {
         connection = mongoose.createConnection(uri, {
+            dbName: require('../../config/dataLayout').dbName('admins'),
             maxPoolSize: 5,
             serverSelectionTimeoutMS: 5000
         });

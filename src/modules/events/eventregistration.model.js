@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * A member's seat at an event.
@@ -128,7 +129,6 @@ const eventRegistrationSchema = new mongoose.Schema({
         paidAt: { type: Date, default: null }
     }
 }, {
-    collection: 'event_registrations',
     timestamps: true
 });
 
@@ -143,4 +143,4 @@ const eventRegistrationSchema = new mongoose.Schema({
 eventRegistrationSchema.index({ eventId: 1, userId: 1 }, { unique: true });
 eventRegistrationSchema.index({ eventId: 1, status: 1 });
 
-module.exports = mongoose.model('EventRegistration', eventRegistrationSchema);
+module.exports = dataLayout.model('EventRegistration', eventRegistrationSchema);

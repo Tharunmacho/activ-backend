@@ -337,12 +337,14 @@ test('low is at or below the threshold, not strictly below it', () => {
 
 section('Shared membership rules');
 
-test('both stored spellings of an active membership count as paid', () => {
-    // The website collapses exactly this pair. A dashboard that shows paid-only
-    // cards and an endpoint that answers 403 behind them is a door that opens
-    // onto a wall.
+test('both stored spellings of a PAID membership count as paid — approval does not', () => {
+    // `active`, and `completed` (the Instamojo path's word). `approved` is the
+    // application being approved, which UNLOCKS payment — counting it as paid
+    // showed unpaid members the paid dashboard and refused them a payment order
+    // (see memberContext.PAID_STATUSES).
     assert.strictEqual(isPaidStatus('active'), true);
-    assert.strictEqual(isPaidStatus('approved'), true);
+    assert.strictEqual(isPaidStatus('completed'), true);
+    assert.strictEqual(isPaidStatus('approved'), false);
     assert.strictEqual(isPaidStatus('Active'), true);
     assert.strictEqual(isPaidStatus('pending'), false);
     assert.strictEqual(isPaidStatus('expired'), false);

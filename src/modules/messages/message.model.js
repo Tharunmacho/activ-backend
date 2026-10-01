@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * MEMBER-TO-MEMBER DIRECT MESSAGES.
@@ -96,7 +97,7 @@ const conversationSchema = new mongoose.Schema({
         of: Number,
         default: () => new Map(),
     },
-}, { collection: 'conversations', timestamps: true });
+}, { timestamps: true });
 
 /*
  * NOT UNIQUE. Looking up "this member's threads" is exactly the multikey
@@ -153,7 +154,7 @@ const messageSchema = new mongoose.Schema({
 
     /** When the OTHER participant read it. Null until they do. */
     readAt: { type: Date, default: null },
-}, { collection: 'messages', timestamps: true });
+}, { timestamps: true });
 
 /*
  * TEXT OR A PICTURE — an empty message is still an empty message.
@@ -193,8 +194,7 @@ const sortedPair = (a, b) => [String(a), String(b)]
  */
 const pairKeyOf = (a, b) => [String(a), String(b)].sort().join(':');
 
-const Conversation = mongoose.models.Conversation
-    || mongoose.model('Conversation', conversationSchema);
-const Message = mongoose.models.Message || mongoose.model('Message', messageSchema);
+const Conversation = dataLayout.model('Conversation', conversationSchema);
+const Message = dataLayout.model('Message', messageSchema);
 
 module.exports = { Conversation, Message, sortedPair, pairKeyOf };

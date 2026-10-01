@@ -339,14 +339,14 @@ test('a district is only recognised inside its own state', () => {
 console.log('\nSegregated per-tier storage');
 
 test('each tier is written to its own collection', () => {
-    assert.strictEqual(collectionForRole('block_admin'), 'blockadmins');
-    assert.strictEqual(collectionForRole('district_admin'), 'districtadmins');
-    assert.strictEqual(collectionForRole('state_admin'), 'stateadmins');
+    assert.strictEqual(collectionForRole('block_admin'), 'block_admins');
+    assert.strictEqual(collectionForRole('district_admin'), 'district_admins');
+    assert.strictEqual(collectionForRole('state_admin'), 'state_admins');
 });
 
 test('role spellings all route to the same collection', () => {
-    assert.strictEqual(collectionForRole('BlockAdmin'), 'blockadmins');
-    assert.strictEqual(collectionForRole('block admin'), 'blockadmins');
+    assert.strictEqual(collectionForRole('BlockAdmin'), 'block_admins');
+    assert.strictEqual(collectionForRole('block admin'), 'block_admins');
 });
 
 test('a document is written with the per-tier field names, not the unified ones', () => {
@@ -388,8 +388,8 @@ test('every created account is stamped, which is what separates it from scaffold
 });
 
 test('an unstamped record does not count as staffing', () => {
-    assert.strictEqual(isProvisioned({ email: 'x@y.com' }, 'adminsdb:blockadmins'), false);
-    assert.strictEqual(isProvisioned({ createdVia: 'tn_pilot_seed' }, 'adminsdb:blockadmins'), true);
+    assert.strictEqual(isProvisioned({ email: 'x@y.com' }, 'activ_admins:block_admins'), false);
+    assert.strictEqual(isProvisioned({ createdVia: 'tn_pilot_seed' }, 'activ_admins:block_admins'), true);
 });
 
 test('the legacy unified collection is always treated as real', () => {

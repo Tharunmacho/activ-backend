@@ -24,14 +24,22 @@ const adminsDb = require('./adminsDb');
  * so the geographic tree the whole platform routes on has exactly one reader.
  */
 
-/** The legacy unified collection. Read for compatibility; never written to. */
+/**
+ * The old unified collection's name. No account lives there any more (it was
+ * empty when the data moved to `activ_admins` and was not carried over), so it
+ * is no longer scanned; the constant stays because callers compare against it.
+ */
 const PRIMARY_COLLECTION = 'admins';
 
+/** Tier collection names, from the one map (config/dataLayout.js). */
+const { ADMIN_COLLECTIONS } = require('../../config/dataLayout');
+const ADMINS_DB = require('../../config/dataLayout').dbName('admins');
+
 const LEGACY_COLLECTIONS = {
-    block_admin: 'blockadmins',
-    district_admin: 'districtadmins',
-    state_admin: 'stateadmins',
-    super_admin: 'superadmins',
+    block_admin: ADMIN_COLLECTIONS.block_admin,
+    district_admin: ADMIN_COLLECTIONS.district_admin,
+    state_admin: ADMIN_COLLECTIONS.state_admin,
+    super_admin: ADMIN_COLLECTIONS.super_admin,
     /**
      * Content editors live alongside super admins.
      *
@@ -40,23 +48,27 @@ const LEGACY_COLLECTIONS = {
      * collection for one account would add a name to every scan and every
      * listing for no separation the role does not already provide.
      */
-    cms_admin: 'superadmins',
+    cms_admin: ADMIN_COLLECTIONS.super_admin,
     /**
      * The events admin: platform-level, no region, one portal (the programme) —
      * the same shape as the CMS editor, so the same collection and the same
      * reason. `role` tells them apart.
      */
-    events_admin: 'superadmins'
+    events_admin: ADMIN_COLLECTIONS.super_admin,
+    /**
+     * The door account for the MOBILE app only: scan entry passes, admit,
+     * read attendance. Same collection and shape as the other staff accounts.
+     */
+    attendance_admin: ADMIN_COLLECTIONS.super_admin
 };
 
-const ALL_COLLECTIONS = [PRIMARY_COLLECTION, ...Object.values(LEGACY_COLLECTIONS)];
 
 /** Which role a legacy collection implies when its documents carry no role field. */
 const COLLECTION_ROLE = {
-    blockadmins: 'block_admin',
-    districtadmins: 'district_admin',
-    stateadmins: 'state_admin',
-    superadmins: 'super_admin'
+    [ADMIN_COLLECTIONS.block_admin]: 'block_admin',
+    [ADMIN_COLLECTIONS.district_admin]: 'district_admin',
+    [ADMIN_COLLECTIONS.state_admin]: 'state_admin',
+    [ADMIN_COLLECTIONS.super_admin]: 'super_admin'
 };
 
 const ROLE_LABELS = {
@@ -74,7 +86,9 @@ const ROLE_LABELS = {
      */
     cms_admin: 'CMS Administrator',
     /** Events, categories and bookings — and nothing else. */
-    events_admin: 'Events Administrator'
+    events_admin: 'Events Administrator',
+    /** Mobile app only — the scanner at the event door, nothing else. */
+    attendance_admin: 'Event Attendance Administrator'
 };
 
 /** The tiers a super admin is allowed to create, ordered senior first. */
@@ -141,7 +155,6 @@ const escapeRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]
 
 const rxExact = (value) => new RegExp(`^${escapeRegex(String(value || ''))}$`, 'i');
 
-const col = (name) => mongoose.connection.db.collection(name);
 
 /**
  * The same collection names exist in two databases.
@@ -198,23 +211,16 @@ const isProvisioned = (doc = {}, sourceKey = '') => {
 };
 
 /**
- * Every (database, collection) pair an admin account can be stored in.
- *
- * The segregated `adminsdb` collections come first — they are where new
- * accounts are written and therefore the authoritative roster. The unified
- * `admins` collection is scanned after them for the accounts that predate the
- * split.
+ * Every collection an admin account can be stored in: the four tier
+ * collections of `activ_admins` (config/dataLayout.js), each scanned once.
  */
 const sources = () => {
     const list = [];
 
-    Object.values(LEGACY_COLLECTIONS).forEach((name) => {
+    // One per distinct collection (the staff roles share super_admins).
+    [...new Set(Object.values(LEGACY_COLLECTIONS))].forEach((name) => {
         const handle = legacyCol(name);
-        if (handle) list.push({ name, key: `adminsdb:${name}`, handle, segregated: true });
-    });
-
-    ALL_COLLECTIONS.forEach((name) => {
-        list.push({ name, key: name, handle: col(name) });
+        if (handle) list.push({ name, key: `${ADMINS_DB}:${name}`, handle, segregated: true });
     });
 
     return list;
@@ -233,7 +239,7 @@ const collectionForRole = (role) => LEGACY_COLLECTIONS[normalizeRole(role)] || '
  */
 const nextAdminId = async(role) => {
     await adminsDb.ensureReady();
-    const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA', super_admin: 'SUPER', cms_admin: 'CMS', events_admin: 'EVT' }[normalizeRole(role)] || 'AD';
+    const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA', super_admin: 'SUPER', cms_admin: 'CMS', events_admin: 'EVT', attendance_admin: 'ATT' }[normalizeRole(role)] || 'AD';
     const name = collectionForRole(role);
     const handle = name ? legacyCol(name) : null;
     if (!handle) return `${prefix}${Date.now().toString(36).toUpperCase()}`;
@@ -259,6 +265,7 @@ const normalizeRole = (value) => {
     if (role === 'superadmin' || role === 'super_admin') return 'super_admin';
     if (role === 'cmsadmin' || role === 'cms_admin') return 'cms_admin';
     if (role === 'eventsadmin' || role === 'events_admin' || role === 'event_admin') return 'events_admin';
+    if (role === 'attendanceadmin' || role === 'attendance_admin') return 'attendance_admin';
     return role;
 };
 
@@ -636,10 +643,10 @@ const findAllRawByEmail = async(email) => {
  * public-site CMS, the events programme). The Super Admin maintains their
  * credentials; they hold no region and never appear in a geofence.
  */
-const STAFF_ROLES = ['cms_admin', 'events_admin'];
+const STAFF_ROLES = ['cms_admin', 'events_admin', 'attendance_admin'];
 
 /** Every spelling a staff role has been stored under, for the query below. */
-const STAFF_ROLE_SPELLINGS = ['cms_admin', 'cmsadmin', 'events_admin', 'eventsadmin', 'event_admin'];
+const STAFF_ROLE_SPELLINGS = ['cms_admin', 'cmsadmin', 'events_admin', 'eventsadmin', 'event_admin', 'attendance_admin', 'attendanceadmin'];
 
 /**
  * The site-staff accounts, de-duplicated by email, projected (never a hash).
@@ -749,7 +756,7 @@ const insert = async(doc) => {
     invalidate();
 
     const row = toAdminRow({ ...document, _id: result.insertedId }, name);
-    row.source = `adminsdb:${name}`;
+    row.source = `${ADMINS_DB}:${name}`;
     return row;
 };
 
@@ -795,7 +802,7 @@ const insertMany = async(docs) => {
 
         documents.forEach((document, i) => {
             const row = toAdminRow({ ...document, _id: ids[i] }, name);
-            row.source = `adminsdb:${name}`;
+            row.source = `${ADMINS_DB}:${name}`;
             rows.push(row);
         });
     }
@@ -922,7 +929,6 @@ module.exports = {
     toTierDocument,
     isProvisioned,
     LEGACY_COLLECTIONS,
-    ALL_COLLECTIONS,
     ROLE_LABELS,
     MANAGEABLE_ROLES,
     ROLE_DEPTH,
@@ -930,7 +936,6 @@ module.exports = {
     toAdminRow,
     escapeRegex,
     rxExact,
-    col,
     sources,
     findAll,
     findActive,

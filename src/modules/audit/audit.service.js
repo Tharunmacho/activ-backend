@@ -1,4 +1,3 @@
-const mongoose = require('mongoose');
 const AuditLog = require('./audit.model');
 const logger = require('../../config/logger');
 
@@ -47,11 +46,14 @@ class AuditService {
             // reading correctly after that admin is renamed or hard-deleted.
             let actorName = String(entry.actorName || '').trim();
             if (!actorName && actorEmail) {
-                const doc = await mongoose.connection.db.collection('admins').findOne(
-                    { email: new RegExp(`^${escapeRegex(actorEmail)}$`, 'i') },
-                    { projection: { fullName: 1, name: 1 } }
-                ).catch(() => null);
-                actorName = doc?.fullName || doc?.name || '';
+                // Through the admin repository: it knows every tier collection.
+                // (This read the old unified `admins` collection, which no
+                // account lives in, so the name was never found.) Required
+                // here to keep this module free of a require cycle.
+                const repo = require('../admin/admin.repository');
+                const hit = await repo.findRawByEmail(actorEmail).catch(() => null);
+                const row = hit ? repo.toAdminRow(hit.doc, hit.source) : null;
+                actorName = (row && row.fullName) || '';
             }
 
             await AuditLog.create({

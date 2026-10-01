@@ -79,7 +79,48 @@ const providerName = () => (metaCloudService.isConfigured() ? 'meta' : 'botbee')
  * which one answered -- without it, a token added on a Friday would change
  * where every message comes from with nothing in the log to show it.
  */
+/*
+ * ACTIV'S OWN WHATSAPP NUMBER — never a recipient.
+ *
+ * WhatsApp refuses a message from a number to itself with "(#100) Invalid
+ * parameter", a sentence that points at the template, not at the number. It
+ * happened 16 times (30 Sep–1 Oct 2026): the Tamil Nadu State Admin's phone
+ * on file WAS the association's sending number, so every new-application
+ * alert to them failed. The sending number is asked of Meta once (or taken
+ * from WHATSAPP_OWN_NUMBER) and such a send is refused here with a sentence
+ * that says what to fix.
+ */
+const digitsOf = (value) => String(value || '').replace(/\D/g, '').replace(/^0+/, '');
+const lastTen = (value) => digitsOf(value).slice(-10);
+let ownNumber = null;
+let ownNumberAt = 0;
+const ownSendingNumber = async() => {
+    const fromEnv = lastTen(process.env.WHATSAPP_OWN_NUMBER);
+    if (fromEnv) return fromEnv;
+    if (ownNumber !== null && Date.now() - ownNumberAt < 6 * 60 * 60 * 1000) return ownNumber;
+    ownNumberAt = Date.now();
+    try {
+        const mc = config.metaCloud || {};
+        if (!mc.phoneNumberId || !mc.accessToken) { ownNumber = ''; return ownNumber; }
+        const url = `${mc.baseUrl || 'https://graph.facebook.com'}/${mc.apiVersion || 'v21.0'}/${mc.phoneNumberId}?fields=display_phone_number`;
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${mc.accessToken}` } });
+        const body = await res.json().catch(() => ({}));
+        ownNumber = lastTen(body && body.display_phone_number);
+    } catch (err) {
+        ownNumber = '';
+    }
+    return ownNumber;
+};
+
+const OWN_NUMBER_MESSAGE = "Not sent: this is ACTIV's own WhatsApp number — save the person's own mobile number on their record";
+
 const sendTemplateMessage = async(phone, templateName, params = [], languageCode = 'en', textFallback = '', options = {}) => {
+    const own = await ownSendingNumber();
+    if (own && lastTen(phone) === own) {
+        logger.warn("WhatsApp send refused: the recipient is ACTIV's own sending number", { template: templateName });
+        return { success: false, error: OWN_NUMBER_MESSAGE, to: String(phone || ''), provider: providerName() };
+    }
+
     const chosen = provider();
     const name = providerName();
     const safeParams = sanitizeParams(params);

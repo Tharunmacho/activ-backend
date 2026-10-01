@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * One line of the hourly agenda.
@@ -641,7 +642,6 @@ const eventSchema = new mongoose.Schema({
         default: ''
     }
 }, {
-    collection: 'events',
     timestamps: true
 });
 
@@ -670,4 +670,4 @@ eventSchema.pre('save', async function assignSlug() {
     this.slug = await uniqueSlug(this.constructor, this);
 });
 
-module.exports = mongoose.model('Event', eventSchema);
+module.exports = dataLayout.model('Event', eventSchema);

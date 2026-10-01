@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const express = require('express');
 const logger = require('../../config/logger');
 const objectStore = require('./objectStore');
@@ -39,7 +40,7 @@ const objectStore = require('./objectStore');
  * by `scripts/migrate-uploads-to-s3.js`) copies them across.
  */
 
-const BUCKET = 'uploads';
+const BUCKET = dataLayout.UPLOADS.bucket;
 const UPLOADS_DIR = path.resolve(__dirname, '../../../uploads');
 
 /*
@@ -81,9 +82,9 @@ const relOf = (filePath) => {
 };
 
 const bucket = () => {
-    const db = mongoose.connection && mongoose.connection.db;
-    if (!db || mongoose.connection.readyState !== 1) return null;
-    return new mongoose.mongo.GridFSBucket(db, { bucketName: BUCKET });
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) return null;
+    // The bucket lives in activ_system (config/dataLayout.js).
+    return new mongoose.mongo.GridFSBucket(dataLayout.nativeDb(dataLayout.UPLOADS.area), { bucketName: BUCKET });
 };
 
 /** Every stored copy of `name` (normally one). */

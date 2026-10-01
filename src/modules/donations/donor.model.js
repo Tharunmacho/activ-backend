@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const dataLayout = require('../../config/dataLayout');
 const mongoose = require('mongoose');
 
 /**
@@ -28,10 +29,10 @@ const donorSchema = new mongoose.Schema({
     },
     /** Financial years whose final statement has been emailed (`2026-27`). */
     statementsSent: { type: [String], default: [] }
-}, { collection: 'donors', timestamps: true });
+}, { timestamps: true });
 
 // Scalar unique indexes — see CLAUDE.md on unique indexes over arrays.
 donorSchema.index({ email: 1 }, { unique: true });
 donorSchema.index({ statementToken: 1 }, { unique: true });
 
-module.exports = mongoose.models.Donor || mongoose.model('Donor', donorSchema);
+module.exports = dataLayout.model('Donor', donorSchema);

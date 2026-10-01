@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { normalizeStatus } = require('../common/applicationStatus');
 
 /**
@@ -255,7 +256,6 @@ const applicationSchema = new mongoose.Schema({
         }
     }]
 }, {
-    collection: 'applications',
     timestamps: true
 });
 
@@ -312,4 +312,4 @@ applicationSchema.pre('validate', function(next) {
     next();
 });
 
-module.exports = mongoose.model('Application', applicationSchema);
+module.exports = dataLayout.model('Application', applicationSchema);

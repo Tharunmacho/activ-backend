@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * A payment the server has authorised the start of.
@@ -162,11 +163,10 @@ const paymentOrderSchema = new mongoose.Schema({
         required: true
     }
 }, {
-    collection: 'payment orders',
     timestamps: true
 });
 
 paymentOrderSchema.index({ memberId: 1, status: 1 });
 paymentOrderSchema.index({ createdAt: -1 });
 
-module.exports = mongoose.model('PaymentOrder', paymentOrderSchema);
+module.exports = dataLayout.model('PaymentOrder', paymentOrderSchema);

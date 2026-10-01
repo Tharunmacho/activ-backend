@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * One person let in at the door — the attendance record.
@@ -48,7 +49,6 @@ const eventCheckinSchema = new mongoose.Schema({
     /** Free text from the scanning app ("Android · Pixel 7"), for the audit trail only. */
     device: { type: String, trim: true, default: '' }
 }, {
-    collection: 'event_checkins',
     timestamps: true
 });
 
@@ -56,4 +56,4 @@ eventCheckinSchema.index({ bookingId: 1, participantIndex: 1 }, { unique: true }
 /** The attendance list: one event, most recent entry first. */
 eventCheckinSchema.index({ eventId: 1, admittedAt: -1 });
 
-module.exports = mongoose.model('EventCheckin', eventCheckinSchema);
+module.exports = dataLayout.model('EventCheckin', eventCheckinSchema);

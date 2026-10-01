@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * A booking for seats at an event — THE record of who is coming.
@@ -326,7 +327,6 @@ const eventBookingSchema = new mongoose.Schema({
      */
     source: { type: String, trim: true, default: 'web' }
 }, {
-    collection: 'event_bookings',
     timestamps: true
 });
 
@@ -354,4 +354,4 @@ eventBookingSchema.index({ status: 1, 'payment.status': 1, expiresAt: 1 });
  */
 eventBookingSchema.index({ 'bookedBy.email': 1, createdAt: -1 });
 
-module.exports = mongoose.model('EventBooking', eventBookingSchema);
+module.exports = dataLayout.model('EventBooking', eventBookingSchema);

@@ -25,6 +25,18 @@ const financialYearOf = (value = new Date()) => {
     return `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
 };
 
+/**
+ * The instant the IST calendar month containing `value` began. "This month"
+ * on the donations summary rolls at IST midnight on the 1st, not at the
+ * server's local midnight (05:30 IST on a server running in UTC).
+ */
+const istMonthStart = (value = new Date()) => {
+    const d = new Date(value);
+    const at = Number.isNaN(d.getTime()) ? new Date() : d;
+    const ist = new Date(at.getTime() + IST_OFFSET_MS);
+    return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - IST_OFFSET_MS);
+};
+
 const isFinancialYear = (fy) => {
     const m = /^(\d{4})-(\d{2})$/.exec(String(fy || ''));
     return !!m && (Number(m[1]) + 1) % 100 === Number(m[2]);
@@ -94,7 +106,7 @@ const toRupees = (paise) => Math.round(Number(paise || 0)) / 100;
 
 module.exports = {
     MIN_AMOUNT, MAX_AMOUNT, PAN_RX,
-    financialYearOf, isFinancialYear, financialYearBounds, financialYearEnded,
+    financialYearOf, isFinancialYear, istMonthStart, financialYearBounds, financialYearEnded,
     receiptNumberFor, statementNumberFor, isValidPan, checkAmount, amountInWords,
     toPaise, toRupees
 };

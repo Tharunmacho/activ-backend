@@ -110,9 +110,13 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
 
     console.log('\nadmissibility');
     const base = { status: 'active', eventId: EVENT_ID, noOfPersons: 2, payment: { status: 'paid' } };
-    check('paid active -> ok', admissibility(base, 0).ok);
-    check('free -> ok', admissibility({ ...base, payment: { status: 'not_required' } }, 1).ok);
-    check('paid but swept to expired -> ok', admissibility({ ...base, status: 'expired' }, 0).ok);
+    // The door's event is always given now (the scanner is opened per event).
+    check('paid active -> ok', admissibility(base, 0, null, EVENT_ID).ok);
+    check('free -> ok', admissibility({ ...base, payment: { status: 'not_required' } }, 1, null, EVENT_ID).ok);
+    check('paid but swept to expired -> ok', admissibility({ ...base, status: 'expired' }, 0, null, EVENT_ID).ok);
+    check('no door (pass page) -> judged on the pass alone', admissibility(base, 0).ok);
+    check('online event at a door -> refused', admissibility(base, 0, { mode: 'online' }, EVENT_ID).code === 'online_event');
+    check('online event, no door -> the pass itself is fine', admissibility(base, 0, { mode: 'online' }).ok);
     check('cancelled refused', admissibility({ ...base, status: 'cancelled' }, 0).code === 'cancelled');
     check('waitlist refused', admissibility({ ...base, status: 'waitlist', payment: { status: 'pending' } }, 0).code === 'waitlist');
     check('pending refused as unpaid', admissibility({ ...base, payment: { status: 'pending' } }, 0).code === 'unpaid');
@@ -129,7 +133,7 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
     const w = makeWorld();
     const b = w.addBooking();
     const tok = pass.signPass(String(b._id), 1);
-    const seen = await w.service.lookup({ token: `https://activ.org.in/checkin/${tok}` });
+    const seen = await w.service.lookup({ eventId: String(EVENT_ID), token: `https://activ.org.in/checkin/${tok}` });
     const seat = seen.seats[0];
     check('finds seat 2 by the scanned URL', seat.participantNumber === 2 && seat.attendee.name === 'Ravi Kumar');
     check('carries event, ticket, payment, reg no', seat.event.title === 'Business Conclave' && seat.ticket.label === 'Standard ticket'
@@ -137,47 +141,51 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
     check('contact is masked at the door', seat.attendee.phoneMasked === '•••• 6789' && !('email' in seat.attendee));
     check('admissible, not checked in', seat.admissible && !seat.checkedIn);
     check('no check-in row was written', w.checkins.length === 0);
-    const byRef = await w.service.lookup({ bookingRef: b.bookingRef.toLowerCase() });
+    const byRef = await w.service.lookup({ eventId: String(EVENT_ID), bookingRef: b.bookingRef.toLowerCase() });
     check('a booking ID lists every seat', byRef.seats.length === 2 && byRef.method === 'manual');
-    const byReg = await w.service.lookup({ registrationNo: `${b.bookingRef}-P1` });
+    const byReg = await w.service.lookup({ eventId: String(EVENT_ID), registrationNo: `${b.bookingRef}-P1` });
     check('a registration no finds one seat', byReg.seats.length === 1 && byReg.seats[0].participantNumber === 1);
-    const notPass = await rejects(w.service.lookup({ token: 'upi://pay?pa=someone@bank' }));
+    const notPass = await rejects(w.service.lookup({ eventId: String(EVENT_ID), token: 'upi://pay?pa=someone@bank' }));
     check('a non-pass QR is a 400', notPass && notPass.statusCode === 400);
-    const forged = await rejects(w.service.lookup({ token: flipped }));
+    const forged = await rejects(w.service.lookup({ eventId: String(EVENT_ID), token: flipped }));
     check('a forged pass is a 404', forged && forged.statusCode === 404);
 
     console.log('\nadmit is idempotent');
-    const first = await w.service.admit({ token: tok }, STAFF, { device: 'Pixel 7' });
+    const first = await w.service.admit({ eventId: String(EVENT_ID), token: tok }, STAFF, { device: 'Pixel 7' });
     check('first scan admits', first.outcome === 'admitted' && first.seat.checkedIn);
     check('records who, when, how', w.checkins.length === 1 && w.checkins[0].admittedBy.name === 'Gate Staff One'
         && w.checkins[0].admittedBy.email === 'event@gmail.com' && w.checkins[0].method === 'qr' && w.checkins[0].device === 'Pixel 7'
         && w.checkins[0].attendeeName === 'Ravi Kumar');
-    const second = await w.service.admit({ token: tok }, STAFF);
+    const second = await w.service.admit({ eventId: String(EVENT_ID), token: tok }, STAFF);
     check('second scan -> already checked in, no new row', second.outcome === 'already_checked_in' && w.checkins.length === 1);
     check('says by whom', second.seat.checkin.admittedBy.name === 'Gate Staff One' && !!second.seat.checkin.admittedAtLabel);
-    const again = await w.service.lookup({ token: tok });
+    const again = await w.service.lookup({ eventId: String(EVENT_ID), token: tok });
     check('lookup now shows checked in', again.seats[0].checkedIn);
 
     const tok0 = pass.signPass(String(b._id), 0);
     w.setRace({ _id: id(), eventId: EVENT_ID, bookingId: b._id, participantIndex: 0, attendeeName: 'Priya Booker',
         admittedAt: new Date(), admittedBy: { name: 'Gate Two', email: 'gate2@x.com' }, method: 'qr' });
-    const raced = await w.service.admit({ token: tok0 }, STAFF);
+    const raced = await w.service.admit({ eventId: String(EVENT_ID), token: tok0 }, STAFF);
     check('two gates at once -> the loser reads the winner', raced.outcome === 'already_checked_in'
         && raced.seat.checkin.admittedBy.name === 'Gate Two' && w.checkins.length === 2);
 
-    const manual = await w.service.admit({ bookingRef: w.addBooking().bookingRef, participantIndex: 0 }, STAFF);
+    const manual = await w.service.admit({ eventId: String(EVENT_ID), bookingRef: w.addBooking().bookingRef, participantIndex: 0 }, STAFF);
     check('manual entry by booking ID + seat', manual.outcome === 'admitted' && w.checkins[w.checkins.length - 1].method === 'manual');
-    const noSeat = await rejects(w.service.admit({ bookingRef: b.bookingRef }, STAFF));
+    const noSeat = await rejects(w.service.admit({ eventId: String(EVENT_ID), bookingRef: b.bookingRef }, STAFF));
     check('booking ID without a seat is refused', noSeat && noSeat.statusCode === 400);
 
     console.log('\nadmit refuses');
     const cancelled = w.addBooking({ status: 'cancelled' });
-    const e1 = await rejects(w.service.admit({ token: pass.signPass(String(cancelled._id), 0) }, STAFF));
+    const e1 = await rejects(w.service.admit({ eventId: String(EVENT_ID), token: pass.signPass(String(cancelled._id), 0) }, STAFF));
     check('cancelled -> 409 with reason', e1 && e1.statusCode === 409 && e1.fields.reason === 'cancelled');
     const unpaid = w.addBooking({ payment: { status: 'pending' } });
-    const e2 = await rejects(w.service.admit({ token: pass.signPass(String(unpaid._id), 0) }, STAFF));
+    const e2 = await rejects(w.service.admit({ eventId: String(EVENT_ID), token: pass.signPass(String(unpaid._id), 0) }, STAFF));
     check('unpaid -> 409 with reason', e2 && e2.statusCode === 409 && e2.fields.reason === 'unpaid');
     const other = w.addBooking({ eventId: OTHER_EVENT_ID });
+    const noDoor = await rejects(w.service.admit({ token: tok }, STAFF));
+    check('admit without the door event is refused', noDoor && /Open the scanner from the event/.test(noDoor.message));
+    const noDoorLookup = await rejects(w.service.lookup({ token: tok }));
+    check('lookup without the door event is refused', noDoorLookup && noDoorLookup.statusCode === 400);
     const e3 = await rejects(w.service.admit({ token: pass.signPass(String(other._id), 0), eventId: String(EVENT_ID) }, STAFF));
     check('pass for another event -> 409 wrong_event', e3 && e3.statusCode === 409 && /Export Workshop/.test(e3.message));
     const rowsBefore = w.checkins.length;

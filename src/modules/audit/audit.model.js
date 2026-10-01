@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * An immutable record of one critical action on the platform.
@@ -48,7 +49,6 @@ const auditLogSchema = new mongoose.Schema({
 
     metadata: { type: mongoose.Schema.Types.Mixed }
 }, {
-    collection: 'audit_logs',
     // No updatedAt: these documents are never modified.
     timestamps: { createdAt: true, updatedAt: false }
 });
@@ -56,4 +56,4 @@ const auditLogSchema = new mongoose.Schema({
 auditLogSchema.index({ createdAt: -1 });
 auditLogSchema.index({ category: 1, createdAt: -1 });
 
-module.exports = mongoose.model('AuditLog', auditLogSchema);
+module.exports = dataLayout.model('AuditLog', auditLogSchema);

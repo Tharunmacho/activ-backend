@@ -1,11 +1,6 @@
 const mongoose = require('mongoose');
-const { getConnection } = require('./adminsDb');
-
-// One shared connection to the legacy adminsdb, opened in ./adminsDb.
-// Creating it per model opened four sockets to the same database.
-// Falls back to the default (main-database) connection when adminsdb cannot be
-// opened, so requiring a model can never throw and take the API down at boot.
-const adminsDbConnection = getConnection() || mongoose;
+const dataLayout = require('../../config/dataLayout');
+// Stored in activ_admins — see config/dataLayout.js.
 
 // StateAdmin Schema
 const stateAdminSchema = new mongoose.Schema({
@@ -86,11 +81,10 @@ const stateAdminSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.Mixed
     }
 }, {
-    collection: 'stateadmins',
     timestamps: true
 });
 
 // Indexes
 stateAdminSchema.index({ state: 1, active: 1 });
 
-module.exports = adminsDbConnection.model('StateAdmin', stateAdminSchema);
+module.exports = dataLayout.model('StateAdmin', stateAdminSchema);

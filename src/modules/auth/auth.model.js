@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const bcrypt = require('../common/passwordHash');
 
 // MemberAuth Schema - matches memberauths collection
@@ -41,7 +42,6 @@ const memberAuthSchema = new mongoose.Schema({
         select: false
     }
 }, {
-    collection: 'auth',
     timestamps: true,
     toJSON: {
         transform: (doc, ret) => {
@@ -76,6 +76,6 @@ memberAuthSchema.methods.updateLastLogin = async function() {
     await this.save();
 };
 
-const MemberAuth = mongoose.model('MemberAuth', memberAuthSchema);
+const MemberAuth = dataLayout.model('MemberAuth', memberAuthSchema);
 
 module.exports = MemberAuth;

@@ -2219,6 +2219,22 @@ class EventBookingService {
             ];
         }
 
+        /*
+         * SEATS AND TAKINGS COUNT ONLY THE BOOKINGS THAT HOLD A SEAT.
+         *
+         * Grouped on payment status alone, a cancelled booking's seats and a
+         * waitlisted one's still filled the seat total, and a booking cancelled
+         * after it was paid still read as money collected. "Admissible" is the
+         * check-in desk's definition (`ADMISSIBLE_CLAUSE`) — reused, not
+         * restated, so the organiser's totals and the door agree on who holds a
+         * seat. `live` (not cancelled / waitlisted) keeps a still-open unpaid
+         * booking in the "pending" figure.
+         */
+        const { ADMISSIBLE_CLAUSE } = require('./eventcheckin.service');
+        const deadStatuses = (ADMISSIBLE_CLAUSE?.status?.$nin || []).slice();
+        const admitPayments = (ADMISSIBLE_CLAUSE?.['payment.status']?.$in || []).slice();
+        const isLive = { $not: [{ $in: [{ $ifNull: ['$status', ''] }, deadStatuses] }] };
+
         const [rows, total, totals] = await Promise.all([
             EventBooking.find(query).sort({ createdAt: -1 })
                 .skip((page - 1) * limit).limit(limit).lean(),
@@ -2227,7 +2243,16 @@ class EventBookingService {
                 { $match: { eventId: id } },
                 {
                     $group: {
-                        _id: '$payment.status',
+                        _id: {
+                            pay: '$payment.status',
+                            live: isLive,
+                            admissible: {
+                                $and: [
+                                    isLive,
+                                    { $in: [{ $ifNull: ['$payment.status', ''] }, admitPayments] }
+                                ]
+                            }
+                        },
                         bookings: { $sum: 1 },
                         seats: { $sum: '$noOfPersons' },
                         amount: { $sum: '$totalAmount' }
@@ -2242,14 +2267,15 @@ class EventBookingService {
         };
 
         for (const row of totals || []) {
-            const n = Number(row.bookings || 0);
+            const n = Number(row?.bookings || 0);
+            const pay = row?._id?.pay;
             summary.bookings += n;
-            summary.seats += Number(row.seats || 0);
+            if (row?._id?.admissible === true) summary.seats += Number(row?.seats || 0);
 
-            if (row._id === 'paid') {
+            if (pay === 'paid' && row?._id?.admissible === true) {
                 summary.collected += Number(row.amount || 0);
                 summary.paidBookings += n;
-            } else if (row._id === 'pending') {
+            } else if (pay === 'pending' && row?._id?.live === true) {
                 // Owed, not collected. Adding it to the takings would tell an
                 // organiser they hold money that is still in somebody's wallet.
                 summary.pending += Number(row.amount || 0);

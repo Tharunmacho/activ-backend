@@ -23,7 +23,8 @@ const pass = require('./eventPass');
  *   POST /admit              staff   same body — lets one seat in (idempotent)
  *   POST /:token/admit       staff   the QR form of the same
  *
- * Staff = `super_admin` and `events_admin`. Mounted ABOVE `businessRoutes` in
+ * Staff = `super_admin`, `events_admin` and `attendance_admin` (the mobile
+ * app's door account). Mounted ABOVE `businessRoutes` in
  * routes.js: that router is a catch-all `verifyToken` for everything after it,
  * which would put the public pass page behind a sign-in.
  */

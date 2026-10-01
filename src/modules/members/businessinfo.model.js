@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { BUSINESS_TYPES } = require('./businessTypes');
 const { CONSTITUTION_TYPES } = require('./businessOptions');
 
@@ -66,13 +67,12 @@ const businessInfoSchema = new mongoose.Schema({
         type: Date
     }
 }, {
-    collection: 'additional form for bussiness 2',
     timestamps: true
 });
 
 // Index is already created via unique: true on userId field
 
-const BusinessInfo = mongoose.model('BusinessInfo', businessInfoSchema);
+const BusinessInfo = dataLayout.model('BusinessInfo', businessInfoSchema);
 
 module.exports = BusinessInfo;
 

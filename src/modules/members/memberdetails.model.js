@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { ALL_SOCIAL_CATEGORIES, GENDERS } = require('./demographicOptions');
 
 // MemberDetails Schema - web users collection (full user details)
@@ -350,7 +351,6 @@ const memberDetailsSchema = new mongoose.Schema({
         trim: true
     }
 }, {
-    collection: 'users',
     timestamps: true
 });
 
@@ -359,4 +359,4 @@ memberDetailsSchema.index({ state: 1, district: 1, block: 1 });
 memberDetailsSchema.index({ membershipStatus: 1, membershipType: 1 });
 memberDetailsSchema.index({ createdAt: -1 });
 
-module.exports = mongoose.model('MemberDetails', memberDetailsSchema);
+module.exports = dataLayout.model('MemberDetails', memberDetailsSchema);

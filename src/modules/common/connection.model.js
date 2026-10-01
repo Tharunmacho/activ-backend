@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 // Connections Schema
 const connectionSchema = new mongoose.Schema({
@@ -31,7 +32,6 @@ const connectionSchema = new mongoose.Schema({
         type: Date
     }
 }, {
-    collection: 'connections',
     timestamps: true
 });
 
@@ -40,4 +40,4 @@ connectionSchema.index({ senderId: 1, recipientId: 1 }, { unique: true });
 connectionSchema.index({ recipientId: 1, status: 1 });
 connectionSchema.index({ senderId: 1, status: 1 });
 
-module.exports = mongoose.model('Connection', connectionSchema);
+module.exports = dataLayout.model('Connection', connectionSchema);

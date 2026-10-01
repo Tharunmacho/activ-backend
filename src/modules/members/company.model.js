@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { BUSINESS_TYPES } = require('./businessTypes');
 const {
     CONSTITUTION_TYPES,
@@ -278,7 +279,6 @@ const companySchema = new mongoose.Schema({
         default: true
     }
 }, {
-    collection: 'companies',
     timestamps: true
 });
 
@@ -287,6 +287,6 @@ companySchema.index({ userId: 1 });
 companySchema.index({ businessName: 1 });
 companySchema.index({ status: 1 });
 
-const Company = mongoose.model('Company', companySchema);
+const Company = dataLayout.model('Company', companySchema);
 
 module.exports = Company;

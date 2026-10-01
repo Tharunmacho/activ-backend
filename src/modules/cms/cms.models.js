@@ -1,26 +1,15 @@
 const mongoose = require('mongoose');
-const { getConnection } = require('../admin/adminsDb');
+const dataLayout = require('../../config/dataLayout');
 
 /**
- * Content for the public onboarding site, stored in `adminsdb`.
+ * Content for the public onboarding site, stored in `activ_website`.
  *
  * One collection per page, so a page's content is one document you can read,
- * export or roll back on its own. `activ-db` holds member and application data;
- * marketing copy has a different lifecycle and different editors, and mixing
- * them makes both harder to reason about.
- *
- * Every collection here carries a `web_` prefix. That is not decoration: this
- * database also holds the four admin-account collections, and a client listing
- * collections sorts them alphabetically. Unprefixed, `about` and `home` and
- * `gallery` interleave with `blockadmins` and `stateadmins`, so telling site
- * content apart from staff records means reading the list twice. `web_` sorts
- * after every admin collection, which groups the two sets on screen.
- *
- * The connection falls back to the default one when `adminsdb` cannot be
- * opened, exactly as the admin models do — requiring this file must never throw
- * and take the API down at boot.
+ * export or roll back on its own. Member and application data live in
+ * `activ_members`; marketing copy has a different lifecycle and different
+ * editors, which is why it has a database of its own. Names and placement are
+ * in config/dataLayout.js.
  */
-const db = getConnection() || mongoose;
 
 /**
  * Singleton key.
@@ -317,7 +306,7 @@ const siteSettingsSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_site_settings', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= home page
 
@@ -440,7 +429,7 @@ const homeSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_home', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= about page
 
@@ -506,7 +495,7 @@ const aboutSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_about', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= events page
 
@@ -632,7 +621,7 @@ const eventsSettingsSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_events_settings', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= gallery
 
@@ -718,7 +707,7 @@ const gallerySettingsSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_gallery_settings', timestamps: true });
+}, { timestamps: true });
 
 const galleryItemSchema = new mongoose.Schema({
     media: media(),
@@ -884,7 +873,7 @@ const galleryItemSchema = new mongoose.Schema({
     visible: { type: Boolean, default: true, index: true },
 
     editedBy,
-}, { collection: 'web_gallery', timestamps: true });
+}, { timestamps: true });
 
 galleryItemSchema.index({ visible: 1, sortOrder: 1, createdAt: -1 });
 /** The landing banner's query: visible, flagged for home, newest first. */
@@ -1036,7 +1025,7 @@ const membershipSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_membership', timestamps: true });
+}, { timestamps: true });
 
 // =================================================================== news
 
@@ -1149,7 +1138,7 @@ const newsArticleSchema = new mongoose.Schema({
     extraFields: customFields(),
 
     editedBy,
-}, { collection: 'web_news', timestamps: true });
+}, { timestamps: true });
 
 /** The list query: published, newest first, undated at the front. */
 newsArticleSchema.index({ status: 1, publishedAt: -1, createdAt: -1 });
@@ -1231,7 +1220,7 @@ const schemeSchema = new mongoose.Schema({
     extraFields: customFields(),
 
     editedBy,
-}, { collection: 'web_schemes', timestamps: true });
+}, { timestamps: true });
 
 schemeSchema.index({ status: 1, tier: 1, sortOrder: 1 });
 
@@ -1263,7 +1252,7 @@ const schemeSettingsSchema = new mongoose.Schema({
 
     sections: sectionOverrides(),
     editedBy,
-}, { collection: 'web_scheme_settings', timestamps: true });
+}, { timestamps: true });
 
 /** The page’s own copy — the band, the headings, the empty states. */
 const newsSettingsSchema = new mongoose.Schema({
@@ -1286,7 +1275,7 @@ const newsSettingsSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_news_settings', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= contact
 
@@ -1442,7 +1431,7 @@ const contactSettingsSchema = new mongoose.Schema({
     sections: sectionOverrides(),
 
     editedBy,
-}, { collection: 'web_contact_settings', timestamps: true });
+}, { timestamps: true });
 
 // ================================================================= messages
 
@@ -1466,7 +1455,7 @@ const contactMessageSchema = new mongoose.Schema({
         ip: { type: String, default: '' },
         userAgent: { type: String, default: '' },
     },
-}, { collection: 'web_contact_messages', timestamps: true });
+}, { timestamps: true });
 
 contactMessageSchema.index({ status: 1, createdAt: -1 });
 contactMessageSchema.index({ createdAt: -1 });
@@ -1591,7 +1580,7 @@ const leaderMessageSchema = new mongoose.Schema({
         ip: { type: String, default: '' },
         userAgent: { type: String, default: '' },
     },
-}, { collection: 'web_leader_messages', timestamps: true });
+}, { timestamps: true });
 
 leaderMessageSchema.index({ status: 1, createdAt: -1 });
 leaderMessageSchema.index({ tier: 1, state: 1, district: 1, createdAt: -1 });
@@ -1750,7 +1739,7 @@ const legalDocumentSchema = new mongoose.Schema({
     extraFields: customFields(),
 
     editedBy,
-}, { collection: 'web_legal_documents', timestamps: true });
+}, { timestamps: true });
 
 /** The footer and the sidebar read them in this order, published only. */
 legalDocumentSchema.index({ status: 1, order: 1 });
@@ -1796,7 +1785,7 @@ const legalRevisionSchema = new mongoose.Schema({
     savedAt: { type: Date, default: Date.now },
     /** The editor's own note about what changed, when they left one. */
     note: text(),
-}, { collection: 'web_legal_revisions', timestamps: true });
+}, { timestamps: true });
 
 /** One row per version of a document, and the history reads newest first. */
 legalRevisionSchema.index({ slug: 1, version: -1 }, { unique: true });
@@ -2502,7 +2491,7 @@ const regionPageSchema = new mongoose.Schema({
     extraFields: customFields(),
     /** Sections the editor removed, and the rows they added to each. */
     sections: sectionOverrides(),
-}, { collection: 'web_region_pages', timestamps: true });
+}, { timestamps: true });
 
 /**
  * A STATE's landing page.
@@ -2639,7 +2628,7 @@ const statePageSchema = new mongoose.Schema({
     extraFields: customFields(),
     /** Sections the editor removed, and the rows they added to each. */
     sections: sectionOverrides(),
-}, { collection: 'web_state_pages', timestamps: true });
+}, { timestamps: true });
 
 /** The menu asks "which states have a page", once, for every visitor. */
 statePageSchema.index({ regionKey: 1, status: 1 });
@@ -2648,22 +2637,22 @@ module.exports = {
     SINGLETON_KEY,
     ICON_NAMES,
     FEATURE_ICONS,
-    LegalDocument: db.model('CmsLegalDocument', legalDocumentSchema),
-    LegalRevision: db.model('CmsLegalRevision', legalRevisionSchema),
-    SiteSettings: db.model('CmsSiteSettings', siteSettingsSchema),
-    Home: db.model('CmsHome', homeSchema),
-    About: db.model('CmsAbout', aboutSchema),
-    EventsSettings: db.model('CmsEventsSettings', eventsSettingsSchema),
-    GallerySettings: db.model('CmsGallerySettings', gallerySettingsSchema),
-    GalleryItem: db.model('CmsGalleryItem', galleryItemSchema),
-    ContactSettings: db.model('CmsContactSettings', contactSettingsSchema),
-    RegionPage: db.model('CmsRegionPage', regionPageSchema),
-    StatePage: db.model('CmsStatePage', statePageSchema),
-    ContactMessage: db.model('CmsContactMessage', contactMessageSchema),
-    LeaderMessage: db.model('CmsLeaderMessage', leaderMessageSchema),
-    NewsArticle: db.model('CmsNewsArticle', newsArticleSchema),
-    Scheme: db.model('CmsScheme', schemeSchema),
-    SchemeSettings: db.model('CmsSchemeSettings', schemeSettingsSchema),
-    NewsSettings: db.model('CmsNewsSettings', newsSettingsSchema),
-    Membership: db.model('CmsMembership', membershipSchema),
+    LegalDocument: dataLayout.model('CmsLegalDocument', legalDocumentSchema),
+    LegalRevision: dataLayout.model('CmsLegalRevision', legalRevisionSchema),
+    SiteSettings: dataLayout.model('CmsSiteSettings', siteSettingsSchema),
+    Home: dataLayout.model('CmsHome', homeSchema),
+    About: dataLayout.model('CmsAbout', aboutSchema),
+    EventsSettings: dataLayout.model('CmsEventsSettings', eventsSettingsSchema),
+    GallerySettings: dataLayout.model('CmsGallerySettings', gallerySettingsSchema),
+    GalleryItem: dataLayout.model('CmsGalleryItem', galleryItemSchema),
+    ContactSettings: dataLayout.model('CmsContactSettings', contactSettingsSchema),
+    RegionPage: dataLayout.model('CmsRegionPage', regionPageSchema),
+    StatePage: dataLayout.model('CmsStatePage', statePageSchema),
+    ContactMessage: dataLayout.model('CmsContactMessage', contactMessageSchema),
+    LeaderMessage: dataLayout.model('CmsLeaderMessage', leaderMessageSchema),
+    NewsArticle: dataLayout.model('CmsNewsArticle', newsArticleSchema),
+    Scheme: dataLayout.model('CmsScheme', schemeSchema),
+    SchemeSettings: dataLayout.model('CmsSchemeSettings', schemeSettingsSchema),
+    NewsSettings: dataLayout.model('CmsNewsSettings', newsSettingsSchema),
+    Membership: dataLayout.model('CmsMembership', membershipSchema),
 };

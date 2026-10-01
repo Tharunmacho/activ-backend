@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 const notificationSchema = new mongoose.Schema({
     user: {
@@ -29,4 +30,4 @@ const notificationSchema = new mongoose.Schema({
     timestamps: true
 });
 
-module.exports = mongoose.model('Notification', notificationSchema);
+module.exports = dataLayout.model('Notification', notificationSchema);

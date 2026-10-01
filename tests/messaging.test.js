@@ -39,7 +39,8 @@ const API = `${BASE_URL}/api/v1`;
 const RUN = `msg${Date.now()}`;
 
 // MemberDetails writes to `users` — see the collection table in CLAUDE.md.
-const MEMBERS = 'users';
+const { col } = require('./_layout');
+const MEMBERS = 'MemberDetails';
 
 let passed = 0;
 let failed = 0;
@@ -97,14 +98,13 @@ const tokenFor = (id) => jwt.sign(
 
 (async() => {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
-    const db = mongoose.connection.db;
     console.log(`\nConnected to ${mongoose.connection.name}`);
     console.log(`Server:   ${BASE_URL}`);
     console.log(`Run id:   ${RUN}`);
 
     const before = {
-        conversations: await db.collection('conversations').countDocuments(),
-        messages: await db.collection('messages').countDocuments()
+        conversations: await col('conversations').countDocuments(),
+        messages: await col('messages').countDocuments()
     };
 
     try {
@@ -113,7 +113,7 @@ const tokenFor = (id) => jwt.sign(
         // ---------------------------------------------------------------
         const seed = async(name, membershipStatus) => {
             const _id = new mongoose.Types.ObjectId();
-            await db.collection(MEMBERS).insertOne({
+            await col(MEMBERS).insertOne({
                 _id,
                 userId: _id,
                 fullName: `MSG ${name}`,
@@ -297,29 +297,28 @@ const tokenFor = (id) => jwt.sign(
         // ---------------------------------------------------------------
         section('Cleanup');
         // ---------------------------------------------------------------
-        const db2 = mongoose.connection.db;
 
         // Conversations are found through the seeded members rather than by a
         // tag: the service creates them, so there is nothing of ours on them
         // to tag.
-        const convs = await db2.collection('conversations')
+        const convs = await col('conversations')
             .find({ participants: { $in: created.members } }).project({ _id: 1 }).toArray()
             .catch(() => []);
         const convIds = convs.map(c => c._id);
 
-        const delMessages = await db2.collection('messages')
+        const delMessages = await col('messages')
             .deleteMany({ conversationId: { $in: convIds } }).catch(() => ({ deletedCount: 0 }));
-        const delConvs = await db2.collection('conversations')
+        const delConvs = await col('conversations')
             .deleteMany({ _id: { $in: convIds } }).catch(() => ({ deletedCount: 0 }));
-        const delMembers = await db2.collection(MEMBERS)
+        const delMembers = await col(MEMBERS)
             .deleteMany({ __msg: RUN }).catch(() => ({ deletedCount: 0 }));
 
         console.log(`  removed ${delMessages.deletedCount} messages, `
             + `${delConvs.deletedCount} conversations, ${delMembers.deletedCount} members`);
 
         const after = {
-            conversations: await db2.collection('conversations').countDocuments(),
-            messages: await db2.collection('messages').countDocuments()
+            conversations: await col('conversations').countDocuments(),
+            messages: await col('messages').countDocuments()
         };
         console.log(`  conversations: ${before.conversations} before -> ${after.conversations} after`);
         console.log(`  messages:      ${before.messages} before -> ${after.messages} after`);

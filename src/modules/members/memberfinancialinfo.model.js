@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { ALL_TURNOVER_RANGES } = require('./businessOptions');
 
 // MemberFinancialInfo Schema - matches memberfinancialinfos collection
@@ -113,8 +114,7 @@ const memberFinancialInfoSchema = new mongoose.Schema({
         index: true
     }
 }, {
-    collection: 'additional form for financial 3',
     timestamps: true
 });
 
-module.exports = mongoose.model('MemberFinancialInfo', memberFinancialInfoSchema);
+module.exports = dataLayout.model('MemberFinancialInfo', memberFinancialInfoSchema);

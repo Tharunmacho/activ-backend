@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * Association Updates — news and notices the association publishes to members.
@@ -108,11 +109,10 @@ const announcementSchema = new mongoose.Schema({
 
     createdBy: { type: String, trim: true, default: '' }
 }, {
-    collection: 'announcements',
     timestamps: true
 });
 
 announcementSchema.index({ status: 1, pinned: -1, publishedAt: -1 });
 announcementSchema.index({ status: 1, state: 1, district: 1, block: 1 });
 
-module.exports = mongoose.model('Announcement', announcementSchema);
+module.exports = dataLayout.model('Announcement', announcementSchema);

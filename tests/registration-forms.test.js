@@ -99,14 +99,25 @@ const testSchemaContract = () => {
     const Business = require('../src/modules/members/businessinfo.model');
     const Personal = require('../src/modules/members/personalinfo1.model');
 
+    /* What BOTH clients offer today: website lib/memberFormOptions.ts and
+       mobile companyForm/companyOptions.ts (TURNOVER_RANGES + the manual slab). */
     const CLIENT_TURNOVER_RANGES = [
         'Below 1 Lakh',
         '1-5 Lakhs',
         '5-10 Lakhs',
         '10-50 Lakhs',
         '50 Lakhs - 1 Crore',
-        'Above 1 Crore',
+        '₹1 Crore - ₹10 Crore',
+        '₹10 Crore - ₹25 Crore',
+        '₹25 Crore - ₹50 Crore',
+        '₹51 Crore - ₹100 Crore',
+        '₹101 Crore - ₹200 Crore',
+        '₹201 Crore - ₹500 Crore',
+        'Above ₹500 Crore',
+        'Other / Manual Entry',
     ];
+    /* No longer offered, still accepted: rows saved before the crore slabs. */
+    const LEGACY_TURNOVER_RANGES = ['Above 1 Crore'];
 
     const enumOf = (model, path) => model.schema.path(path)?.enumValues || [];
 
@@ -118,7 +129,8 @@ const testSchemaContract = () => {
     for (const range of CLIENT_TURNOVER_RANGES) {
         check(`  the clients' "${range}" is accepted`, turnover.includes(range));
     }
-    const orphans = turnover.filter((r) => !CLIENT_TURNOVER_RANGES.includes(r));
+    const orphans = turnover.filter((r) => r && !CLIENT_TURNOVER_RANGES.includes(r) && !LEGACY_TURNOVER_RANGES.includes(r));
+    check('  a legacy "Above 1 Crore" row still saves', LEGACY_TURNOVER_RANGES.every((r) => turnover.includes(r)));
     check('  no schema range is unreachable from the clients', orphans.length === 0,
         orphans.join(', ') || 'none');
 

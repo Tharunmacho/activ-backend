@@ -64,27 +64,75 @@ const getTransporter = () => {
  */
 const { archiveFields } = require('./archiveCopy');
 
-const send = async({ to, subject, text, html }) => {
+/**
+ * Record one send in the delivery log (Super Admin -> Notifications), when the
+ * caller says what it was. Never stores the body: a reset link and a generated
+ * password travel through here. Never throws — the email has already gone (or
+ * not) by the time this runs.
+ */
+const record = async(log, target, subject, result, messageId) => {
+    if (!log || !log.event) return null;
+    try {
+        // Required lazily: the notification module loads a lot, and mailer is
+        // used by modules it itself depends on.
+        const notificationService = require('../../modules/notifications/notification.service');
+        const unconfigured = result.skipped && /not configured/i.test(result.error || '');
+        return await notificationService.log({
+            user: log.user,
+            event: log.event,
+            channel: 'email',
+            recipient: target || 'unknown',
+            recipientName: log.recipientName,
+            subject,
+            sender: config.email.from,
+            status: result.sent ? 'sent' : 'failed',
+            // No SMTP on this server: shown as "not sent", not as a failure of
+            // this one message.
+            mock: unconfigured,
+            providerMessageId: messageId,
+            lastError: result.sent ? undefined : result.error,
+            provider: 'smtp',
+            deliveryStatus: unconfigured ? undefined : (result.sent ? 'accepted' : 'failed'),
+            data: { ...(log.data || {}), via: 'mailer' }
+        });
+    } catch (err) {
+        logger.warn('Mailer delivery-log row not written', { event: log.event, error: err && err.message });
+        return null;
+    }
+};
+
+/**
+ * `log` (optional): `{ event, user, recipientName, data }` — writes a row to the
+ * delivery log so the Super Admin can see the send and why it failed. The
+ * result then carries `logId`.
+ */
+const send = async({ to, subject, text, html, log }) => {
     const target = String(to || '').trim();
-    if (!target) return { sent: false, skipped: true, error: 'No recipient address' };
+    const title = subject || 'ACTIV';
+    const finish = async(result, messageId) => {
+        const row = await record(log, target, title, result, messageId);
+        return row && row._id ? { ...result, logId: String(row._id) } : result;
+    };
+
+    if (!target) return finish({ sent: false, skipped: true, error: 'No recipient address' });
 
     const transport = getTransporter();
-    if (!transport) return { sent: false, skipped: true, error: 'SMTP is not configured' };
+    if (!transport) return finish({ sent: false, skipped: true, error: 'SMTP is not configured' });
 
     try {
-        await transport.sendMail({
+        const info = await transport.sendMail({
             from: config.email.from,
             to: target,
             // The office keeps a copy of everything sent (config.email.archiveCopy).
             ...archiveFields(target),
-            subject: subject || 'ACTIV',
+            subject: title,
             text: text || '',
             html: html || undefined
         });
-        return { sent: true, skipped: false, error: '' };
+        return finish({ sent: true, skipped: false, error: '' }, info && info.messageId);
     } catch (err) {
         logger.warn('Email delivery failed', { to: target, error: err && err.message });
-        return { sent: false, skipped: false, error: (err && err.message) || 'Delivery failed' };
+        return finish({ sent: false, skipped: false, error: (err && err.message) || 'Delivery failed' });
     }
 };
 
@@ -101,7 +149,7 @@ const escapeHtml = (value = '') => String(value || '')
  * they can get it — nobody typed it, and it is not stored in recoverable form
  * anywhere. The copy says to change it on first sign-in for that reason.
  */
-const sendAdminWelcome = async({ email, fullName, password, roleLabel, region }) => {
+const sendAdminWelcome = async({ email, fullName, password, roleLabel, region, user }) => {
     const name = String(fullName || '').trim() || 'there';
     const place = String(region || '').trim();
     const tier = String(roleLabel || 'Admin').trim();
@@ -124,6 +172,7 @@ const sendAdminWelcome = async({ email, fullName, password, roleLabel, region })
     return send({
         to: email,
         subject: `Your ACTIV ${tier} account`,
+        log: { event: 'ADMIN_WELCOME', user, recipientName: name, data: { role: tier, region: place } },
         text: lines.join('\n'),
         html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px;line-height:1.6;color:#111827">
   <p>Hello ${escapeHtml(name)},</p>
@@ -149,7 +198,7 @@ const sendAdminWelcome = async({ email, fullName, password, roleLabel, region })
  * that an unrequested mail can be ignored: the token stays dormant until it is
  * used, so no action is genuinely required.
  */
-const sendPasswordReset = async({ email, fullName, resetUrl, expiresInMinutes = 60 }) => {
+const sendPasswordReset = async({ email, fullName, resetUrl, expiresInMinutes = 60, user, portal }) => {
     const name = String(fullName || '').trim() || 'there';
     const minutes = Number(expiresInMinutes) || 60;
     const window = minutes >= 60
@@ -174,6 +223,8 @@ const sendPasswordReset = async({ email, fullName, resetUrl, expiresInMinutes = 
     return send({
         to: email,
         subject: 'Reset your ACTIV password',
+        // The link itself is never logged — only that one was sent.
+        log: { event: 'PASSWORD_RESET', user, recipientName: name, data: { portal: portal || '', expiresInMinutes: minutes } },
         text: lines.join('\n'),
         html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px;line-height:1.6;color:#111827">
   <p>Hello ${escapeHtml(name)},</p>

@@ -8,9 +8,11 @@ const createRateLimiter = (options = {}) => {
         max: options.max || config.rateLimit.maxRequests,
         message: options.message || 'Too many requests, please try again later',
         standardHeaders: true,
-        legacyHeaders: false,
+        skip: (req) => {
+            return req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1';
+        },
         handler: (req, res) => {
-            logger.warn(`Rate limit exceeded for IP: ${req.ip}`);
+            logger.warn(`Rate limit exceeded for IP: ${req.ip} on URL: ${req.originalUrl}`);
             res.status(429).json({
                 success: false,
                 message: 'Too many requests, please try again later'

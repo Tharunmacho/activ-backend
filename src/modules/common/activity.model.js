@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 // Activities Schema
 const activitySchema = new mongoose.Schema({
@@ -49,7 +50,6 @@ const activitySchema = new mongoose.Schema({
         type: mongoose.Schema.Types.Mixed
     }
 }, {
-    collection: 'activities',
     timestamps: true
 });
 
@@ -58,4 +58,4 @@ activitySchema.index({ memberId: 1, createdAt: -1 });
 activitySchema.index({ companyId: 1, createdAt: -1 });
 activitySchema.index({ activityType: 1, createdAt: -1 });
 
-module.exports = mongoose.model('Activity', activitySchema);
+module.exports = dataLayout.model('Activity', activitySchema);

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 const notificationLogSchema = new mongoose.Schema({
     user: {
@@ -49,6 +50,17 @@ const notificationLogSchema = new mongoose.Schema({
              */
             'EVENT_DOCUMENT_CONFIRMED',
             'EVENT_DOCUMENT_REMINDER',
+            /*
+             * Emails sent through core/utils/mailer rather than the lifecycle
+             * dispatcher. They were never logged at all, so a reset link or a
+             * donation receipt that failed to leave left no trace the Super
+             * Admin could see. The body is NOT stored for any of them: two carry
+             * a secret (a reset link, a generated password).
+             */
+            'PASSWORD_RESET',
+            'ADMIN_WELCOME',
+            'DONATION_RECEIPT',
+            'DONATION_STATEMENT',
             'BOT_REPLY',
             'CUSTOM'
         ],
@@ -171,6 +183,15 @@ const notificationLogSchema = new mongoose.Schema({
     /** A resend writes a new row; the two point at each other. */
     resendOf: { type: mongoose.Schema.Types.ObjectId },
     resentAs: { type: mongoose.Schema.Types.ObjectId },
+    /**
+     * Automatic retries (notifications/deliveryGuard.js), kept on the ORIGINAL
+     * message of a resend chain: how many, and when the last one ran. Declared
+     * here because strict mode silently drops an undeclared path from an update.
+     */
+    autoRetry: {
+        count: { type: Number, default: 0 },
+        lastAt: { type: Date }
+    },
     data: mongoose.Schema.Types.Mixed
 }, {
     timestamps: true
@@ -187,4 +208,4 @@ notificationLogSchema.index({ channel: 1, createdAt: -1 });
 // A delivery callback names the provider's message id and nothing else.
 notificationLogSchema.index({ providerMessageId: 1 });
 
-module.exports = mongoose.model('NotificationLog', notificationLogSchema);
+module.exports = dataLayout.model('NotificationLog', notificationLogSchema);

@@ -127,7 +127,7 @@ const canSeeDrafts = (req) =>
  * reader already.)
  */
 const canSeeEventDrafts = (req) =>
-    canSeeDrafts(req) || !!(req.user && req.user.role === 'events_admin');
+    canSeeDrafts(req) || !!(req.user && ['events_admin', 'attendance_admin'].includes(req.user.role));
 
 // ---------------------------------------------------------------- gallery
 

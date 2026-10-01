@@ -100,7 +100,16 @@ const admissibility = (booking, index = 0, event = null, expectedEventId = '') =
     if (!Number.isInteger(index) || index < 0 || index >= seatCount(booking)) {
         return { ok: false, code: 'no_seat', message: 'This seat is no longer on the booking.' };
     }
+    /*
+     * AT A DOOR (`expectedEventId` given — `lookup` / `admit` refuse to run
+     * without one): a pass works only at its OWN event's door, and an online
+     * event has no door at all. Without a door (the public pass page, the
+     * booking's own pass list) the pass is judged on its own.
+     */
     const bookingEvent = str(booking.eventId);
+    if (expectedEventId && event && str(event.mode) === 'online') {
+        return { ok: false, code: 'online_event', message: 'This pass is for an online event — there is no check-in at a door.' };
+    }
     if (expectedEventId && bookingEvent && str(expectedEventId) !== bookingEvent) {
         const title = str(event && event.title) || str(booking.eventTitle) || 'another event';
         return { ok: false, code: 'wrong_event', message: `This pass is for “${title}”, not the event you are checking in.` };
@@ -281,6 +290,7 @@ const createCheckinService = (deps = {}) => {
      * seat number answers every seat on it, so the staff app can offer a list.
      */
     const lookup = async(input = {}) => {
+        if (!str(input.eventId)) throw ApiError.badRequest('Open the scanner from the event you are checking in.');
         const { booking, index, method } = await resolve(input);
         const event = await loadEvent(booking.eventId);
         const expectedEventId = str(input.eventId);
@@ -301,10 +311,24 @@ const createCheckinService = (deps = {}) => {
      * may not enter throws 409 with the reason.
      */
     const admit = async(input = {}, user = {}, meta = {}) => {
+        if (!str(input.eventId)) throw ApiError.badRequest('Open the scanner from the event you are checking in.');
         const { booking, index, method } = await resolve(input);
         if (index === null) throw ApiError.badRequest('Choose which participant on the booking to admit.');
         const event = await loadEvent(booking.eventId);
         const expectedEventId = str(input.eventId);
+
+        /*
+         * Wrong door or an online event is refused BEFORE "already checked in":
+         * a pass scanned at its own event must not read as a friendly "already
+         * in" at another event's door.
+         */
+        const door = admissibility(booking, index, event, expectedEventId);
+        if (['wrong_event', 'online_event'].includes(door.code)) {
+            const error = ApiError.conflict(door.message);
+            error.fields = { reason: door.code };
+            error.reasonCode = door.code;
+            throw error;
+        }
 
         const existing = await loadCheckin(booking._id, index);
         if (existing) {
@@ -494,12 +518,18 @@ const createCheckinService = (deps = {}) => {
     /**
      * The events a door team would open: on today, coming up, or just past
      * (`scope: 'upcoming'`, the default — from two days ago onward), or older
-     * ones (`scope: 'past'`). Published only. With registered / checked-in counts.
+     * ones (`scope: 'past'`). Published, IN-PERSON only. With registered /
+     * checked-in counts.
      */
     const listCheckinEvents = async({ scope = 'upcoming', now = new Date() } = {}) => {
         const since = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
         const past = scope === 'past';
-        const filter = { status: 'published', startAt: past ? { $lt: since, $ne: null } : { $gte: since } };
+        // In-person events only: an online event has no door (no `mode` = in person).
+        const filter = {
+            status: 'published',
+            mode: { $ne: 'online' },
+            startAt: past ? { $lt: since, $ne: null } : { $gte: since }
+        };
         const events = await lean(Event.find(filter, 'title startAt endAt venue mode category slug', {
             sort: { startAt: past ? -1 : 1 }, limit: 60
         })) || [];
@@ -554,8 +584,11 @@ const liveService = () => {
     return live;
 };
 
-/** Roles that work the door and may read attendance. */
-const CHECKIN_STAFF = ['super_admin', 'events_admin'];
+/**
+ * Roles that work the door and may read attendance. `attendance_admin` is the
+ * mobile app's door account — the scanner and attendance, nothing else.
+ */
+const CHECKIN_STAFF = ['super_admin', 'events_admin', 'attendance_admin'];
 
 module.exports = {
     createCheckinService,

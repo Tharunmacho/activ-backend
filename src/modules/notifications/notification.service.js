@@ -555,9 +555,31 @@ class NotificationService {
                      * a regression: nothing was ever going to reach a brand-new
                      * registrant through it.
                      */
-                    if (config.botbee.alsoSendText && rendered.whatsapp.text) {
+                    if (config.botbee.alsoSendText && rendered.whatsapp.text && !sent.success) {
                         const textSent = await botbeeService.sendTextMessage(phone, rendered.whatsapp.text);
                         sessionText = textSent && textSent.success ? textSent : null;
+                        /*
+                         * ITS OWN ROW. It is a separate message with its own
+                         * provider id: kept only as a flag on the template's
+                         * row, its failure reason was thrown away and the status
+                         * webhook could never match its id, so the Super Admin
+                         * could not tell whether the rescue itself worked.
+                         */
+                        result.rows.whatsappText = await this.log({
+                            user: userId,
+                            event: eventName,
+                            channel: 'whatsapp',
+                            recipient: (textSent && textSent.to) || phone,
+                            subject: 'Session text (template fallback)',
+                            status: textSent && textSent.success ? 'sent' : 'failed',
+                            mock: !!(textSent && textSent.mock),
+                            providerMessageId: textSent && textSent.messageId,
+                            lastError: textSent && !textSent.success ? (textSent.error || 'Not sent') : undefined,
+                            provider: 'botbee',
+                            deliveryStatus: textSent && textSent.mock ? undefined : (textSent && textSent.success ? 'accepted' : 'failed'),
+                            ...trace,
+                            data: { text: rendered.whatsapp.text, fallbackFor: sent.template || rendered.whatsapp.template }
+                        });
                     }
 
                     result.channels.whatsapp = sent;
@@ -814,15 +836,67 @@ class NotificationService {
          * real one on this row's channel, to this row's person, as a NEW row;
          * this row records that it was re-sent and by which row.
          */
+        /*
+         * TWO ROWS CANNOT BE RE-SENT, BY DESIGN. Neither stores its body: the
+         * reset link is single-use and the welcome email carried a generated
+         * password that exists nowhere else. The honest answer is the action
+         * that produces a fresh one.
+         */
+        if (row.event === 'PASSWORD_RESET') {
+            return { row, skipped: true, reason: 'A reset link cannot be re-sent — ask them to press "Forgot password" again for a new one.' };
+        }
+        if (row.event === 'ADMIN_WELCOME') {
+            return { row, skipped: true, reason: 'The welcome email held a one-time password that is not stored. Set a new password for this admin in Manage Admins.' };
+        }
+
+        /* Donation mail is rebuilt from the donation / donor, as a new row. */
+        if (row.event === 'DONATION_RECEIPT' || row.event === 'DONATION_STATEMENT') {
+            const donationModule = require('../donations/donation.service');
+            const Donor = require('../donations/donor.model');
+            let result;
+            if (row.event === 'DONATION_RECEIPT') {
+                const Donation = require('../donations/donation.model');
+                const donation = mongoose.Types.ObjectId.isValid(String(data.donationId || ''))
+                    ? await Donation.findById(data.donationId).lean().catch(() => null) : null;
+                if (!donation) return { row, skipped: true, reason: 'The donation this receipt belongs to was not found.' };
+                result = await donationModule.sendReceiptEmail(donation);
+            } else {
+                const donor = mongoose.Types.ObjectId.isValid(String(data.donorId || ''))
+                    ? await Donor.findById(data.donorId).lean().catch(() => null) : null;
+                if (!donor) return { row, skipped: true, reason: 'The donor this statement belongs to was not found.' };
+                result = await donationModule.sendStatementEmail(donor, data.financialYear);
+            }
+            row.attempts = Number(row.attempts || 1) + 1;
+            if (result && result.logId) row.resentAs = result.logId;
+            await row.save().catch(() => null);
+            const fresh = result && result.logId ? await NotificationLog.findById(result.logId).catch(() => null) : null;
+            return {
+                row: fresh || row,
+                outcome: { success: !!(result && result.sent), error: result && !result.sent ? (result.error || 'Not sent') : undefined }
+            };
+        }
+
         if (/^EVENT_(BOOKING|PARTICIPANT|DOCUMENT)_/.test(String(row.event || ''))) {
             const bookingService = require('../events/eventbooking.service');
             const resent = await bookingService.resendLoggedMessage(row.toObject ? row.toObject() : row);
-            if (resent.skipped) return { row, skipped: true, reason: resent.reason };
-
-            row.attempts = Number(row.attempts || 1) + 1;
-            if (resent.row && resent.row._id) row.resentAs = resent.row._id;
-            await row.save().catch(() => null);
-            return { row: resent.row || row, outcome: resent.outcome || { success: false, error: 'Not sent' } };
+            /*
+             * Booking gone (or never findable — rows logged before the booking
+             * reference was recorded): the message itself was stored, so send
+             * THAT rather than refusing. A booking that exists but no longer
+             * supports the message (cancelled, unpaid) is still refused — a
+             * confirmation for a seat that is not held must not go out.
+             */
+            const bookingMissing = resent.skipped && /could not be found/i.test(String(resent.reason || ''));
+            if (resent.skipped && !(bookingMissing && row.channel === 'email' && data.bodyHtml)) {
+                return { row, skipped: true, reason: resent.reason };
+            }
+            if (!resent.skipped) {
+                row.attempts = Number(row.attempts || 1) + 1;
+                if (resent.row && resent.row._id) row.resentAs = resent.row._id;
+                await row.save().catch(() => null);
+                return { row: resent.row || row, outcome: resent.outcome || { success: false, error: 'Not sent' } };
+            }
+            // …falls through to the stored-email replay below.
         }
 
         if (row.channel === 'email') {

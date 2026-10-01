@@ -137,7 +137,7 @@ router.get('/:id/attendees', requireRole(...BOOKING_VIEWERS), controller.listAtt
  * rows and CSV carry both. `/attendance/export` before nothing that could
  * capture it — `attendance` is a literal after `/:id`, at its own depth.
  */
-const ATTENDANCE_VIEWERS = ['super_admin', 'events_admin'];
+const ATTENDANCE_VIEWERS = ['super_admin', 'events_admin', 'attendance_admin'];
 router.get('/:id/attendance', requireRole(...ATTENDANCE_VIEWERS), asyncHandler(async(req, res) => {
     const { liveService } = require('./eventcheckin.service');
     const data = await liveService().attendance(req.params.id, {

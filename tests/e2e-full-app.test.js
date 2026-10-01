@@ -25,11 +25,12 @@ const PASSWORD = 'FullApp123!';
 
 const REGION = { state: 'FA Test State', district: 'FA Test District', block: 'FA Test Block' };
 
+const { col, ADMIN_MODEL } = require('./_layout');
 const COL = {
-    details: 'users',   // MemberDetails — schema says collection: 'users'
-    business: 'additional form for bussiness 2',
-    financial: 'additional form for financial 3',
-    declaration: 'additional form for declaration 4',
+    details: 'MemberDetails',
+    business: 'BusinessInfo',
+    financial: 'MemberFinancialInfo',
+    declaration: 'MemberDeclaration',
 };
 
 let passed = 0;
@@ -82,11 +83,10 @@ const contract = async(label, method, path, opts = {}) => {
 
 (async() => {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
-    const db = mongoose.connection.db;
     console.log(`\nServer: ${BASE_URL}\nRun id: ${RUN}`);
 
-    const appsBefore = await db.collection('applications').countDocuments();
-    const usersBefore = await db.collection(COL.details).countDocuments();
+    const appsBefore = await col('applications').countDocuments();
+    const usersBefore = await col(COL.details).countDocuments();
 
     const memberEmail = `${RUN}.member@fatest.invalid`;
     let memberToken = null;
@@ -203,7 +203,7 @@ const contract = async(label, method, path, opts = {}) => {
             });
             assert.ok([200, 201].includes(res.status), `HTTP ${res.status}: ${JSON.stringify(res.body)}`);
 
-            const saved = await db.collection(COL.details).findOne({ email: memberEmail });
+            const saved = await col(COL.details).findOne({ email: memberEmail });
             assert.ok(saved, 'member profile row not found after update');
             assert.strictEqual(saved.city, 'FA City', 'city did not persist');
         });
@@ -212,7 +212,7 @@ const contract = async(label, method, path, opts = {}) => {
             // Profile rows are keyed by the member-profile (`users`) id, which is what the JWT
             // carries — not the memberauths id.
             const uid = new mongoose.Types.ObjectId(memberId);
-            const dec = await db.collection(COL.declaration).findOne({
+            const dec = await col(COL.declaration).findOne({
                 $or: [{ userId: uid }, { memberId: uid }],
             });
             assert.ok(dec, 'declaration row not written by the profile form');
@@ -249,7 +249,7 @@ const contract = async(label, method, path, opts = {}) => {
         });
 
         await test('new application starts at Pending-Block', async() => {
-            const doc = await db.collection('applications').findOne({ _id: new mongoose.Types.ObjectId(applicationId) });
+            const doc = await col('applications').findOne({ _id: new mongoose.Types.ObjectId(applicationId) });
             assert.strictEqual(doc.status, 'Pending-Block');
         });
 
@@ -259,7 +259,7 @@ const contract = async(label, method, path, opts = {}) => {
                 body: { fullName: 'Full App Tester', email: memberEmail, phone: '9000012345', ...REGION },
             });
             assert.ok([200, 201].includes(res.status));
-            const count = await db.collection('applications').countDocuments({ email: memberEmail });
+            const count = await col('applications').countDocuments({ email: memberEmail });
             assert.strictEqual(count, 1, `expected 1 application, found ${count}`);
         });
 
@@ -366,9 +366,10 @@ const contract = async(label, method, path, opts = {}) => {
             ['super', 'super_admin', {}],
         ]) {
             const email = `${RUN}.${key}@fatest.invalid`.toLowerCase();
-            await db.collection('admins').insertOne({
-                email, password: hash, role, fullName: `FA ${role}`,
-                isActive: true, __fa: RUN, ...extra,
+            // The tier collection, with ITS spellings (passwordHash / active).
+            await col(ADMIN_MODEL[role]).insertOne({
+                email, passwordHash: hash, role, fullName: `FA ${role}`,
+                active: true, createdVia: 'e2e_test', __fa: RUN, ...extra,
             });
             const res = await request('POST', '/auth/login', { body: { email, password: PASSWORD } });
             adminTokens[key] = res.body?.data?.token;
@@ -424,10 +425,10 @@ const contract = async(label, method, path, opts = {}) => {
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
 
             const uid = new mongoose.Types.ObjectId(memberId);
-            assert.ok(await db.collection(COL.details).findOne({ _id: uid }), 'MemberDetails missing');
-            assert.ok(await db.collection(COL.business).findOne({ userId: uid }), 'BusinessInfo missing');
-            assert.ok(await db.collection(COL.financial).findOne({ memberId: uid }), 'FinancialInfo missing');
-            assert.ok(await db.collection(COL.declaration).findOne({ userId: uid }), 'Declaration missing');
+            assert.ok(await col(COL.details).findOne({ _id: uid }), 'MemberDetails missing');
+            assert.ok(await col(COL.business).findOne({ userId: uid }), 'BusinessInfo missing');
+            assert.ok(await col(COL.financial).findOne({ memberId: uid }), 'FinancialInfo missing');
+            assert.ok(await col(COL.declaration).findOne({ userId: uid }), 'Declaration missing');
         });
 
         await test('member sees the approved status on their own status screen', async() => {
@@ -456,7 +457,7 @@ const contract = async(label, method, path, opts = {}) => {
         section('DATA INTEGRITY');
         // ============================================================
         await test('pre-existing applications untouched', async() => {
-            const now = await db.collection('applications').countDocuments({ __fa: { $exists: false }, email: { $not: /@fatest\.invalid$/ } });
+            const now = await col('applications').countDocuments({ __fa: { $exists: false }, email: { $not: /@fatest\.invalid$/ } });
             assert.strictEqual(now, appsBefore, `application count changed: ${appsBefore} -> ${now}`);
         });
 
@@ -466,32 +467,30 @@ const contract = async(label, method, path, opts = {}) => {
         console.error(runError.stack?.split('\n').slice(1, 4).join('\n') || '');
     } finally {
         section('Cleanup');
-        const db2 = mongoose.connection.db;
         // Profile rows are keyed by the member-profile (`users`) id (what the JWT carries).
         const uid = memberId ? new mongoose.Types.ObjectId(memberId) : null;
 
         const del = async(c, f) => {
-            const r = await db2.collection(c).deleteMany(f).catch(() => ({ deletedCount: 0 }));
+            const r = await col(c).deleteMany(f).catch(() => ({ deletedCount: 0 }));
             if (r.deletedCount) console.log(`  removed ${r.deletedCount} from ${c}`);
         };
 
         const tagOrEmail = { $or: [{ __fa: RUN }, { email: new RegExp(`@fatest\\.invalid$`) }] };
         await del('applications', tagOrEmail);
-        await del('admins', tagOrEmail);
-        await del('memberauths', tagOrEmail);
+        for (const model of Object.values(ADMIN_MODEL)) await del(model, tagOrEmail);
+        await del('MemberAuth', tagOrEmail);
         await del(COL.details, tagOrEmail);
         if (uid) {
             await del(COL.business, { userId: uid });
             await del(COL.financial, { memberId: uid });
             await del(COL.declaration, { $or: [{ userId: uid }, { memberId: uid }] });
             await del('products', { $or: [{ userId: uid }, { createdBy: uid }] });
-            await del('business_profiles_accounts', { $or: [{ userId: uid }, { email: memberEmail }] });
             await del('companies', { $or: [{ userId: uid }, { email: memberEmail }] });
         }
         await del('products', { name: 'FA Test Product' });
 
-        const appsAfter = await db2.collection('applications').countDocuments();
-        const usersAfter = await db2.collection(COL.details).countDocuments();
+        const appsAfter = await col('applications').countDocuments();
+        const usersAfter = await col(COL.details).countDocuments();
         console.log(`  applications: ${appsBefore} -> ${appsAfter}`);
         console.log(`  users:        ${usersBefore} -> ${usersAfter}`);
 

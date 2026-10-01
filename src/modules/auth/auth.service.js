@@ -815,7 +815,9 @@ class AuthService {
             email: normalizedEmail,
             fullName: account.fullName,
             resetUrl,
-            expiresInMinutes: RESET_TOKEN_TTL_MS / 60000
+            expiresInMinutes: RESET_TOKEN_TTL_MS / 60000,
+            // Member or admin — shown in the Super Admin delivery log.
+            portal: account.kind
         });
 
         if (!delivery.sent) {

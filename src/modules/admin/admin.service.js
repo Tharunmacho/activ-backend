@@ -36,6 +36,9 @@ const ADMIN_PROFILE_TTL_SECONDS = 300;
 // Upper bound on how many applications a single dashboard payload carries.
 const APPLICANT_FETCH_LIMIT = 300;
 
+// A PAID membership. 'approved' is the application's verdict, not a payment.
+const PAID_MEMBERSHIP_STATUSES = ['active', 'completed'];
+
 const escapeRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const firstOf = (...values) => {
@@ -681,7 +684,79 @@ const loadApplicants = async(geoFilter, memberFilter, level, scope) => {
         coverageFor ? coverageFor({ state: app.state, district: app.district, block: app.block }) : null
     ));
 
-    return { totalMembers: totalMembers || 0, applications, applicants };
+    // The rows above are capped for the list; the dashboard TOTALS are not.
+    const totals = await countApplicationBuckets(geoFilter, coverageFor);
+
+    return { totalMembers: totalMembers || 0, applications, applicants, totals };
+};
+
+/**
+ * Only the fields `classifyForLevel` (via `tierReviews.tierVerdict`) reads.
+ * Keep in step with `tierReviews.js` — a field it starts reading must be added
+ * here, or a projected row classifies differently from a full one.
+ */
+const CLASSIFY_FIELDS = 'status reviews approvedBy rejectedBy reviewedBy blockApprovedAt districtApprovedAt stateApprovedAt';
+
+/**
+ * Exact dashboard counts over the WHOLE geofenced filter.
+ *
+ * The listed rows are capped (`APPLICANT_FETCH_LIMIT`, `GLOBAL_FETCH_LIMIT`),
+ * and counting buckets from them froze every tile at the cap once a region
+ * outgrew it. This reads a lightweight projection with no row limit and
+ * classifies each row with the same `classifyForLevel` / `normalizeStatus` the
+ * lists use, so a tile and its tab cannot disagree about a bucket rule.
+ *
+ * Returns null when the query fails, so a caller falls back to its row counts
+ * instead of printing a confident zero.
+ */
+const countApplicationBuckets = async(filter = {}, coverageFor = null) => {
+    const rows = await Application.find(filter)
+        .select(`${CLASSIFY_FIELDS}${coverageFor ? ' state district block' : ''}`)
+        .lean()
+        .catch(() => null);
+    if (!Array.isArray(rows)) return null;
+
+    const empty = () => ({ total: 0, pending: 0, approved: 0, rejected: 0 });
+    const totals = {
+        total: rows.length,
+        outcome: { pending: 0, approved: 0, rejected: 0 },
+        byLevel: { block: empty(), district: empty(), state: empty() }
+    };
+
+    rows.forEach((app) => {
+        const status = normalizeStatus(app?.status);
+        if (status === 'Approved') totals.outcome.approved += 1;
+        else if (status === 'Rejected') totals.outcome.rejected += 1;
+        else totals.outcome.pending += 1;
+
+        const coverage = typeof coverageFor === 'function'
+            ? coverageFor({ state: app?.state, district: app?.district, block: app?.block })
+            : null;
+        [LEVELS.BLOCK, LEVELS.DISTRICT, LEVELS.STATE].forEach((level) => {
+            const stage = classifyForLevel(app, level, coverage);
+            const bucket = totals.byLevel[level];
+            bucket.total += 1;
+            if (stage === 'pending') bucket.pending += 1;
+            else if (stage === 'approved') bucket.approved += 1;
+            else if (stage === 'rejected') bucket.rejected += 1;
+        });
+    });
+
+    return totals;
+};
+
+/** The exact figures for one tier, laid over the row-derived ones. */
+const exactTierStats = (totals, level) => {
+    const bucket = totals?.byLevel?.[level];
+    if (!bucket) return {};
+    return {
+        pendingApplications: bucket.pending,
+        approvedApplications: bucket.approved,
+        rejectedApplications: bucket.rejected,
+        enrolledMembers: Number(totals?.outcome?.approved || 0),
+        declinedApplications: Number(totals?.outcome?.rejected || 0),
+        totalApplications: Number(totals?.total || 0)
+    };
 };
 
 class AdminService {
@@ -689,8 +764,12 @@ class AdminService {
         const [totalUsers, totalMembers, pendingApplications, approvedMembers] = await Promise.all([
             User.countDocuments(),
             Member.countDocuments(),
-            Application.countDocuments({ status: { $regex: /^pending/ } }),
-            Member.countDocuments({ isApproved: true })
+            // The stored spellings, not a case-sensitive /^pending/ that
+            // missed 'Pending-Block' and every other canonical one.
+            Application.countDocuments({ status: { $in: PENDING_STORED_STATUSES } }).catch(() => 0),
+            // A PAID member. There is no `isApproved` on MemberDetails, so
+            // that filter matched nothing and this was always 0.
+            Member.countDocuments({ membershipStatus: { $in: PAID_MEMBERSHIP_STATUSES } }).catch(() => 0)
         ]);
 
         return { totalUsers, totalMembers, pendingApplications, approvedMembers };
@@ -775,9 +854,10 @@ class AdminService {
         // Geofenced query: strictly retrieve applications assigned to THIS block.
         const blockFilter = buildGeoFilter('block', blockName);
 
-        const { totalMembers, applicants } = await loadApplicants(
+        const { totalMembers, applicants, totals } = await loadApplicants(
             blockFilter,
-            { block: blockName },
+            // Same case-insensitive match as the application queue (buildGeoFilter).
+            { block: new RegExp(`^${escapeRegex(blockName)}$`, 'i') },
             LEVELS.BLOCK,
             scope
         );
@@ -867,7 +947,9 @@ class AdminService {
                 totalRevenue: 0,
                 blockName,
                 districtName,
-                stateName
+                stateName,
+                // Exact over the whole block — the list above is capped.
+                ...exactTierStats(totals, LEVELS.BLOCK)
             },
             members: buildMemberDirectory(enrolled, declined),
             applicants: {
@@ -890,9 +972,10 @@ class AdminService {
         // Geofenced query: strictly retrieve applications assigned to THIS district.
         const districtFilter = buildGeoFilter('district', districtName);
 
-        const { totalMembers, applicants } = await loadApplicants(
+        const { totalMembers, applicants, totals } = await loadApplicants(
             districtFilter,
-            { district: districtName },
+            // Same case-insensitive match as the application queue (buildGeoFilter).
+            { district: new RegExp(`^${escapeRegex(districtName)}$`, 'i') },
             LEVELS.DISTRICT,
             scope
         );
@@ -968,7 +1051,9 @@ class AdminService {
                 activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
                 districtName,
-                stateName
+                stateName,
+                // Exact over the whole district — the list above is capped.
+                ...exactTierStats(totals, LEVELS.DISTRICT)
             },
             members: buildMemberDirectory(enrolled, declined),
             applicants: {
@@ -994,9 +1079,10 @@ class AdminService {
         // Geofenced query: strictly retrieve applications assigned to THIS state.
         const stateFilter = buildGeoFilter('state', stateName);
 
-        const { totalMembers, applicants } = await loadApplicants(
+        const { totalMembers, applicants, totals } = await loadApplicants(
             stateFilter,
-            { state: stateName },
+            // Same case-insensitive match as the application queue (buildGeoFilter).
+            { state: new RegExp(`^${escapeRegex(stateName)}$`, 'i') },
             LEVELS.STATE,
             scope
         );
@@ -1084,7 +1170,9 @@ class AdminService {
                 totalApplications: visible.length,
                 activeBusinesses: visible.filter(a => a.businessInfo.doingBusiness).length,
                 totalRevenue: 0,
-                stateName
+                stateName,
+                // Exact over the whole state — the list above is capped.
+                ...exactTierStats(totals, LEVELS.STATE)
             },
             members: buildMemberDirectory(enrolled, declined),
             applicants: {
@@ -1108,7 +1196,8 @@ class AdminService {
             // the list that is maintained alongside the enum and is what every
             // other query uses.
             Application.countDocuments({ status: { $in: PENDING_STORED_STATUSES } }).catch(() => 0),
-            Member.countDocuments().catch(() => 0)
+            // Paid members only — this was every member record, approved or not.
+            Member.countDocuments({ membershipStatus: { $in: PAID_MEMBERSHIP_STATUSES } }).catch(() => 0)
         ]);
 
         return {
@@ -1141,6 +1230,10 @@ class AdminService {
 
         const applications = await Application.find(geoFilter)
             .select('status createdAt state district block data')
+            // Newest first: unsorted, the 2000-row cap kept whichever rows the
+            // storage engine returned first and dropped the recent ones the
+            // growth chart is about.
+            .sort({ createdAt: -1 })
             .limit(2000)
             .lean()
             .catch(() => []);
@@ -1741,3 +1834,4 @@ module.exports.buildGeoFilter = buildGeoFilter;
 module.exports.buildApplicant = buildApplicant;
 module.exports.classifyForLevel = classifyForLevel;
 module.exports.escapeRegex = escapeRegex;
+module.exports.countApplicationBuckets = countApplicationBuckets;

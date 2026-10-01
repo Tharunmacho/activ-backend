@@ -1,5 +1,12 @@
 const http = require('http');
 const app = require('./app');
+
+/*
+ * Every model has now been loaded (by the routes). Refuse to start if any of
+ * them is outside config/dataLayout.js: its data would land in a database
+ * nobody looks at, silently. Failing here is loud and happens before any write.
+ */
+require('./config/dataLayout').assertAllModelsMapped();
 const config = require('./config');
 const connectDB = require('./config/db');
 const { connectRedis, disconnectRedis } = require('./config/redis');
@@ -137,6 +144,14 @@ const startServer = async() => {
             require('./modules/payment/payment.service').startReconcileScheduler();
         } catch (error) {
             logger.warn('Payment reconcile not started', { error: error && error.message });
+        }
+
+        // Email health check (every 15 min) + automatic retry of failures that
+        // can heal (every 10 min). `NOTIFICATION_AUTO_RETRY=false` turns the retry off.
+        try {
+            require('./modules/notifications/deliveryGuard').start();
+        } catch (error) {
+            logger.warn('Delivery guard not started', { error: error && error.message });
         }
 
         // Renewal reminders: 30 days, 7 days, and on expiry.

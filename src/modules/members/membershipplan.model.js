@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * A membership tier a member can buy.
@@ -141,10 +142,9 @@ const membershipPlanSchema = new mongoose.Schema({
         index: true
     }
 }, {
-    collection: 'membershipPlans',
     timestamps: true
 });
 
 membershipPlanSchema.index({ isActive: 1, displayOrder: 1 });
 
-module.exports = mongoose.model('MembershipPlan', membershipPlanSchema);
+module.exports = dataLayout.model('MembershipPlan', membershipPlanSchema);

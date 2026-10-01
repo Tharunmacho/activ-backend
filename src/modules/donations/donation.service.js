@@ -58,7 +58,7 @@ const orgWithAddress = async() => {
 
 /** Next receipt number for a financial year. Atomic `$inc` on one document. */
 const nextReceiptNumber = async(fy) => {
-    const res = await mongoose.connection.db.collection('donation_counters').findOneAndUpdate(
+    const res = await require('../../config/dataLayout').collection('donationCounters').findOneAndUpdate(
         { _id: `donation:${fy}` },
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }
@@ -142,6 +142,11 @@ const sendReceiptEmail = async(donation) => {
     return mailer.send({
         to,
         subject: `Thank you — your 80G receipt ${donation.receiptNumber}`,
+        log: {
+            event: 'DONATION_RECEIPT',
+            recipientName: name,
+            data: { donationId: String(donation._id || ''), receiptNumber: donation.receiptNumber, financialYear: donation.financialYear }
+        },
         text: [
             `Dear ${name},`, '',
             `Thank you for your donation of ${amount} to ACTIV.`, '',
@@ -175,6 +180,7 @@ const sendStatementEmail = async(donor, fy) => {
     return mailer.send({
         to: donor.email,
         subject: `Your ACTIV donation certificate for ${fy}`,
+        log: { event: 'DONATION_STATEMENT', recipientName: donor.fullName, data: { donorId: String(donor._id || ''), financialYear: fy } },
         text: `Dear ${donor.fullName},\n\nThe ${fy} financial year has ended. Your consolidated 80G donation certificate, listing every donation you made to ACTIV in ${fy} and the total, is ready:\n${url}\n\nThank you for your support.\n\n— ${ORG.name} (ACTIV)`,
         html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px;line-height:1.6;color:#111827">
   <p>Dear ${esc(donor.fullName)},</p>
@@ -426,9 +432,8 @@ class DonationService {
             { $match: match },
             { $group: { _id: null, total: { $sum: '$amountPaise' }, count: { $sum: 1 }, donors: { $addToSet: '$donorId' } } }
         ]);
-        const monthStart = new Date();
-        monthStart.setDate(1);
-        monthStart.setHours(0, 0, 0, 0);
+        // The IST month, whatever the server's TZ.
+        const monthStart = U.istMonthStart();
         const [month] = await Donation.aggregate([
             { $match: { status: 'paid', paidAt: { $gte: monthStart } } },
             { $group: { _id: null, total: { $sum: '$amountPaise' } } }
@@ -623,3 +628,4 @@ class DonationService {
 
 module.exports = new DonationService();
 module.exports.sendReceiptEmail = sendReceiptEmail;
+module.exports.sendStatementEmail = sendStatementEmail;

@@ -59,7 +59,10 @@ const connectDB = async() => {
 
     for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
         try {
-            await mongoose.connect(uri, config.db.options);
+            // `dbName` explicit: see config.db.name. Tests keep their own URI's database.
+            await mongoose.connect(uri, config.env === 'test'
+                ? config.db.options
+                : { ...config.db.options, dbName: config.db.name });
 
             logger.info(`MongoDB connected: ${mongoose.connection.host}`);
 

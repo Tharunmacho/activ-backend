@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../config/dataLayout');
 
 const productSchema = new mongoose.Schema(
   {
@@ -80,7 +81,6 @@ const productSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    collection: 'products'
   }
 );
 
@@ -90,7 +90,7 @@ productSchema.index({ userId: 1, isFeatured: 1 });
 productSchema.index({ userId: 1, isActive: 1 });
 productSchema.index({ createdAt: -1 });
 
-const Product = mongoose.model('Product', productSchema);
+const Product = dataLayout.model('Product', productSchema);
 
 /**
  * The one place a stock level is turned into a word.

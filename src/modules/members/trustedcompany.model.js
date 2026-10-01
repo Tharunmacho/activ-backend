@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 /**
  * TRUST LIST — the companies a member has kept from Discover.
@@ -54,11 +55,10 @@ const trustedCompanySchema = new mongoose.Schema({
         maxlength: 500
     }
 }, {
-    collection: 'trusted companies',
     timestamps: true
 });
 
 // One row per (member, company). See the note above on idempotent adds.
 trustedCompanySchema.index({ userId: 1, companyId: 1 }, { unique: true });
 
-module.exports = mongoose.model('TrustedCompany', trustedCompanySchema);
+module.exports = dataLayout.model('TrustedCompany', trustedCompanySchema);

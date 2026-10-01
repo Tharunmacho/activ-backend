@@ -41,22 +41,22 @@ const OTHER_REGION = {
 
 const PASSWORD = 'E2ePassw0rd!';
 
-// Three of the four member models write to legacy, human-named collections —
-// NOT to the pluralised names Mongoose would infer. Cleanup must target these
-// exact names or the test leaves orphaned rows behind in real collections.
-//
-// `MemberDetails` is the exception and was wrong here: its schema declares
-// `collection: 'users'`, while this map still named the retired `web users`.
-// Both halves of that failed silently in opposite directions — every assertion
-// that a member profile had been created read an empty collection and reported
-// "MemberDetails not created", and the cleanup then deleted from that same
-// empty collection, so each run left two synthetic member rows behind in the
-// real `users` collection of the shared cluster.
+// Every collection is reached by MODEL NAME through config/dataLayout.js — the
+// same map the server uses — so this test can never look in a different place
+// from the code it tests. (It used to name collections itself, and twice they
+// drifted: once a stale name made every "member created" check read an empty
+// collection, once it seeded admins where the server no longer looks.)
+const layout = require('../src/config/dataLayout');
+const col = (model) => {
+    const [area, collection] = layout.MODELS[model];
+    return mongoose.connection.getClient().db(layout.dbName(area)).collection(collection);
+};
+const TIER_MODEL = { block_admin: 'BlockAdmin', district_admin: 'DistrictAdmin', state_admin: 'StateAdmin' };
 const COL = {
-    details: 'users',                                  // MemberDetails
-    business: 'additional form for bussiness 2',       // BusinessInfo  (sic)
-    financial: 'additional form for financial 3',      // MemberFinancialInfo
-    declaration: 'additional form for declaration 4'   // MemberDeclaration
+    details: 'MemberDetails',
+    business: 'BusinessInfo',
+    financial: 'MemberFinancialInfo',
+    declaration: 'MemberDeclaration'
 };
 
 let passed = 0;
@@ -107,14 +107,13 @@ const bucketIds = (payload, bucket) =>
 
 (async() => {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
-    const db = mongoose.connection.db;
     console.log(`\nConnected to ${mongoose.connection.name}`);
     console.log(`Server:   ${BASE_URL}`);
     console.log(`Run id:   ${RUN}`);
 
     // Snapshot the real data so we can prove at the end that we did not touch it.
-    const realAppCountBefore = await db.collection('applications').countDocuments();
-    const realStatusesBefore = await db.collection('applications')
+    const realAppCountBefore = await col('Application').countDocuments();
+    const realStatusesBefore = await col('Application')
         .aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }, { $sort: { _id: 1 } }]).toArray();
 
     try {
@@ -138,22 +137,27 @@ const bucketIds = (payload, bucket) =>
             emails[spec.key] = email;
             const doc = {
                 email,
-                password: hash,
+                // The TIER collection's own spellings (`passwordHash`, `active`),
+                // not the old unified collection's `password` / `isActive` — the
+                // wrong spelling is an account that cannot sign in. `createdVia`
+                // marks it as real staffing for the scaffold filter.
+                passwordHash: hash,
                 role: spec.role,
                 fullName: `E2E ${spec.role}`,
                 state: spec.state,
                 district: spec.district,
                 block: spec.block,
-                isActive: true,
+                active: true,
+                createdVia: 'e2e_test',
                 __e2e: RUN
             };
-            const r = await db.collection('admins').insertOne(doc);
+            const r = await col(TIER_MODEL[spec.role]).insertOne(doc);
             created.admins.push(r.insertedId);
         }
         console.log(`  seeded ${created.admins.length} admins`);
 
         // The applicant, and the application itself at stage 1.
-        const memberAuthRes = await db.collection('memberauths').insertOne({
+        const memberAuthRes = await col('MemberAuth').insertOne({
             email: `${RUN}.member@e2e.invalid`,
             password: hash,
             isActive: true,
@@ -162,7 +166,7 @@ const bucketIds = (payload, bucket) =>
         created.memberauths.push(memberAuthRes.insertedId);
         const applicantUserId = memberAuthRes.insertedId;
 
-        const appRes = await db.collection('applications').insertOne({
+        const appRes = await col('Application').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Applicant',
             email: `${RUN}.member@e2e.invalid`,
@@ -287,7 +291,7 @@ const bucketIds = (payload, bucket) =>
         });
 
         await test('the refused approve did not change the status', async() => {
-            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
+            const doc = await col('Application').findOne({ _id: appRes.insertedId });
             assert.strictEqual(doc.status, 'Pending');
         });
 
@@ -328,7 +332,7 @@ const bucketIds = (payload, bucket) =>
         section('Each tier keeps its own verdict');
         // ---------------------------------------------------------------
         await test("the district's verdict carries the block, and stops there", async() => {
-            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
+            const doc = await col('Application').findOne({ _id: appRes.insertedId });
             assert.strictEqual(doc.status, 'Pending', 'an endorsement must not write the outcome');
 
             assert.strictEqual(doc.reviews?.district?.decision, 'approved');
@@ -348,7 +352,7 @@ const bucketIds = (payload, bucket) =>
         });
 
         await test('no member profile exists yet — the State has not approved', async() => {
-            const memberDetails = await db.collection(COL.details).findOne({ userId: applicantUserId });
+            const memberDetails = await col(COL.details).findOne({ userId: applicantUserId });
             assert.ok(!memberDetails,
                 'a district endorsement created a member profile; only the State may enrol');
         });
@@ -404,7 +408,7 @@ const bucketIds = (payload, bucket) =>
             assert.strictEqual(res.body?.data?.status, 'Approved');
             assert.strictEqual(res.body?.data?.decidesOutcome, true);
 
-            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
+            const doc = await col('Application').findOne({ _id: appRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
             assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin');
             assert.ok(doc.approvedBy?.approvedAt instanceof Date, 'approvedAt not stored as a Date');
@@ -419,27 +423,27 @@ const bucketIds = (payload, bucket) =>
         await test('member profile created across all 4 collections', async() => {
             // Key fields differ per model: details/business/declaration use
             // `userId`, financial uses `memberId`.
-            const memberDetails = await db.collection(COL.details).findOne({ userId: applicantUserId });
+            const memberDetails = await col(COL.details).findOne({ userId: applicantUserId });
             assert.ok(memberDetails, `MemberDetails not created in '${COL.details}'`);
 
-            const businessInfo = await db.collection(COL.business).findOne({ userId: applicantUserId });
+            const businessInfo = await col(COL.business).findOne({ userId: applicantUserId });
             assert.ok(businessInfo, `BusinessInfo not created in '${COL.business}'`);
 
-            const financial = await db.collection(COL.financial).findOne({ memberId: applicantUserId });
+            const financial = await col(COL.financial).findOne({ memberId: applicantUserId });
             assert.ok(financial, `MemberFinancialInfo not created in '${COL.financial}'`);
 
-            const declaration = await db.collection(COL.declaration).findOne({ memberId: applicantUserId });
+            const declaration = await col(COL.declaration).findOne({ memberId: applicantUserId });
             assert.ok(declaration, `MemberDeclaration not created in '${COL.declaration}'`);
         });
 
         await test('approved member is linked back to their user account', async() => {
-            const memberDetails = await db.collection(COL.details).findOne({ userId: applicantUserId });
+            const memberDetails = await col(COL.details).findOne({ userId: applicantUserId });
             assert.ok(memberDetails, 'member profile has no userId link');
             assert.strictEqual(String(memberDetails.userId), String(applicantUserId));
         });
 
         await test('created member carries the correct geography', async() => {
-            const memberDetails = await db.collection(COL.details).findOne({ userId: applicantUserId });
+            const memberDetails = await col(COL.details).findOne({ userId: applicantUserId });
             assert.ok(memberDetails, 'member profile not found');
             assert.strictEqual(memberDetails.block, REGION.block);
             assert.strictEqual(memberDetails.district, REGION.district);
@@ -475,7 +479,7 @@ const bucketIds = (payload, bucket) =>
             });
             assert.strictEqual(res.status, 400, `expected 400, got ${res.status}`);
 
-            const doc = await db.collection('applications').findOne({ _id: appRes.insertedId });
+            const doc = await col('Application').findOne({ _id: appRes.insertedId });
             assert.strictEqual(doc.status, 'Approved', 'a refused rejection changed the outcome');
         });
 
@@ -489,12 +493,12 @@ const bucketIds = (payload, bucket) =>
         // MemberFinancialInfo.save() throw partway through the profile write.
         // (A duplicate email no longer fails: registration already creates the
         // member row, so approval updates it in place by design.)
-        const atomicAuth = await db.collection('memberauths').insertOne({
+        const atomicAuth = await col('MemberAuth').insertOne({
             email: `${RUN}.atomic@e2e.invalid`, password: hash, isActive: true, __e2e: RUN
         });
         created.memberauths.push(atomicAuth.insertedId);
 
-        const atomicRes = await db.collection('applications').insertOne({
+        const atomicRes = await col('Application').insertOne({
             userId: atomicAuth.insertedId,
             fullName: 'E2E Atomic Applicant',
             email: `${RUN}.atomic@e2e.invalid`,
@@ -528,19 +532,19 @@ const bucketIds = (payload, bucket) =>
         });
 
         await test('nothing was left behind by the rolled-back approval', async() => {
-            const orphan = await db.collection(COL.details).findOne({ userId: atomicAuth.insertedId });
+            const orphan = await col(COL.details).findOne({ userId: atomicAuth.insertedId });
             assert.ok(!orphan, 'a member row survived the failed approval');
         });
 
         await test('a failed approval leaves the application retryable, not stranded', async() => {
-            const doc = await db.collection('applications').findOne({ _id: atomicRes.insertedId });
+            const doc = await col('Application').findOne({ _id: atomicRes.insertedId });
             assert.strictEqual(doc.status, 'Pending',
                 `expected the application to stay Pending, found '${doc.status}' with no member profile`);
             assert.ok(!doc.stateApprovedAt, 'stateApprovedAt was set despite the failure');
         });
 
         await test('retry succeeds once the bad data is corrected', async() => {
-            await db.collection('applications').updateOne(
+            await col('Application').updateOne(
                 { _id: atomicRes.insertedId },
                 { $set: { 'data.financialInfo.turnoverRange': '1-5 Lakhs' } }
             );
@@ -550,16 +554,16 @@ const bucketIds = (payload, bucket) =>
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
 
-            const doc = await db.collection('applications').findOne({ _id: atomicRes.insertedId });
+            const doc = await col('Application').findOne({ _id: atomicRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
-            const member = await db.collection(COL.details).findOne({ userId: atomicAuth.insertedId });
+            const member = await col(COL.details).findOne({ userId: atomicAuth.insertedId });
             assert.ok(member, 'member profile missing after successful retry');
         });
 
         // ---------------------------------------------------------------
         section('A lower tier objects; only the State closes the file');
         // ---------------------------------------------------------------
-        const rejectAppRes = await db.collection('applications').insertOne({
+        const rejectAppRes = await col('Application').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Reject Applicant',
             email: `${RUN}.reject@e2e.invalid`,
@@ -588,7 +592,7 @@ const bucketIds = (payload, bucket) =>
                 'a block rejection ended the application; only the State decides it');
             assert.strictEqual(res.body?.data?.decidesOutcome, false);
 
-            const doc = await db.collection('applications').findOne({ _id: rejectAppRes.insertedId });
+            const doc = await col('Application').findOne({ _id: rejectAppRes.insertedId });
             assert.strictEqual(doc.status, 'Pending');
             assert.strictEqual(doc.reviews?.block?.decision, 'rejected');
             assert.strictEqual(doc.reviews?.block?.reason, 'E2E rejection reason');
@@ -623,7 +627,7 @@ const bucketIds = (payload, bucket) =>
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
             assert.strictEqual(res.body?.data?.status, 'Approved');
 
-            const doc = await db.collection('applications').findOne({ _id: rejectAppRes.insertedId });
+            const doc = await col('Application').findOne({ _id: rejectAppRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
             // Both answers survive: the block said no, the state said yes.
             assert.strictEqual(doc.reviews?.block?.decision, 'rejected');
@@ -649,7 +653,7 @@ const bucketIds = (payload, bucket) =>
         // ---------------------------------------------------------------
         section('Tier-agnostic /approve alias');
         // ---------------------------------------------------------------
-        const aliasRes = await db.collection('applications').insertOne({
+        const aliasRes = await col('Application').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Alias Applicant',
             email: `${RUN}.alias@e2e.invalid`,
@@ -675,7 +679,7 @@ const bucketIds = (payload, bucket) =>
             // caller into the deciding seat.
             assert.strictEqual(res.body?.data?.status, 'Pending');
 
-            const doc = await db.collection('applications').findOne({ _id: aliasRes.insertedId });
+            const doc = await col('Application').findOne({ _id: aliasRes.insertedId });
             assert.strictEqual(doc.reviews?.block?.decision, 'approved');
             assert.strictEqual(doc.reviews?.block?.adminType, 'BlockAdmin');
         });
@@ -697,7 +701,7 @@ const bucketIds = (payload, bucket) =>
          * to clear it — including the block admin, whose approval it has
          * already had once.
          */
-        const legacyRes = await db.collection('applications').insertOne({
+        const legacyRes = await col('Application').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Legacy Applicant',
             email: `${RUN}.legacy@e2e.invalid`,
@@ -759,7 +763,7 @@ const bucketIds = (payload, bucket) =>
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
 
-            const doc = await db.collection('applications').findOne({ _id: legacyRes.insertedId });
+            const doc = await col('Application').findOne({ _id: legacyRes.insertedId });
             assert.strictEqual(doc.status, 'Pending',
                 'the legacy spelling was not folded to the canonical one');
             assert.strictEqual(doc.reviews?.district?.decision, 'approved');
@@ -775,7 +779,7 @@ const bucketIds = (payload, bucket) =>
                 body: { action: 'approve' }
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
-            const doc = await db.collection('applications').findOne({ _id: legacyRes.insertedId });
+            const doc = await col('Application').findOne({ _id: legacyRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
         });
 
@@ -789,7 +793,7 @@ const bucketIds = (payload, bucket) =>
          * State's seat has to still be open on it — that is the whole of what
          * the association asked for.
          */
-        const oldRes = await db.collection('applications').insertOne({
+        const oldRes = await col('Application').insertOne({
             userId: applicantUserId,
             fullName: 'E2E Old-Rule Applicant',
             email: `${RUN}.oldrule@e2e.invalid`,
@@ -824,7 +828,7 @@ const bucketIds = (payload, bucket) =>
         });
 
         await test('the State ratifying it does not duplicate the member profile', async() => {
-            const before = await db.collection(COL.details).countDocuments({ userId: applicantUserId });
+            const before = await col(COL.details).countDocuments({ userId: applicantUserId });
 
             const res = await request('POST', `/applications/${oldId}/state-review`, {
                 token: tokens.state,
@@ -832,12 +836,12 @@ const bucketIds = (payload, bucket) =>
             });
             assert.strictEqual(res.status, 200, JSON.stringify(res.body));
 
-            const after = await db.collection(COL.details).countDocuments({ userId: applicantUserId });
+            const after = await col(COL.details).countDocuments({ userId: applicantUserId });
             assert.strictEqual(after, before,
                 'the State approval created a second member profile; the unique email '
                 + 'index would make that permanent');
 
-            const doc = await db.collection('applications').findOne({ _id: oldRes.insertedId });
+            const doc = await col('Application').findOne({ _id: oldRes.insertedId });
             assert.strictEqual(doc.status, 'Approved');
             assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin', 'the ratification was not recorded');
             assert.strictEqual(doc.reviews?.state?.decision, 'approved');
@@ -856,7 +860,7 @@ const bucketIds = (payload, bucket) =>
              * `materialiseLegacyVerdicts` now pins every verdict into its own
              * slot before any new write touches `approvedBy`.
              */
-            const doc = await db.collection('applications').findOne({ _id: oldRes.insertedId });
+            const doc = await col('Application').findOne({ _id: oldRes.insertedId });
             assert.strictEqual(doc.approvedBy?.adminType, 'StateAdmin',
                 'the outcome should now be signed by the State');
             assert.strictEqual(doc.reviews?.district?.decision, 'approved',
@@ -866,7 +870,7 @@ const bucketIds = (payload, bucket) =>
         });
 
         await test('a rejection that would orphan a member profile is refused', async() => {
-            const orphanRes = await db.collection('applications').insertOne({
+            const orphanRes = await col('Application').insertOne({
                 userId: applicantUserId,
                 fullName: 'E2E Orphan Applicant',
                 email: `${RUN}.orphan@e2e.invalid`,
@@ -893,7 +897,7 @@ const bucketIds = (payload, bucket) =>
             assert.ok(/already has a member profile/i.test(res.body?.message || ''),
                 `expected the message to explain why, got: ${res.body?.message}`);
 
-            const doc = await db.collection('applications').findOne({ _id: orphanRes.insertedId });
+            const doc = await col('Application').findOne({ _id: orphanRes.insertedId });
             assert.strictEqual(doc.status, 'Approved', 'a refused rejection changed the status');
         });
 
@@ -901,7 +905,7 @@ const bucketIds = (payload, bucket) =>
         section('Real data untouched');
         // ---------------------------------------------------------------
         await test('pre-existing applications were not modified', async() => {
-            const after = await db.collection('applications')
+            const after = await col('Application')
                 .aggregate([
                     { $match: { __e2e: { $exists: false } } },
                     { $group: { _id: '$status', n: { $sum: 1 } } },
@@ -920,18 +924,17 @@ const bucketIds = (payload, bucket) =>
         // ---------------------------------------------------------------
         section('Cleanup');
         // ---------------------------------------------------------------
-        const db2 = mongoose.connection.db;
-        const del = async(col, filter) => {
-            const r = await db2.collection(col).deleteMany(filter).catch(() => ({ deletedCount: 0 }));
-            if (r.deletedCount) console.log(`  removed ${r.deletedCount} from ${col}`);
+        const del = async(model, filter) => {
+            const r = await col(model).deleteMany(filter).catch(() => ({ deletedCount: 0 }));
+            if (r.deletedCount) console.log(`  removed ${r.deletedCount} from ${col(model).collectionName}`);
         };
 
         // Everything the run created is tagged, plus the member docs the
         // workflow itself generated (which are keyed by the test user id).
         const testUserIds = created.memberauths;
-        await del('applications', { __e2e: RUN });
-        await del('admins', { __e2e: RUN });
-        await del('memberauths', { __e2e: RUN });
+        await del('Application', { __e2e: RUN });
+        for (const model of Object.values(TIER_MODEL)) await del(model, { __e2e: RUN });
+        await del('MemberAuth', { __e2e: RUN });
         if (testUserIds.length) {
             await del(COL.details, { userId: { $in: testUserIds } });
             await del(COL.business, { userId: { $in: testUserIds } });
@@ -940,11 +943,11 @@ const bucketIds = (payload, bucket) =>
         }
         // Belt and braces: anything this run tagged, plus any row that carries a
         // test email address, in every collection the workflow can write to.
-        for (const col of [COL.details, COL.business, COL.financial, COL.declaration]) {
-            await del(col, { $or: [{ __e2e: RUN }, { email: new RegExp(`^${RUN}\\.`) }] });
+        for (const model of [COL.details, COL.business, COL.financial, COL.declaration]) {
+            await del(model, { $or: [{ __e2e: RUN }, { email: new RegExp(`^${RUN}\\.`) }] });
         }
 
-        const finalCount = await db2.collection('applications').countDocuments();
+        const finalCount = await col('Application').countDocuments();
         console.log(`  applications: ${realAppCountBefore} before -> ${finalCount} after`);
         if (finalCount !== realAppCountBefore) {
             console.error('  WARNING: application count differs from the pre-test snapshot');

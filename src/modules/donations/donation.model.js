@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const dataLayout = require('../../config/dataLayout');
 const mongoose = require('mongoose');
 
 const addressShape = {
@@ -50,10 +51,10 @@ const donationSchema = new mongoose.Schema({
     gatewayPaymentId: { type: String, trim: true, default: '' },
     paymentMode: { type: String, enum: ['online', 'mock', ''], default: '' },
     paidAt: { type: Date, default: null }
-}, { collection: 'donations', timestamps: true });
+}, { timestamps: true });
 
 donationSchema.index({ receiptNumber: 1 }, { unique: true, sparse: true });
 donationSchema.index({ receiptToken: 1 }, { unique: true });
 donationSchema.index({ donorId: 1, status: 1, paidAt: -1 });
 
-module.exports = mongoose.models.Donation || mongoose.model('Donation', donationSchema);
+module.exports = dataLayout.model('Donation', donationSchema);

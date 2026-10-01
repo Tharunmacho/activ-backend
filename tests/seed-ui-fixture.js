@@ -24,21 +24,21 @@ const ADMINS = [
     { key: 'state', role: 'state_admin', state: REGION.state }
 ];
 
+const { col, ADMIN_MODEL } = require('./_layout');
 const COL = {
-    details: 'users',   // MemberDetails — schema says collection: 'users'
-    business: 'additional form for bussiness 2',
-    financial: 'additional form for financial 3',
-    declaration: 'additional form for declaration 4'
+    details: 'MemberDetails',
+    business: 'BusinessInfo',
+    financial: 'MemberFinancialInfo',
+    declaration: 'MemberDeclaration'
 };
 
 const run = async() => {
     const mode = process.argv[2] || 'up';
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
-    const db = mongoose.connection.db;
 
     const purge = async() => {
-        for (const c of ['applications', 'admins', 'memberauths', ...Object.values(COL)]) {
-            const r = await db.collection(c).deleteMany({
+        for (const c of ['Application', 'MemberAuth', ...Object.values(ADMIN_MODEL), ...Object.values(COL)]) {
+            const r = await col(c).deleteMany({
                 $or: [TAG, { email: /@uitest\.invalid$/ }]
             }).catch(() => ({ deletedCount: 0 }));
             if (r.deletedCount) console.log(`  removed ${r.deletedCount} from ${c}`);
@@ -48,13 +48,13 @@ const run = async() => {
     if (mode === 'down') {
         console.log('Tearing down UI fixture...');
         await purge();
-        console.log(`applications now: ${await db.collection('applications').countDocuments()}`);
+        console.log(`applications now: ${await col('applications').countDocuments()}`);
         await mongoose.disconnect();
         return;
     }
 
     if (mode === 'state') {
-        const apps = await db.collection('applications')
+        const apps = await col('applications')
             .find(TAG, { projection: { fullName: 1, status: 1, blockApprovedAt: 1, districtApprovedAt: 1, stateApprovedAt: 1, rejectedBy: 1 } })
             .toArray();
         console.log(`\nWorkflow state (${apps.length} fixture applications):`);
@@ -68,7 +68,7 @@ const run = async() => {
         });
 
         for (const [name, c] of Object.entries(COL)) {
-            const n = await db.collection(c).countDocuments({ $or: [TAG, { email: /@uitest\.invalid$/ }] });
+            const n = await col(c).countDocuments({ $or: [TAG, { email: /@uitest\.invalid$/ }] });
             console.log(`  member ${name.padEnd(12)}: ${n}`);
         }
         await mongoose.disconnect();
@@ -82,25 +82,27 @@ const run = async() => {
 
     for (const spec of ADMINS) {
         const email = `ui.${spec.key}@uitest.invalid`;
-        await db.collection('admins').insertOne({
+        // The tier collection, with ITS spellings (passwordHash / active).
+        await col(ADMIN_MODEL[spec.role]).insertOne({
             email,
-            password: hash,
+            passwordHash: hash,
             role: spec.role,
             fullName: `UI ${spec.role}`,
             state: spec.state,
             district: spec.district,
             block: spec.block,
-            isActive: true,
+            active: true,
+            createdVia: 'ui_fixture',
             ...TAG
         });
         console.log(`  admin ${email}  (${spec.role})`);
     }
 
-    const auth = await db.collection('memberauths').insertOne({
+    const auth = await col('MemberAuth').insertOne({
         email: 'ui.applicant@uitest.invalid', password: hash, isActive: true, ...TAG
     });
 
-    await db.collection('applications').insertOne({
+    await col('applications').insertOne({
         userId: auth.insertedId,
         fullName: 'Priya Raman',
         email: 'ui.applicant@uitest.invalid',

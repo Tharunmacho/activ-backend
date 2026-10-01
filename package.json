@@ -32,7 +32,8 @@
     "test:flex": "node tests/whatsapp-flex.test.js",
     "test:checkin": "node tests/event-checkin.test.js",
     "test:email": "node tests/email-archive.test.js",
-    "test:staff": "node tests/staff-accounts.test.js"
+    "test:staff": "node tests/staff-accounts.test.js",
+    "test:guard": "node tests/delivery-guard.test.js"
   },
   "keywords": [
     "activ",

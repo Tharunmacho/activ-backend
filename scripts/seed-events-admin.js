@@ -4,6 +4,11 @@
  *   node scripts/seed-events-admin.js --email event@gmail.com --password 'ChangeMe@123'           # report
  *   node scripts/seed-events-admin.js --email event@gmail.com --password 'ChangeMe@123' --confirm # apply
  *
+ * The MOBILE door account (Event Attendance Administration — scanner and
+ * attendance only, refused by the website) is the same script with a role:
+ *
+ *   node scripts/seed-events-admin.js --role attendance_admin --email attendance@gmail.com --password '…' --confirm
+ *
  * Stored exactly the way the CMS admin is (see `split-super-admin-roles.js`):
  * through `admin.repository`, the only module allowed to write admin documents,
  * into `adminsdb.superadmins` with `role: 'events_admin'` and a bcrypt
@@ -31,12 +36,21 @@ const arg = (name, fallback = '') => {
     return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 const CONFIRM = argv.includes('--confirm');
-const EMAIL = arg('email', 'event@gmail.com').toLowerCase().trim();
+const ROLES = {
+    events_admin: 'Events Administrator',
+    attendance_admin: 'Event Attendance Administrator'
+};
+const ROLE = arg('role', 'events_admin');
+const EMAIL = arg('email', ROLE === 'attendance_admin' ? 'attendance@gmail.com' : 'event@gmail.com').toLowerCase().trim();
 const PASSWORD = arg('password', '');
-const NAME = arg('name', 'Events Administrator');
+const NAME = arg('name', ROLES[ROLE] || 'Events Administrator');
 
 async function main() {
-    console.log('\n=== Events admin account ===');
+    if (!ROLES[ROLE]) {
+        console.error(`\n--role must be one of: ${Object.keys(ROLES).join(', ')}. Nothing changed.`);
+        process.exit(1);
+    }
+    console.log(`\n=== ${ROLES[ROLE]} account ===`);
     console.log(CONFIRM ? 'Mode: WRITE' : 'Mode: REPORT ONLY (pass --confirm to apply)');
 
     if (PASSWORD.length < 8) {
@@ -57,23 +71,23 @@ async function main() {
     if (existing) {
         const row = repo.toAdminRow(existing.doc, existing.source);
         console.log(`  ${EMAIL} exists  role=${row.role}  collection=${existing.source}`);
-        if (row.role && !['events_admin'].includes(row.role)) {
+        if (row.role && row.role !== ROLE) {
             console.error(`  Refusing: that address belongs to a ${row.role}. Use a different email.`);
             process.exit(1);
         }
-        console.log(`  ${CONFIRM ? 'RESET' : 'would reset'} password, role=events_admin, active`);
+        console.log(`  ${CONFIRM ? 'RESET' : 'would reset'} password, role=${ROLE}, active`);
         if (CONFIRM) {
-            await repo.updateById(existing, { passwordHash, role: 'events_admin', active: true, fullName: NAME });
+            await repo.updateById(existing, { passwordHash, role: ROLE, active: true, fullName: NAME });
         }
     } else {
-        console.log(`  ${CONFIRM ? 'CREATE' : 'would create'}  ${EMAIL}  role=events_admin`);
+        console.log(`  ${CONFIRM ? 'CREATE' : 'would create'}  ${EMAIL}  role=${ROLE}`);
         if (CONFIRM) {
             const created = await repo.insert({
                 fullName: NAME,
                 email: EMAIL,
                 passwordHash,
                 phoneNumber: '',
-                role: 'events_admin',
+                role: ROLE,
                 active: true,
                 // Stamped like every other created admin, so staffing counts can
                 // tell a real account from the pre-seeded scaffold.
@@ -89,7 +103,9 @@ async function main() {
         const hash = check && (check.doc.passwordHash || check.doc.password || '');
         const ok = !!hash && await bcrypt.compare(PASSWORD, hash);
         console.log(`\n  verified: role=${row && row.role}  active=${row && row.active}  password matches=${ok}`);
-        console.log(`\nSign in at /admin/login with ${EMAIL}. It opens /events-admin/dashboard.`);
+        console.log(ROLE === 'attendance_admin'
+            ? `\nSign in on the mobile app's admin login with ${EMAIL}. It opens the event scanner.`
+            : `\nSign in at /admin/login with ${EMAIL}. It opens /events-admin/dashboard.`);
     } else {
         console.log('\nNothing was changed. Re-run with --confirm.');
     }

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 
 // MemberDeclaration Schema — collection 'additional form for declaration 4'.
 //
@@ -57,8 +58,7 @@ const memberDeclarationSchema = new mongoose.Schema({
         type: Date
     }
 }, {
-    collection: 'additional form for declaration 4',
     timestamps: true
 });
 
-module.exports = mongoose.model('MemberDeclaration', memberDeclarationSchema);
+module.exports = dataLayout.model('MemberDeclaration', memberDeclarationSchema);

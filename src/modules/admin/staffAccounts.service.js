@@ -33,7 +33,8 @@ const MAX_PASSWORD_BYTES = 72;
 
 const STAFF_LABELS = {
     cms_admin: 'CMS Administrator',
-    events_admin: 'Events Administrator'
+    events_admin: 'Events Administrator',
+    attendance_admin: 'Event Attendance Administrator'
 };
 
 /**
@@ -133,7 +134,7 @@ const createStaffAccountsService = ({
     memberEmailTaken = async() => false,
     forgetSession = async() => {}
 } = {}) => {
-    const staffRoles = repository.STAFF_ROLES || ['cms_admin', 'events_admin'];
+    const staffRoles = repository.STAFF_ROLES || ['cms_admin', 'events_admin', 'attendance_admin'];
 
     const list = async() => {
         const rows = await repository.findStaff();
@@ -163,7 +164,7 @@ const createStaffAccountsService = ({
             throw ApiError.forbidden('Super admin accounts cannot be edited here — change your own password in Settings');
         }
         if (!staffRoles.includes(existing.role)) {
-            throw ApiError.forbidden('Only the CMS and events staff accounts are managed here');
+            throw ApiError.forbidden('Only the CMS, events and attendance staff accounts are managed here');
         }
         if (payload && payload.role !== undefined && repository.normalizeRole(payload.role) !== existing.role) {
             throw ApiError.badRequest('The role of a staff account cannot be changed');

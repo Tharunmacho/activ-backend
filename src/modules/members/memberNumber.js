@@ -96,8 +96,7 @@ const formatNumber = (year, seq) => `ACTIV-${year}-${String(seq).padStart(3, '0'
 
 /** Next value of this year's counter. Atomic: `$inc` on one document. */
 const nextSequence = async (year) => {
-    const mongoose = require('mongoose');
-    const res = await mongoose.connection.db.collection('membership_counters').findOneAndUpdate(
+    const res = await require('../../config/dataLayout').collection('membershipCounters').findOneAndUpdate(
         { _id: `membership:${year}` },
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }

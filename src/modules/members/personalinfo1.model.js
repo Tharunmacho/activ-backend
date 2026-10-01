@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dataLayout = require('../../config/dataLayout');
 const { ALL_SOCIAL_CATEGORIES, GENDERS } = require('./demographicOptions');
 
 // Additional Form for Personal Information 1 Schema
@@ -87,11 +88,10 @@ const personalInfo1Schema = new mongoose.Schema({
     }
 }, {
     timestamps: true,
-    collection: 'additional form for personal information 1'
 });
 
 // Index for faster queries
 personalInfo1Schema.index({ userId: 1 });
 
 // Prevent model recompilation in development
-module.exports = mongoose.models.PersonalInfo1 || mongoose.model('PersonalInfo1', personalInfo1Schema);
+module.exports = dataLayout.model('PersonalInfo1', personalInfo1Schema);
