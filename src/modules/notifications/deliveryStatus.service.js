@@ -168,6 +168,8 @@ const applyFromWebhook = async(body = {}) => {
  */
 const effectiveStatus = (row = {}) => {
     if (row.mock) return 'mock';
+    // Superseded by a re-send: the newer row carries the outcome.
+    if (row.resentAs) return 'resent';
     if (row.deliveryStatus) return row.deliveryStatus;
     if (row.status === 'failed') return 'failed';
     if (row.status === 'sent') return 'accepted';

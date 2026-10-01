@@ -681,6 +681,13 @@ class NotificationService {
         const safePage = Math.max(parseInt(page, 10) || 1, 1);
 
         const query = buildLogQuery({ channel, status, event, search, delivery, group, eventId, bookingRef, from, to });
+        /*
+         * THE TILES' SCOPE: the same filters WITHOUT the status ("delivery")
+         * and channel picks. Those two only narrow the LIST. Counted from the
+         * full query, tapping "Failed" made "Sent" read 0 — the tiles then
+         * described the filter instead of the automation.
+         */
+        const tileQuery = buildLogQuery({ status, event, search, group, eventId, bookingRef, from, to });
 
         const [rows, total, counts, filtered, events] = await Promise.all([
             NotificationLog.find(query)
@@ -698,9 +705,9 @@ class NotificationService {
             NotificationLog.aggregate([
                 { $group: { _id: { status: '$status', mock: '$mock' }, n: { $sum: 1 } } }
             ]).catch(() => []),
-            // The Automation view's tiles: THIS filter, by effective status.
+            // The Automation view's tiles: the category / event / dates / search, by effective status (see tileQuery).
             NotificationLog.aggregate([
-                { $match: query },
+                { $match: tileQuery },
                 { $group: { _id: { channel: '$channel', s: EFFECTIVE_STATUS_EXPR }, n: { $sum: 1 } } }
             ]).catch(() => []),
             // Events that have messages, for the event filter.

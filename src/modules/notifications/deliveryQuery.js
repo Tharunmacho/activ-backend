@@ -23,6 +23,10 @@ const EFFECTIVE_STATUS_EXPR = {
     $cond: [
         { $eq: ['$mock', true] }, 'mock',
         {
+            /* Superseded by a re-send: its outcome is the NEWER row's, so it is
+               shown as "resent", never counted as failed. */
+            $cond: [{ $gt: [{ $ifNull: ['$resentAs', null] }, null] }, 'resent',
+        {
             $ifNull: ['$deliveryStatus', {
                 $switch: {
                     branches: [
@@ -32,6 +36,7 @@ const EFFECTIVE_STATUS_EXPR = {
                     default: 'queued'
                 }
             }]
+        }]
         }
     ]
 };
@@ -43,8 +48,10 @@ const deliveryClause = (delivery) => {
     if (d === 'mock') return { mock: true };
     const notMock = { mock: { $ne: true } };
     if (d === 'failed') {
-        return { ...notMock, $or: [{ deliveryStatus: 'failed' }, { deliveryStatus: { $exists: false }, status: 'failed' }] };
+        // A failure that was re-sent is not a failure any more — its newer row is the answer.
+        return { ...notMock, resentAs: { $exists: false }, $or: [{ deliveryStatus: 'failed' }, { deliveryStatus: { $exists: false }, status: 'failed' }] };
     }
+    if (d === 'resent') return { ...notMock, resentAs: { $exists: true } };
     if (d === 'accepted') {
         return { ...notMock, $or: [{ deliveryStatus: 'accepted' }, { deliveryStatus: { $exists: false }, status: 'sent' }] };
     }
