@@ -490,7 +490,22 @@ module.exports = {
 
         get isConfigured() {
             return !!(this.bucket && this.accessKeyId && this.secretAccessKey);
-        }
+        },
+
+        /**
+         * Servers that used to serve `/uploads` and still hold the files that
+         * were uploaded to them — see `core/storage/legacyUploads.js`. A file
+         * missing from disk, bucket and GridFS is fetched from here once and
+         * written to the bucket. Comma-separated; `none` disables. The default
+         * is the one retired address this codebase knows about.
+         */
+        legacyOrigins: (() => {
+            const raw = process.env.LEGACY_UPLOADS_ORIGINS;
+            const list = raw === undefined ? ['https://activ.org.in'] : String(raw).split(',');
+            return list
+                .map((o) => o.trim().replace(/\/+$/, ''))
+                .filter((o) => o && o.toLowerCase() !== 'none' && /^https?:\/\//i.test(o));
+        })(),
     },
 
     log: {

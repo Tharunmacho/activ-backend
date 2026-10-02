@@ -128,6 +128,35 @@ const persistToGridFS = async(filePath, name, { contentType = '' } = {}) => {
     }
 };
 
+/**
+ * Store a file held in memory — bucket first, GridFS when the bucket refuses.
+ * Resolves true on success; never throws. Used when a file arrives from
+ * somewhere other than multer's disk: a legacy origin, a migration.
+ */
+const persistBuffer = async(buffer, value, { contentType = '' } = {}) => {
+    const name = safeRel(value);
+    if (!name || !buffer || !buffer.length) return false;
+    if (objectStore.isEnabled() && await objectStore.putBuffer(buffer, name, { contentType })) return true;
+
+    const store = bucket();
+    if (!store) return false;
+    try {
+        const { Readable } = require('stream');
+        const earlier = await findFiles(store, name);
+        await new Promise((resolve, reject) => {
+            Readable.from(buffer)
+                .pipe(store.openUploadStream(name, { metadata: { contentType } }))
+                .on('error', reject)
+                .on('finish', resolve);
+        });
+        await Promise.all(earlier.map((f) => store.delete(f._id).catch(() => null)));
+        return true;
+    } catch (err) {
+        logger.warn('Could not persist a buffer to the database', { name, error: err && err.message });
+        return false;
+    }
+};
+
 /** Remove every stored copy of `name` — bucket and GridFS. Never throws. */
 const removeFile = async(value) => {
     const name = safeRel(value);
@@ -290,6 +319,18 @@ const serveFromDatabase = async(req, res, next) => {
     return undefined;
 };
 
+/**
+ * `GET /uploads/:name` when disk, bucket AND GridFS have nothing: ask the
+ * retired server that used to hold the uploads, and keep what it answers.
+ * See `legacyUploads.js`. Built here so it can store through `persistBuffer`.
+ */
+const serveFromLegacy = require('./legacyUploads').makeServeFromLegacy({
+    safeRel,
+    persistBuffer,
+    restoreDiskCopy,
+    cacheControl: UPLOAD_CACHE,
+});
+
 /** Read a whole GridFS file into memory. */
 const readGridFile = (store, id) => new Promise((resolve, reject) => {
     const chunks = [];
@@ -377,10 +418,12 @@ module.exports = {
     safeRel,
     relOf,
     persistFile,
+    persistBuffer,
     removeFile,
     persistUploadsMiddleware,
     serveFromBucket,
     serveFromDatabase,
+    serveFromLegacy,
     syncToBucket,
     // For `imageVariants`, which reads an original from the same three places.
     bucket,

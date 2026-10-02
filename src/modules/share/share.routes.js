@@ -179,6 +179,7 @@ const page = ({ title, description, image, alt, url, type = 'article', imageMeta
 };
 
 const send = (res, html) => {
+    res.vary('User-Agent');
     // Helmet's CSP forbids inline script; this page's one line is the redirect.
     res.set('Content-Security-Policy', "default-src 'none'; img-src * data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'");
     res.set('Cache-Control', 'public, max-age=300');

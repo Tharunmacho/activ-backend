@@ -491,11 +491,7 @@ const str = (value) => String(value ?? '').trim();
  * A relative path has no host to go stale: every client re-anchors it to the
  * API it is talking to (`resolveMediaUrl` on web and mobile).
  */
-const mediaUrl = (value) => {
-    const url = str(value);
-    const match = /^https?:\/\/[^/]+(\/uploads\/.+)$/i.exec(url);
-    return match ? match[1] : url;
-};
+const mediaUrl = (value) => require('../../core/storage/uploadUrls').relativizeUploadUrl(value);
 
 /** `#rgb` or `#rrggbb`, case-insensitive. Anything else yields the fallback. */
 const hexColor = (value, fallback) => {
