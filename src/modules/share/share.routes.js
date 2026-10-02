@@ -10,9 +10,10 @@
  * previewed as the site's generic card with no banner.
  *
  * The site's `.htaccess` (website/public/share-previews.htaccess, merged into
- * public_html by the deploy) rewrites a CRAWLER's request for
- * `/events/<slug>` or `/gallery/<slug>` to these routes. People never reach
- * them; if one does (a direct link), the page sends them on to the real page.
+ * public_html by the deploy) rewrites every public event request here with
+ * `view=page`: the SPA shell and event metadata are returned together.
+ * Other pages rewrite crawler requests only. A direct share-page visitor
+ * is sent on to the real page via the ref=share bypass.
  *
  * Visibility is the public API's own: `cmsService.listEvent` and
  * `getGalleryItem` 404 a draft, members-only or non-onboarding event exactly as
@@ -22,6 +23,7 @@ const express = require('express');
 const config = require('../../config');
 const cmsService = require('../cms/cms.service');
 const { resolveEventId } = require('../events/eventSlug');
+const { websiteShell, mergePreview } = require('./websitePage');
 
 const router = express.Router();
 
@@ -53,7 +55,7 @@ const shareImage = (req, raw) => {
     if (!/^https?:\/\//i.test(url)) url = `${siteOrigin(req)}${url.startsWith('/') ? '' : '/'}${url}`;
     try {
         const parsed = new URL(url);
-        if (/^\/uploads\/[^/]+\.(jpe?g|png|webp)$/i.test(parsed.pathname) && !parsed.searchParams.has('w')) {
+        if (/^\/uploads\/.+\.(jpe?g|png|webp)$/i.test(parsed.pathname) && !parsed.searchParams.has('w')) {
             parsed.searchParams.set('w', '1200');
         }
         return parsed.toString();
@@ -148,10 +150,12 @@ const page = ({ title, description, image, alt, url, type = 'article', imageMeta
         ['property', 'og:image:height', imageMeta ? String(imageMeta.height) : ''],
         ['property', 'og:image:alt', alt || title],
         ['property', 'og:locale', 'en_IN'],
+        ['property', 'fb:app_id', /^\d+$/.test(str(process.env.META_APP_ID)) ? str(process.env.META_APP_ID) : ''],
         ['name', 'twitter:card', image ? 'summary_large_image' : 'summary'],
         ['name', 'twitter:title', title],
         ['name', 'twitter:description', description],
         ['name', 'twitter:image', image],
+        ['name', 'twitter:url', url],
         ['name', 'description', description],
     ].filter(([, , v]) => v)
         .map(([a, k, v]) => `<meta ${a}="${k}" content="${esc(v)}" />`).join('\n    ');
@@ -200,7 +204,20 @@ router.get(['/events/:slug', '/events/:slug/book'], async(req, res) => {
         const url = `${siteOrigin(req)}/events/${encodeURIComponent(event.slug || event.id || slug)}`;
         const card = eventCard(event);
         const image = shareImage(req, card.image);
-        return send(res, page({ ...card, image, url, imageMeta: await imageInfo(image) }));
+        const preview = page({ ...card, image, url, imageMeta: await imageInfo(image) });
+        if (req.query.view === 'page') {
+            const shell = await websiteShell();
+            if (shell) {
+                // The shell runs the same application as the static website.
+                // Its scripts and integrations must retain the website's policy.
+                res.removeHeader('Content-Security-Policy');
+                res.removeHeader('Cross-Origin-Embedder-Policy');
+                res.removeHeader('Cross-Origin-Opener-Policy');
+                res.set('Cache-Control', 'no-cache');
+                return res.type('html').send(mergePreview(shell, preview));
+            }
+        }
+        return send(res, preview);
     } catch {
         return fallback(req, res, `/events/${encodeURIComponent(slug)}`);
     }

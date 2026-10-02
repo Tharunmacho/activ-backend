@@ -142,4 +142,4 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
     }
 };
 
-module.exports = { makeVariantMiddleware, snap, LADDER };
+module.exports = { makeVariantMiddleware, snap, LADDER, readOriginal };

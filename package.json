@@ -35,6 +35,7 @@
     "test:staff": "node tests/staff-accounts.test.js",
     "test:guard": "node tests/delivery-guard.test.js",
     "test:uploads": "node tests/upload-urls.test.js",
+    "test:share-previews": "node tests/share-previews.test.js",
     "migrate:upload-urls": "node scripts/normalise-upload-urls.js"
   },
   "keywords": [

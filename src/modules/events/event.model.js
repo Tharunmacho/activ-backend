@@ -665,9 +665,22 @@ eventSchema.index({ slug: 1 }, { unique: true, sparse: true });
  * `Event.create`, which is a save.
  */
 eventSchema.pre('save', async function assignSlug() {
-    if (this.slug) return;
-    const { uniqueSlug } = require('./eventSlug');
-    this.slug = await uniqueSlug(this.constructor, this);
+    if (!this.slug) {
+        const { uniqueSlug } = require('./eventSlug');
+        this.slug = await uniqueSlug(this.constructor, this);
+    }
+    if (this.isModified('bannerUrl') && this.bannerUrl) {
+        this.bannerUrl = await require('./eventBanner').nameEventBanner(this);
+    }
+});
+
+eventSchema.pre('findOneAndUpdate', async function nameUpdatedBanner() {
+    const update = this.getUpdate() || {};
+    const fields = update.$set || update;
+    if (!fields.bannerUrl) return;
+    const existing = await this.model.findOne(this.getQuery()).select('slug title startAt').lean();
+    if (!existing) return;
+    fields.bannerUrl = await require('./eventBanner').nameEventBanner({ ...existing, ...fields });
 });
 
 module.exports = dataLayout.model('Event', eventSchema);

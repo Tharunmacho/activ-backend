@@ -38,8 +38,8 @@ const VARS = (message) => (flex.BODIES[message].match(/\{\{\d+\}\}/g) || []).len
 /* ============================================================ 1. the templates */
 
 const testDefinitions = () => {
-    section('The ten template definitions pass Meta\'s submission rules');
-    say('ten flexible templates (5 moments × image / no header)', flex.TEMPLATE_DEFS.length === 10);
+    section('The template definitions pass Meta\'s submission rules');
+    say('ten original and four readable templates', flex.TEMPLATE_DEFS.length === 14);
     for (const t of flex.TEMPLATE_DEFS) {
         const problems = flex.lintTemplate(t);
         say(`${t.name}: ${problems.length ? problems.join('; ') : 'clean'}`, problems.length === 0);
@@ -337,6 +337,31 @@ const testWiring = () => {
 (async() => {
     try {
         testDefinitions();
+        for (const isOnline of [false, true]) {
+            const message = isOnline ? 'online' : 'confirmed';
+            for (const settledVia of ['free', 'online', 'offline']) {
+                const ctx = { ...BASE, isOnline, settledVia, onlinePlatform: 'Zoom',
+                    ...OPTIONAL.date, ...OPTIONAL.venue, registrationNo: `${BASE.bookingRef}-P1`,
+                    amountLabel: settledVia === 'free' ? '' : 'Rs 1,500',
+                    paymentLabel: settledVia === 'online' ? 'Paid online' : 'Paid to the organiser' };
+                const readable = flex.readableParams(message, ctx);
+                say(`${message}/${settledVia}: ten one-line parameters`, readable.params.length === 10
+                    && readable.params.every((v) => v && !/[\n\t]/.test(v)));
+                say(`${message}/${settledVia}: date, time, seats, payment and references on separate lines`,
+                    readable.rendered.includes('*Date:* Friday, 23 October 2026\n')
+                    && readable.rendered.includes('*Time:* ')
+                    && readable.rendered.includes('*Seats:* 1 seat\n')
+                    && readable.rendered.includes('*Payment:* ')
+                    && readable.rendered.includes(`*Booking ID:* ${BASE.bookingRef}\n`)
+                    && readable.rendered.includes(`*Entry reference:* ${BASE.bookingRef}-P1\n`));
+                say(`${message}/${settledVia}: payment is truthful`, settledVia === 'free'
+                    ? readable.params[6] === 'Free entry' : readable.params[6].includes('Rs 1,500') && !readable.params[6].includes('Free entry'));
+                say(`${message}/${settledVia}: approved-name switch uses the right slot contract`,
+                    flex.flexSteps('confirmed', ctx, flex.READABLE_NAMES[message], []).every((step) => step.params.length === 10));
+                const mixed = flex.flexSteps('confirmed', ctx, { image: flex.NAMES[message].image, plain: flex.READABLE_NAMES[message].plain }, []);
+                say(`${message}/${settledVia}: old and new contracts can coexist`, mixed[0].params.length === 7 && mixed[1].params.length === 10);
+            }
+        }
         testCombinations();
         testBudget();
         testMissing();

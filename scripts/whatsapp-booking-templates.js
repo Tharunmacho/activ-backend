@@ -186,7 +186,7 @@ const need = () => {
     }
 
     need();
-    await uploadSampleImage();
+    if (booking.some((t) => t.header === 'IMAGE')) await uploadSampleImage();
     if (booking.some((t) => t.header === 'DOCUMENT')) await uploadSamplePdf();
     for (const t of booking) {
         try {
@@ -200,4 +200,8 @@ const need = () => {
         }
     }
     console.log('\nRun with --status in a few minutes. When APPROVED, put the names in backend/.env and restart.');
-})();
+})().catch((error) => {
+    // Axios errors contain request headers; never print the error object.
+    console.error(JSON.stringify((error.response && error.response.data) || { message: error.message }));
+    process.exitCode = 1;
+});

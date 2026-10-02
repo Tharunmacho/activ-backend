@@ -432,10 +432,61 @@ const flexSteps = (kind, ctx = {}, names = {}, skipped = []) => {
     if (out.dropped.length) {
         skipped.push(`${on[0]}: left out ${out.dropped.join(', ')} to stay under Meta's ${BODY_LIMIT}-character limit`);
     }
-    return [
-        ...(names.image ? [{ template: names.image, params: out.params }] : []),
-        ...(names.plain ? [{ template: names.plain, params: out.params, noHeader: true }] : [])
-    ];
+    return ['image', 'plain'].flatMap((variant) => {
+        const template = names[variant];
+        if (!template) return [];
+        const readable = READABLE_NAMES[message] && Object.values(READABLE_NAMES[message]).includes(template);
+        const result = readable ? readableParams(message, ctx) : out;
+        if (result.missing.length || result.rendered.length > BODY_LIMIT) {
+            skipped.push(`${template} skipped: ${result.missing.join(', ') || 'message exceeds Meta body limit'}`);
+            return [];
+        }
+        return [{ template, params: result.params, ...(variant === 'plain' ? { noHeader: true } : {}) }];
+    });
+};
+
+// Separate variables and fixed line breaks are required: Meta's template
+// parameters cannot contain newlines. Existing approved templates keep their
+// seven-parameter contract until an approved readable name is configured.
+const READABLE_NAMES = {
+    confirmed: { image: 'activ_evt_confirmed_readable_v1', plain: 'activ_evt_confirmed_readable_plain_v1' },
+    online: { image: 'activ_evt_online_readable_v1', plain: 'activ_evt_online_readable_plain_v1' },
+};
+const READABLE_BODIES = Object.fromEntries(Object.keys(READABLE_NAMES).map((message) => [message,
+    'Dear *{{1}}*,\n\n'
+    + '✅ Your event registration is confirmed.\n\n'
+    + '*Event:* {{2}}\n\n'
+    + '📅 *Date:* {{3}}\n'
+    + '🕘 *Time:* {{4}}\n\n'
+    + `${message === 'online' ? '💻 *Attendance:*' : '📍 *Venue:*'} {{5}}\n\n`
+    + '🎟 *Seats:* {{6}}\n'
+    + '💳 *Payment:* {{7}}\n\n'
+    + '🔖 *Booking ID:* {{8}}\n'
+    + '📋 *Entry reference:* {{9}}\n\n'
+    + '🔗 *Booking details and event information:*\n{{10}}\n\n'
+    + 'Please keep your booking ID for any question about your registration.'
+]));
+
+const readableParams = (message, ctx = {}) => {
+    const body = READABLE_BODIES[message];
+    if (!body) return { params: [], missing: ['unsupported readable message'], rendered: '' };
+    const ref = one(ctx.bookingRef, 40);
+    const link = one(ctx.viewUrl || ctx.ticketUrl || ctx.eventUrl, 400);
+    const title = titleOf(ctx);
+    const missing = [];
+    if (!ref) missing.push('booking ID');
+    if (!link) missing.push('booking link');
+    if (!title) missing.push('event title');
+    if (missing.length) return { params: [], missing, rendered: '' };
+    const params = squeeze(body, [
+        nameOf(ctx), title,
+        one(ctx.dateLabel, 80) || 'Date to be confirmed',
+        one(ctx.timeLabel, 60) || 'Time to be confirmed',
+        ctx.isOnline ? whereOf(ctx, { withLink: false }) : one(ctx.venueLabel || ctx.venue, 220) || 'To be announced by the organiser',
+        seatsOf(ctx), feeOf(ctx) || 'See payment details in your booking',
+        ref, one(ctx.registrationNo, 40) || ref, link,
+    ], [5, 6, 7, 8, 9]);
+    return { params, missing: [], rendered: renderBody(body, params) };
 };
 
 /** The entries for `WHATSAPP_TEMPLATES` — `meta: true`, so the booking script submits them. */
@@ -451,7 +502,17 @@ const TEMPLATE_DEFS = Object.keys(BODIES).flatMap((message) => ['image', 'plain'
     bodyWithVariables: BODIES[message],
     params: PARAMS[message],
     samples: SAMPLES[message]
-})));
+}))).concat(Object.keys(READABLE_NAMES).flatMap((message) => ['image', 'plain'].map((variant) => ({
+    name: READABLE_NAMES[message][variant], envKey: ENV_KEYS[message][variant],
+    flex: true, readable: true, category: 'Utility', meta: true,
+    ...(variant === 'image' ? { header: 'IMAGE' } : {}), footer: FOOTER,
+    body: '(Meta template with variables - submit bodyWithVariables below)',
+    bodyWithVariables: READABLE_BODIES[message],
+    params: ['name', 'event', 'date', 'time', 'venue or online platform', 'seats', 'payment', 'booking ID', 'entry reference', 'booking link'],
+    samples: ['Tharun', 'Entrepreneurship Awareness Programme', 'Friday, 23 October 2026', '9:00 AM - 5:00 PM IST',
+        message === 'online' ? 'Online on Zoom' : 'Chidambaram, Tamil Nadu, India', '1 seat', 'Rs 1,500 | Paid online',
+        'ACTIVB-MURBHCAR-41FC', 'ACTIVB-MURBHCAR-41FC-P1', 'https://activ.org.in/events/awareness-programme-2026-10-23/book?ref=ACTIVB-MURBHCAR-41FC'],
+}))));
 
 /**
  * Meta's submission rules, checked before anything is sent for review. Returns
@@ -485,6 +546,9 @@ module.exports = {
     NAMES,
     ENV_KEYS,
     TEMPLATE_DEFS,
+    READABLE_NAMES,
+    READABLE_BODIES,
+    readableParams,
     detailItems,
     whenOf,
     whereOf,
