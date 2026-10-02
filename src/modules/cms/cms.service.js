@@ -175,7 +175,7 @@ const eventDetailUpdates = (payload = {}) => {
             .slice(0, 10)
             .map((a) => ({
                 name: String(a.name || '').trim().slice(0, 160) || 'Document',
-                url: String(a.url).trim().slice(0, 500),
+                url: mediaUrl(a.url).slice(0, 500),
                 type: String(a.type || '').trim().slice(0, 120),
                 size: Math.max(0, Number(a.size) || 0)
             }));
@@ -480,6 +480,23 @@ const actorOf = (user = {}) => ({ email: user.email || '', at: new Date() });
 
 const str = (value) => String(value ?? '').trim();
 
+/**
+ * A media URL as it is STORED: an upload becomes its `/uploads/<file>` path,
+ * whatever host it arrived with; anything else (a CDN, Unsplash) is kept.
+ *
+ * Rows were saved as `https://activ.org.in/uploads/…` — the site's address,
+ * which only reached the files while the backend ran beside the site. Once the
+ * API had a host of its own those rows pointed at a server without the newer
+ * files, and the clients' "leave a public hostname alone" rule honoured them.
+ * A relative path has no host to go stale: every client re-anchors it to the
+ * API it is talking to (`resolveMediaUrl` on web and mobile).
+ */
+const mediaUrl = (value) => {
+    const url = str(value);
+    const match = /^https?:\/\/[^/]+(\/uploads\/.+)$/i.exec(url);
+    return match ? match[1] : url;
+};
+
 /** `#rgb` or `#rrggbb`, case-insensitive. Anything else yields the fallback. */
 const hexColor = (value, fallback) => {
     const raw = String(value || '').trim();
@@ -508,7 +525,7 @@ const stringList = (value) => asArray(value).map(str).filter(Boolean);
  */
 const cleanMedia = (input = {}) => {
     const source = input || {};
-    const url = str(source.url || source.imageUrl || source.mediaUrl);
+    const url = mediaUrl(source.url || source.imageUrl || source.mediaUrl);
     const declared = ['image', 'video'].includes(source.type) ? source.type : null;
     const looksVideo = /\.(mp4|webm|ogg|mov|m4v)(\?|$)/i.test(url);
 
@@ -2267,7 +2284,7 @@ class CmsService {
             state: str(payload.state),
             district: str(payload.district),
             block: str(payload.block),
-            bannerUrl: str(payload.imageUrl || payload.bannerUrl),
+            bannerUrl: mediaUrl(payload.imageUrl || payload.bannerUrl),
             bannerAlt: str(payload.bannerAlt || payload.alt),
             bannerFit: payload.bannerFit === 'contain' || payload.fit === 'contain' ? 'contain' : 'cover',
             bannerPosition: str(payload.bannerPosition || payload.position) || 'center',
