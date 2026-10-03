@@ -2086,24 +2086,31 @@ class EventBookingService {
             return { row: fresh, outcome };
         }
 
-        /* A DOCUMENT: the same file, same template, to the same number. */
+        /* A DOCUMENT: resolve its current URL rather than replaying a failed URL. */
         if (/^EVENT_DOCUMENT_/.test(event)) {
             const data = row.data || {};
-            if (!row.templateId || !data.headerDocument || !data.headerDocument.link) {
+            const ctx = await this.messageContext(booking, kind);
+            const documentService = require('./eventDocument');
+            const headerDocument = documentService.documentForResend(row, ctx.attachments || []);
+            const template = require('../../config').botbee.templates.eventDocument || row.templateId;
+            if (!template || template === 'none' || !headerDocument) {
                 return { skipped: true, reason: 'This document row predates resend support — send the confirmation again instead' };
             }
+            const params = [str(row.recipientName || (data.params || [])[0]) || 'Member', headerDocument.filename,
+                ctx.eventTitle || 'the event', ctx.whenLabel || 'Date to be confirmed', ctx.bookingRef || booking.bookingRef];
+            const refreshedData = { ...data, bookingRef: booking.bookingRef, document: headerDocument.link, params, headerDocument };
             const whatsappTemplate = require('../notifications/whatsappTemplate');
-            const outcome = await require('./eventDocument').validateDocument(data.headerDocument.link)
-                .then(() => whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '',
-                    { headerDocument: data.headerDocument })).catch((e) => ({ success: false, error: e && e.message }));
+            const outcome = await documentService.validateDocument(headerDocument.link)
+                .then(() => whatsappTemplate.sendTemplateMessage(row.recipient, template, params, 'en', '',
+                    { headerDocument })).catch((e) => ({ success: false, error: e && e.message }));
             const fresh = await notificationService.log({
                 user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
-                templateId: row.templateId, subject: row.subject, status: outcome.success ? 'sent' : 'failed',
+                templateId: template, subject: headerDocument.filename, status: outcome.success ? 'sent' : 'failed',
                 mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error,
                 provider: outcome.provider,
                 deliveryStatus: outcome.mock ? undefined : (outcome.success ? 'accepted' : 'failed'),
-                bookingRef: booking.bookingRef, eventId: String(booking.eventId || ''), eventTitle: row.eventTitle,
-                recipientName: row.recipientName, resendOf: row._id, data
+                bookingRef: booking.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
+                recipientName: row.recipientName, resendOf: row._id, data: refreshedData
             });
             return { row: fresh, outcome };
         }

@@ -1,4 +1,30 @@
 const axios = require('axios');
+const { relativizeUploadUrl } = require('../../core/storage/uploadUrls');
+
+const documentUrl = (value) => {
+    const relative = relativizeUploadUrl(value);
+    if (!relative) return '';
+    if (relative.startsWith('/uploads/')) return `${require('../../core/storage/publicMedia').publicMediaOrigin()}${relative}`;
+    return relative;
+};
+
+// Old notification rows retain the website URL that failed. Resolve the same
+// attachment against the current event, then anchor uploads to the API host.
+const documentForResend = (row = {}, attachments = []) => {
+    const data = row.data || {};
+    const header = data.headerDocument || {};
+    const storedUrl = header.link || data.document || '';
+    const name = header.filename || row.subject || '';
+    const identity = relativizeUploadUrl(storedUrl);
+    let current = attachments.find(a => identity && relativizeUploadUrl(a.url) === identity);
+    if (!current && name) {
+        const named = attachments.filter(a => a.name === name);
+        if (named.length === 1) current = named[0];
+    }
+    const link = documentUrl(current ? current.url : storedUrl);
+    if (!link) return null;
+    return { link, filename: current && current.name || name || 'Event document' };
+};
 
 // A successful HTTP response can still be the website's HTML fallback.
 // Check the actual response before handing a document URL to WhatsApp.
@@ -19,4 +45,4 @@ const validateDocument = async (url) => {
     }
 };
 
-module.exports = { validateDocument };
+module.exports = { validateDocument, documentUrl, documentForResend };

@@ -4,7 +4,7 @@ const axios = require('axios');
 const Event = require('../src/modules/events/event.model');
 const service = require('../src/modules/events/eventbooking.service');
 const templates = require('../src/modules/notifications/notificationTemplates');
-const { validateDocument } = require('../src/modules/events/eventDocument');
+const { validateDocument, documentForResend } = require('../src/modules/events/eventDocument');
 const channel = 'https://whatsapp.com/channel/0029VaDdseGKLaHrWNV7ZK1X';
 
 async function main() {
@@ -35,6 +35,46 @@ async function main() {
         assert.equal(ctx.eventTitle, 'Current event');
         assert.match(ctx.dateLabel, /23 October 2026/);
         assert.equal(ctx.attachments[0].url, 'https://api.activ.org.in/uploads/agenda.pdf');
+        const failedDocument = {subject:'Agenda.pdf',data:{headerDocument:{link:'https://activ.org.in/uploads/agenda.pdf',filename:'Agenda.pdf'}}};
+        assert.deepEqual(documentForResend(failedDocument, ctx.attachments), {link:'https://api.activ.org.in/uploads/agenda.pdf',filename:'Agenda.pdf'});
+        assert.equal(documentForResend(failedDocument, [{name:'Agenda.pdf',url:'/uploads/replaced-agenda.pdf'}]).link,
+            'https://api.activ.org.in/uploads/replaced-agenda.pdf');
+        assert.equal(documentForResend(failedDocument, []).link, 'https://api.activ.org.in/uploads/agenda.pdf');
+        assert.equal(documentForResend({data:{document:'https://example.org/agenda.pdf'}}, []).link, 'https://example.org/agenda.pdf');
+        assert.equal(documentForResend({}, []), null);
+        // Exercise the admin resend path, including validation and saved replay data.
+        const oldBookingLookup = service.bookingForLogRow;
+        const oldContext = service.messageContext;
+        const sender = require('../src/modules/notifications/whatsappTemplate');
+        const notificationService = require('../src/modules/notifications/notification.service');
+        const oldSend = sender.sendTemplateMessage;
+        const oldLog = notificationService.log;
+        const sentDocuments = [];
+        let newLog;
+        try {
+            service.bookingForLogRow = async () => ({bookingRef:'TEST-123',eventId:'sample',status:'active',payment:{status:'not_required'}});
+            service.messageContext = async () => ctx;
+            sender.sendTemplateMessage = async (...args) => {sentDocuments.push(args); return {success:true,messageId:'test-document'};};
+            notificationService.log = async entry => {newLog=entry; return entry;};
+            axios.get = async url => {
+                assert.equal(url, 'https://api.activ.org.in/uploads/agenda.pdf');
+                return {headers:{'content-type':'application/pdf'},data:Readable.from([Buffer.from('%PDF-1.4 test')])};
+            };
+            const resent = await service.resendLoggedMessage({...failedDocument,_id:'old-log',event:'EVENT_DOCUMENT_CONFIRMED',
+                channel:'whatsapp',recipient:'919092317264',recipientName:'Test',templateId:'activ_event_document_readable_v2'});
+            assert.equal(resent.outcome.success,true);
+            assert.equal(sentDocuments.length,1);
+            assert.equal(sentDocuments[0][0],'919092317264');
+            assert.equal(sentDocuments[0][5].headerDocument.link,'https://api.activ.org.in/uploads/agenda.pdf');
+            assert.equal(newLog.data.headerDocument.link,'https://api.activ.org.in/uploads/agenda.pdf');
+            assert.equal(newLog.data.params[2],'Current event');
+            assert.equal(newLog.resendOf,'old-log');
+        } finally {
+            service.bookingForLogRow=oldBookingLookup;
+            service.messageContext=oldContext;
+            sender.sendTemplateMessage=oldSend;
+            notificationService.log=oldLog;
+        }
         assert.equal(ctx.whatsappChannelUrl, channel);
         const Log = require('../src/modules/notifications/notificationLog.model');
         const log = new Log({ event: 'EVENT_CHANNEL_CONFIRMED', channel: 'whatsapp', recipient: '919092317264', status: 'sent' });
