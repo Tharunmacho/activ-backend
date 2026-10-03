@@ -24,7 +24,7 @@ async function main() {
             payment: { status: 'not_required' }, participants: [],
         });
         Object.assign(ctx, { name: 'Tharun (test message)', eventTitle: `[TEST] ${ctx.eventTitle}`,
-            whatsappChannelUrl: CHANNEL, ticketUrl: '', passes: [],
+            whatsappChannelUrl: process.env.EVENT_TEST_GROUP_URL || ctx.whatsappChannelUrl || '', ticketUrl: '', passes: [],
             viewUrl: ctx.eventUrl, registrationNo: 'TEST ONLY - no reservation',
         });
         const templates = require('../src/modules/notifications/notificationTemplates');
@@ -37,7 +37,7 @@ async function main() {
         const output = flex.readableParams('confirmed', ctx);
         if (output.missing.length) throw new Error(output.missing.join(', '));
         const whatsappResult = await require('../src/modules/notifications/whatsappTemplate').sendTemplateMessage(
-            '9092317264', ctx.posterUrl ? flex.READABLE_NAMES.confirmed.image : flex.READABLE_NAMES.confirmed.plain,
+            '9092317264', flex.readableTemplateName('confirmed', ctx, ctx.posterUrl ? 'image' : 'plain'),
             output.params, 'en_US', '', ctx.posterUrl ? { headerImage: ctx.posterUrl } : { noHeader: true });
         for (const [channel, result] of Object.entries({ ...(emailResult ? { email: emailResult } : {}), whatsapp: whatsappResult })) {
             console.log(channel, JSON.stringify({ success: result.success, mock: result.mock, messageId: result.messageId, error: result.error }));

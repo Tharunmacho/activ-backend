@@ -437,12 +437,21 @@ const flexSteps = (kind, ctx = {}, names = {}, skipped = []) => {
         const template = names[variant];
         if (!template) return [];
         const readable = READABLE_NAMES[message] && Object.values(READABLE_NAMES[message]).includes(template);
-        const result = readable ? readableParams(message, ctx) : out;
+        const result = readable ? readableParams(message, ctx, '') : out;
         if (result.missing.length || result.rendered.length > BODY_LIMIT) {
             skipped.push(`${template} skipped: ${result.missing.join(', ') || 'message exceeds Meta body limit'}`);
             return [];
         }
-        return [{ template, params: result.params, ...(variant === 'plain' ? { noHeader: true } : {}) }];
+        const steps = [{ template, params: result.params, ...(variant === 'plain' ? { noHeader: true } : {}) }];
+        const layout = readableLayout(ctx);
+        if (readable && layout) {
+            const aligned = readableParams(message, ctx, layout);
+            if (!aligned.missing.length && aligned.rendered.length <= BODY_LIMIT) {
+                steps.unshift({ template: readableTemplateName(message, ctx, variant), params: aligned.params,
+                    ...(variant === 'plain' ? { noHeader: true } : {}) });
+            }
+        }
+        return steps;
     });
 };
 
@@ -468,8 +477,22 @@ const READABLE_BODIES = Object.fromEntries(Object.keys(READABLE_NAMES).map((mess
     + 'Please keep your booking ID for any question about your registration.'
 ]));
 
-const readableParams = (message, ctx = {}) => {
-    const body = READABLE_BODIES[message];
+const readableLayout = (ctx = {}) => [ctx.whatsappChannelUrl ? 'whatsapp' : '', ctx.videoUrl ? 'video' : ''].filter(Boolean).join('_');
+const readableTemplateName = (message, ctx = {}, variant = 'image') => {
+    const layout = readableLayout(ctx);
+    return layout ? `activ_evt_${message}_${layout}_${variant}_v2` : READABLE_NAMES[message][variant];
+};
+const readableBody = (message, layout = '') => {
+    const original = READABLE_BODIES[message];
+    if (!original || !layout) return original;
+    let next = 11;
+    const sections = [];
+    if (layout.includes('whatsapp')) sections.push(`*{{${next++}}}:*\n{{${next++}}}`);
+    if (layout.includes('video')) sections.push(`*Event video:*\n{{${next++}}}`);
+    return original.replace('Please keep your booking ID', sections.join('\n\n') + '\n\nPlease keep your booking ID');
+};
+const readableParams = (message, ctx = {}, layout = readableLayout(ctx)) => {
+    const body = readableBody(message, layout);
     if (!body) return { params: [], missing: ['unsupported readable message'], rendered: '' };
     const ref = one(ctx.bookingRef, 40);
     const link = one(ctx.viewUrl || ctx.ticketUrl || ctx.eventUrl, 400);
@@ -485,11 +508,10 @@ const readableParams = (message, ctx = {}) => {
         one(ctx.timeLabel, 60) || 'Time to be confirmed',
         ctx.isOnline ? whereOf(ctx, { withLink: false }) : one(ctx.venueLabel || ctx.venue, 220) || 'To be announced by the organiser',
         seatsOf(ctx), feeOf(ctx) || 'See payment details in your booking',
-        ref, one(ctx.registrationNo, 40) || ref, [link,
-            ctx.whatsappChannelUrl ? `${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)}: ${ctx.whatsappChannelUrl}` : '',
-            ctx.videoUrl ? `Video: ${ctx.videoUrl}` : '',
-        ].filter(Boolean).join(' | '),
-    ], [5, 6, 7, 8, 9]);
+        ref, one(ctx.registrationNo, 40) || ref, link,
+        ...(layout.includes('whatsapp') ? [require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl), one(ctx.whatsappChannelUrl, 400)] : []),
+        ...(layout.includes('video') ? [one(ctx.videoUrl, 400)] : []),
+    ], [5, 6, 7, 8, 9, 10, 11, 12]);
     return { params, missing: [], rendered: renderBody(body, params) };
 };
 
@@ -517,6 +539,21 @@ const TEMPLATE_DEFS = Object.keys(BODIES).flatMap((message) => ['image', 'plain'
         message === 'online' ? 'Online on Zoom' : 'Chidambaram, Tamil Nadu, India', '1 seat', 'Rs 1,500 | Paid online',
         'ACTIVB-MURBHCAR-41FC', 'ACTIVB-MURBHCAR-41FC-P1', 'https://activ.org.in/events/awareness-programme-2026-10-23/book?ref=ACTIVB-MURBHCAR-41FC'],
 }))));
+
+// Fixed newlines belong to the approved body, never inside a URL parameter.
+for (const message of Object.keys(READABLE_NAMES)) {
+    for (const layout of ['whatsapp', 'video', 'whatsapp_video']) {
+        for (const variant of ['image', 'plain']) {
+            const original = TEMPLATE_DEFS.find(t => t.name === READABLE_NAMES[message][variant]);
+            const ctx = { whatsappChannelUrl: layout.includes('whatsapp') ? 'https://chat.whatsapp.com/ExampleInvite' : '', videoUrl: layout.includes('video') ? 'https://youtu.be/example' : '' };
+            TEMPLATE_DEFS.push({ ...original, name: readableTemplateName(message, ctx, variant),
+                bodyWithVariables: readableBody(message, layout),
+                params: [...original.params, ...(ctx.whatsappChannelUrl ? ['WhatsApp link label', 'WhatsApp group link'] : []), ...(ctx.videoUrl ? ['video link'] : [])],
+                samples: [...original.samples, ...(ctx.whatsappChannelUrl ? ['WhatsApp group', ctx.whatsappChannelUrl] : []), ...(ctx.videoUrl ? [ctx.videoUrl] : [])],
+            });
+        }
+    }
+}
 
 /**
  * Meta's submission rules, checked before anything is sent for review. Returns
@@ -553,6 +590,7 @@ module.exports = {
     READABLE_NAMES,
     READABLE_BODIES,
     readableParams,
+    readableTemplateName,
     detailItems,
     whenOf,
     whereOf,

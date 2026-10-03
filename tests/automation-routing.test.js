@@ -58,9 +58,20 @@ async function main() {
     assert.ok(!isWhatsAppEventLink('https://chat.whatsapp.com.evil.test/abc'));
     const flex = require('../src/modules/notifications/whatsappFlex');
     const result = flex.readableParams('confirmed', {eventTitle:'Event',bookingRef:'REF',viewUrl:'https://activ.org.in/events/test',whatsappChannelUrl:'https://chat.whatsapp.com/abc123',videoUrl:'https://youtu.be/abc',seats:1});
-    assert.match(result.rendered, /WhatsApp group: https:\/\/chat.whatsapp.com\/abc123/);
-    assert.match(result.rendered, /Video: https:\/\/youtu.be\/abc/);
+    assert.match(result.rendered, /\*WhatsApp group:\*\nhttps:\/\/chat.whatsapp.com\/abc123/);
+    assert.match(result.rendered, /\*Event video:\*\nhttps:\/\/youtu.be\/abc/);
+    assert.equal(result.params[9], 'https://activ.org.in/events/test');
+    assert.ok(result.params.every(value => !/[\r\n]/.test(value)));
     assert.ok(result.rendered.length <= 1024);
+    const groupContext = {eventTitle:'Event',bookingRef:'REF',viewUrl:'https://activ.org.in/events/test',whatsappChannelUrl:'https://chat.whatsapp.com/abc123',seats:1};
+    const steps = flex.flexSteps('confirmed', groupContext, flex.READABLE_NAMES.confirmed);
+    assert.equal(steps[0].template, 'activ_evt_confirmed_whatsapp_image_v2');
+    assert.equal(steps[0].params.length, 12);
+    assert.equal(steps[0].params[10], 'WhatsApp group');
+    assert.equal(steps[0].params[11], groupContext.whatsappChannelUrl);
+    assert.equal(steps[1].template, flex.READABLE_NAMES.confirmed.image);
+    assert.equal(steps[1].params.length, 10);
+    assert.equal(steps[1].params[9], groupContext.viewUrl);
     console.log('Email account routing, membership journeys, UPI amount/encoding and group links passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

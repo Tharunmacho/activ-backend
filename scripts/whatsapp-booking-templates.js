@@ -38,7 +38,8 @@ const language = process.env.META_TEMPLATE_LANGUAGE || 'en_US';
  */
 const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7)
     .split(',').map((s) => s.trim()).filter(Boolean);
-const picked = (t) => !only.length || only.includes(t.name) || (only.includes('flex') && t.flex);
+const picked = (t) => !only.length || only.includes(t.name) || (only.includes('flex') && t.flex)
+    || (only.includes('aligned') && /^activ_evt_(confirmed|online)_(whatsapp|video|whatsapp_video)_(image|plain)_v2$/.test(t.name));
 const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && picked(t));
 const flex = require('../src/modules/notifications/whatsappFlex');
 let imageHandle = process.env.META_TEMPLATE_IMAGE_HANDLE || '';
