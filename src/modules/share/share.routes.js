@@ -24,6 +24,7 @@ const config = require('../../config');
 const cmsService = require('../cms/cms.service');
 const { resolveEventId } = require('../events/eventSlug');
 const { websiteShell, mergePreview } = require('./websitePage');
+const eventPreviewImage = require('./eventPreviewImage');
 
 const router = express.Router();
 
@@ -199,6 +200,18 @@ const fallback = (req, res, path) => {
     res.redirect(302, `${siteOrigin(req)}${path}${path.includes('?') ? '&' : '?'}ref=share`);
 };
 
+router.get('/events/:slug/preview/:version.jpg', async(req, res) => {
+    try {
+        const id = await resolveEventId(str(req.params.slug));
+        const event = await cmsService.listEvent(id, {});
+        if (!event || req.params.version !== eventPreviewImage.versionOf(event)) return res.status(404).end();
+        const bytes = await eventPreviewImage.previewBytes(event);
+        res.set('Cache-Control', 'public, max-age=300');
+        res.set('Content-Length', String(bytes.length));
+        return res.type('image/jpeg').send(bytes);
+    } catch { return res.status(404).end(); }
+});
+
 router.get(['/events/:slug', '/events/:slug/book'], async(req, res) => {
     const slug = str(req.params.slug);
     try {
@@ -206,9 +219,9 @@ router.get(['/events/:slug', '/events/:slug/book'], async(req, res) => {
         const event = await cmsService.listEvent(id, {});
         if (!event) return fallback(req, res, `/events/${encodeURIComponent(slug)}`);
         const url = `${siteOrigin(req)}/events/${encodeURIComponent(event.slug || event.id || slug)}`;
-        const card = eventCard(event);
-        const image = shareImage(req, card.image);
-        const preview = page({ ...card, image, url, imageMeta: await imageInfo(image) });
+        const card = { ...eventCard(event), ...require('./eventShareContent').eventShareContent(event, url) };
+        const image = eventPreviewImage.previewImageUrl(event, require('../../core/storage/publicMedia').publicMediaOrigin());
+        const preview = page({ ...card, image, url, imageMeta: image ? { type: 'image/jpeg', width: 1200, height: 630 } : null });
         if (req.query.view === 'page') {
             const shell = await websiteShell();
             if (shell) {

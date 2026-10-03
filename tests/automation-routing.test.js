@@ -72,6 +72,14 @@ async function main() {
     assert.equal(steps[1].template, flex.READABLE_NAMES.confirmed.image);
     assert.equal(steps[1].params.length, 10);
     assert.equal(steps[1].params[9], groupContext.viewUrl);
+    const pdfContext = {...groupContext,attachments:[{name:'Agenda.pdf',url:'https://api.activ.org.in/uploads/agenda.pdf',type:'application/pdf'}]};
+    const pdfMessage = flex.readableParams('confirmed',pdfContext);
+    assert.ok(pdfMessage.rendered.indexOf('Supporting PDF') > pdfMessage.rendered.indexOf('WhatsApp group'));
+    assert.match(pdfMessage.rendered,/Open document:\* https:\/\/api.activ.org.in\/uploads\/agenda.pdf/);
+    const pdfSteps = flex.flexSteps('confirmed',pdfContext,flex.READABLE_NAMES.confirmed);
+    assert.equal(pdfSteps[0].template,'activ_evt_confirmed_whatsapp_document_image_v3');
+    assert.equal(pdfSteps[0].params.length,14);
+    assert.equal(pdfSteps[1].template,'activ_evt_confirmed_whatsapp_image_v2');
     console.log('Email account routing, membership journeys, UPI amount/encoding and group links passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

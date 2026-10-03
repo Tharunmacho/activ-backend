@@ -10,10 +10,12 @@ async function main() {
     const events = await Event.find({ title: /Entrepreneurship Awareness|Zero Cost Social|SCST Economic/i })
         .select('title startAt endAt venue bannerUrl attachments whatsappChannelUrl').lean();
     console.log(JSON.stringify(events, null, 2));
-    if (process.argv.includes('--send-tests') || process.argv.includes('--send-banner-test')) {
+    if (process.argv.includes('--send-tests') || process.argv.includes('--send-banner-test') || process.argv.includes('--send-pdf-test')) {
         // Only the two recipients explicitly supplied for this task. No booking is created.
         const service = require('../src/modules/events/eventbooking.service');
-        const event = process.argv.includes('--send-banner-test')
+        const event = process.argv.includes('--send-pdf-test')
+            ? events.find(e => /Zero Cost Social/i.test(e.title) && e.attachments?.length)
+            : process.argv.includes('--send-banner-test')
             ? events.find(e => /SCST Economic/i.test(e.title) && e.bannerUrl)
             : events.find(e => e.title === 'Entrepreneurship Awareness Programme');
         if (!event) throw new Error('Test event not found');

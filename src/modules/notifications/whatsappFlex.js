@@ -443,12 +443,14 @@ const flexSteps = (kind, ctx = {}, names = {}, skipped = []) => {
             return [];
         }
         const steps = [{ template, params: result.params, ...(variant === 'plain' ? { noHeader: true } : {}) }];
-        const layout = readableLayout(ctx);
-        if (readable && layout) {
-            const aligned = readableParams(message, ctx, layout);
-            if (!aligned.missing.length && aligned.rendered.length <= BODY_LIMIT) {
-                steps.unshift({ template: readableTemplateName(message, ctx, variant), params: aligned.params,
-                    ...(variant === 'plain' ? { noHeader: true } : {}) });
+        if (readable) {
+            const layouts = [...new Set([readableLayout(ctx), readableLayout({ ...ctx, attachments: [] })])].filter(Boolean);
+            for (const layout of layouts.reverse()) {
+                const aligned = readableParams(message, ctx, layout);
+                if (!aligned.missing.length && aligned.rendered.length <= BODY_LIMIT) {
+                    steps.unshift({ template: readableTemplateName(message, ctx, variant, layout), params: aligned.params,
+                        ...(variant === 'plain' ? { noHeader: true } : {}) });
+                }
             }
         }
         return steps;
@@ -477,10 +479,10 @@ const READABLE_BODIES = Object.fromEntries(Object.keys(READABLE_NAMES).map((mess
     + 'Please keep your booking ID for any question about your registration.'
 ]));
 
-const readableLayout = (ctx = {}) => [ctx.whatsappChannelUrl ? 'whatsapp' : '', ctx.videoUrl ? 'video' : ''].filter(Boolean).join('_');
-const readableTemplateName = (message, ctx = {}, variant = 'image') => {
-    const layout = readableLayout(ctx);
-    return layout ? `activ_evt_${message}_${layout}_${variant}_v2` : READABLE_NAMES[message][variant];
+const firstDocument = (ctx = {}) => (ctx.attachments || []).find(a => a.url && (/\.pdf(?:\?|$)/i.test(a.url) || /application\/pdf/i.test(a.type || '')));
+const readableLayout = (ctx = {}) => [ctx.whatsappChannelUrl ? 'whatsapp' : '', firstDocument(ctx) ? 'document' : '', ctx.videoUrl ? 'video' : ''].filter(Boolean).join('_');
+const readableTemplateName = (message, ctx = {}, variant = 'image', layout = readableLayout(ctx)) => {
+    return layout ? `activ_evt_${message}_${layout}_${variant}_${layout.includes('document') ? 'v3' : 'v2'}` : READABLE_NAMES[message][variant];
 };
 const readableBody = (message, layout = '') => {
     const original = READABLE_BODIES[message];
@@ -488,6 +490,7 @@ const readableBody = (message, layout = '') => {
     let next = 11;
     const sections = [];
     if (layout.includes('whatsapp')) sections.push(`*{{${next++}}}:*\n{{${next++}}}`);
+    if (layout.includes('document')) sections.push(`*Supporting PDF:* {{${next++}}}\n*Open document:* {{${next++}}}`);
     if (layout.includes('video')) sections.push(`*Event video:*\n{{${next++}}}`);
     return original.replace('Please keep your booking ID', sections.join('\n\n') + '\n\nPlease keep your booking ID');
 };
@@ -502,7 +505,8 @@ const readableParams = (message, ctx = {}, layout = readableLayout(ctx)) => {
     if (!link) missing.push('booking link');
     if (!title) missing.push('event title');
     if (missing.length) return { params: [], missing, rendered: '' };
-    const params = squeeze(body, [
+    const document = firstDocument(ctx);
+    const values = [
         nameOf(ctx), title,
         one(ctx.dateLabel, 80) || 'Date to be confirmed',
         one(ctx.timeLabel, 60) || 'Time to be confirmed',
@@ -510,8 +514,10 @@ const readableParams = (message, ctx = {}, layout = readableLayout(ctx)) => {
         seatsOf(ctx), feeOf(ctx) || 'See payment details in your booking',
         ref, one(ctx.registrationNo, 40) || ref, link,
         ...(layout.includes('whatsapp') ? [require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl), one(ctx.whatsappChannelUrl, 400)] : []),
+        ...(layout.includes('document') ? [one(document.name, 90) || 'Event document.pdf', one(document.url, 400)] : []),
         ...(layout.includes('video') ? [one(ctx.videoUrl, 400)] : []),
-    ], [5, 6, 7, 8, 9, 10, 11, 12]);
+    ];
+    const params = squeeze(body, values, values.map((_, i) => i).filter(i => i >= 5));
     return { params, missing: [], rendered: renderBody(body, params) };
 };
 
@@ -542,14 +548,16 @@ const TEMPLATE_DEFS = Object.keys(BODIES).flatMap((message) => ['image', 'plain'
 
 // Fixed newlines belong to the approved body, never inside a URL parameter.
 for (const message of Object.keys(READABLE_NAMES)) {
-    for (const layout of ['whatsapp', 'video', 'whatsapp_video']) {
+    for (const layout of ['whatsapp', 'video', 'whatsapp_video', 'document', 'whatsapp_document', 'document_video', 'whatsapp_document_video']) {
         for (const variant of ['image', 'plain']) {
             const original = TEMPLATE_DEFS.find(t => t.name === READABLE_NAMES[message][variant]);
-            const ctx = { whatsappChannelUrl: layout.includes('whatsapp') ? 'https://chat.whatsapp.com/ExampleInvite' : '', videoUrl: layout.includes('video') ? 'https://youtu.be/example' : '' };
+            const ctx = { whatsappChannelUrl: layout.includes('whatsapp') ? 'https://chat.whatsapp.com/ExampleInvite' : '',
+                attachments: layout.includes('document') ? [{name:'Agenda.pdf',url:'https://api.activ.org.in/uploads/agenda.pdf',type:'application/pdf'}] : [],
+                videoUrl: layout.includes('video') ? 'https://youtu.be/example' : '' };
             TEMPLATE_DEFS.push({ ...original, name: readableTemplateName(message, ctx, variant),
                 bodyWithVariables: readableBody(message, layout),
-                params: [...original.params, ...(ctx.whatsappChannelUrl ? ['WhatsApp link label', 'WhatsApp group link'] : []), ...(ctx.videoUrl ? ['video link'] : [])],
-                samples: [...original.samples, ...(ctx.whatsappChannelUrl ? ['WhatsApp group', ctx.whatsappChannelUrl] : []), ...(ctx.videoUrl ? [ctx.videoUrl] : [])],
+                params: [...original.params, ...(ctx.whatsappChannelUrl ? ['WhatsApp link label', 'WhatsApp group link'] : []), ...(ctx.attachments.length ? ['PDF name', 'PDF URL'] : []), ...(ctx.videoUrl ? ['video link'] : [])],
+                samples: [...original.samples, ...(ctx.whatsappChannelUrl ? ['WhatsApp group', ctx.whatsappChannelUrl] : []), ...(ctx.attachments.length ? [ctx.attachments[0].name, ctx.attachments[0].url] : []), ...(ctx.videoUrl ? [ctx.videoUrl] : [])],
             });
         }
     }

@@ -39,7 +39,7 @@ const VARS = (message) => (flex.BODIES[message].match(/\{\{\d+\}\}/g) || []).len
 
 const testDefinitions = () => {
     section('The template definitions pass Meta\'s submission rules');
-    say('ten original, four readable and twelve aligned link templates', flex.TEMPLATE_DEFS.length === 26);
+    say('original, readable, aligned link and PDF templates are registered', flex.TEMPLATE_DEFS.length === 42);
     for (const t of flex.TEMPLATE_DEFS) {
         const problems = flex.lintTemplate(t);
         say(`${t.name}: ${problems.length ? problems.join('; ') : 'clean'}`, problems.length === 0);

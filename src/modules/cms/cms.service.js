@@ -2187,7 +2187,11 @@ class CmsService {
             // so this listing and `/events` cannot describe the same row
             // differently. `toEvent` is the authority on their shape.
             ...withJoinLink(pickEventDetail(toEvent(e)), e, privileged),
-        }));
+        })).map(record => ({ ...record, share: {
+            ...require('../share/eventShareContent').eventShareContent(record,
+                `${String(require('../../config').frontendUrl || 'https://activ.org.in').replace(/\/+$/, '')}/events/${encodeURIComponent(record.slug || record.id)}`),
+            image: require('../share/eventPreviewImage').previewImageUrl(record, require('../../core/storage/publicMedia').publicMediaOrigin()),
+        } }));
     }
 
     /**

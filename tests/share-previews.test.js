@@ -5,8 +5,20 @@ const { bannerName, nameEventBanner } = require('../src/modules/events/eventBann
 const { mergePreview, websiteShell } = require('../src/modules/share/websitePage');
 const store = require('../src/core/storage/uploadStore');
 const variants = require('../src/core/storage/imageVariants');
+const eventPreviewImage = require('../src/modules/share/eventPreviewImage');
 
 async function main() {
+    const share = require('../src/modules/share/eventShareContent').eventShareContent({
+        title:'Event A',startAt:'2026-10-10T03:30:00Z',endAt:'2026-10-10T11:30:00Z',venue:'Hall A',venueAddress:'Address A',
+        description:'Event A description',registrationFee:0,language:'Tamil',contactPhone:'12345',
+        speakers:[{name:'Speaker A'}],agenda:[{startTime:'09:00',title:'Session A'}],
+        onlineUrl:'PRIVATE_JOIN',whatsappChannelUrl:'PRIVATE_GROUP',attachments:[{url:'PRIVATE_FILE'}],
+    },'https://activ.org.in/events/event-a');
+    assert.equal(share.title,'Event A on 10 October 2026 at Hall A');
+    for (const value of ['9:00 am','5:00 pm','IST','Address A','Free entry','Tamil','12345','Speaker A','Session A','https://activ.org.in/events/event-a']) {
+        assert.ok(share.text.includes(value),value);
+    }
+    assert.ok(!/PRIVATE_JOIN|PRIVATE_GROUP|PRIVATE_FILE/.test(share.text));
     const event = {
         id: '0123456789abcdef01234567', slug: 'conference-2026-10-10',
         title: 'SCST Economic Liberty Conference', startAt: '2026-10-10T04:30:00Z',
@@ -36,7 +48,7 @@ async function main() {
         };
         cms.listEvent = async() => event;
         const router = require('../src/modules/share/share.routes');
-        const handler = router.stack.find((layer) => layer.route?.path?.includes('/events/:slug')).route.stack[0].handle;
+        const handler = router.stack.find((layer) => Array.isArray(layer.route?.path) && layer.route.path.includes('/events/:slug')).route.stack[0].handle;
         for (const agent of ['Mozilla/5.0', 'facebookexternalhit/1.1', 'meta-externalfetcher/1.1', 'WhatsApp']) {
             const headers = {};
             let body = '';
@@ -49,7 +61,9 @@ async function main() {
             await handler({ params: { slug: event.id }, query: { view: 'page' }, headers: { 'user-agent': agent } }, res);
             assert.ok(body.includes('SCST Economic Liberty Conference on 10 October 2026 at DNC VIJAY MAHAL'));
             assert.ok(body.includes('Conference details &amp; registration.'));
-            assert.ok(body.includes('conference-2026-10-10.png?w=1200'));
+            assert.ok(body.includes(eventPreviewImage.previewImageUrl(event,require('../src/core/storage/publicMedia').publicMediaOrigin())));
+            assert.ok(body.includes('property="og:image:type" content="image/jpeg"'));
+            assert.ok(body.includes('property="og:image:height" content="630"'));
             assert.ok(body.includes('property="fb:app_id" content="123456789"'));
             assert.ok(body.includes('id="root"') && body.includes('/assets/site.js'));
             assert.equal((body.match(/rel="canonical"/g) || []).length, 1);
@@ -58,7 +72,28 @@ async function main() {
             assert.equal(headers['Cache-Control'], 'no-cache');
         }
         assert.equal(shellFetches, 1, 'SPA shell is cached independently of event metadata');
+        // A crawler gets a real JPEG derived from the same public event banner.
+        const imageHandler = router.stack.find(layer => layer.route?.path === '/events/:slug/preview/:version.jpg').route.stack[0].handle;
+        const fixture = await require('sharp')({create:{width:48,height:24,channels:3,background:'#114488'}}).png().toBuffer();
+        variants.readOriginal = async() => fixture;
+        let jpeg;
+        let imageStatus=200;
+        const imageHeaders={};
+        const imageResponse = {status(code){imageStatus=code;return this;},end(){},set(key,value){imageHeaders[key]=value;},type(value){imageHeaders.type=value;return this;},send(bytes){jpeg=bytes;}};
+        await imageHandler({params:{slug:event.id,version:eventPreviewImage.versionOf(event)}},imageResponse);
+        assert.equal(imageStatus,200);
+        assert.equal(imageHeaders.type,'image/jpeg');
+        const imageMetadata = await require('sharp')(jpeg).metadata();
+        assert.equal(imageMetadata.format,'jpeg');
+        assert.equal(imageMetadata.width,1200);
+        assert.equal(imageMetadata.height,630);
+        const replacement={...event,imageUrl:'/uploads/new-banner.png'};
+        assert.notEqual(eventPreviewImage.versionOf(event),eventPreviewImage.versionOf(replacement));
+        await imageHandler({params:{slug:event.id,version:'old-version'}},imageResponse);
+        assert.equal(imageStatus,404);
         cms.listEvent = async() => { throw new Error('Hidden event'); };
+        await imageHandler({params:{slug:event.id,version:eventPreviewImage.versionOf(event)}},imageResponse);
+        assert.equal(imageStatus,404);
         let hiddenRedirect = '';
         await handler({ params: { slug: event.id }, query: { view: 'page' }, headers: {} }, {
             redirect(status, url) { assert.equal(status, 302); hiddenRedirect = url; },

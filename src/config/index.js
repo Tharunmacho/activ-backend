@@ -368,7 +368,8 @@ module.exports = {
                 // A participant's seat, booked for them by somebody else (names the booker).
                 bookingParticipant: real(process.env.BOTBEE_TPL_BOOKING_PARTICIPANT) || 'activ_participant_seat_v2',
                 // One event document (agenda PDF …) as a WhatsApp file, after the confirmation.
-                eventDocument: real(process.env.BOTBEE_TPL_EVENT_DOCUMENT) || 'activ_event_document_v1',
+                eventDocument: !real(process.env.BOTBEE_TPL_EVENT_DOCUMENT) || real(process.env.BOTBEE_TPL_EVENT_DOCUMENT) === 'activ_event_document_v1'
+                    ? 'activ_event_document_readable_v2' : real(process.env.BOTBEE_TPL_EVENT_DOCUMENT),
                 /*
                  * Two ALREADY-APPROVED templates on the account, both with the
                  * event poster as an image header and the association's full
