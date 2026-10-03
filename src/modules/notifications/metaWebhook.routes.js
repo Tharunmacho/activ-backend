@@ -3,23 +3,23 @@ const express = require('express');
 const config = require('../../config');
 const logger = require('../../config/logger');
 const deliveryStatus = require('./deliveryStatus.service');
+const inbound = require('./metaInbound.service');
 
 /**
- * Meta WhatsApp Cloud API webhook — DELIVERY STATUSES ONLY.
+ * Signed Meta WhatsApp webhook: app-aware conversation replies and statuses.
  *
  *   GET  /api/v1/notifications/meta/webhook   the one-time verification handshake
- *   POST /api/v1/notifications/meta/webhook   status callbacks (sent/delivered/read/failed)
+ *   POST /api/v1/notifications/meta/webhook   incoming chats and delivery statuses
  *
  * WHY A SECOND WEBHOOK. Templates are sent straight to Meta (metaCloud.service),
  * and Meta reports what became of each message to the webhook configured on
- * the Meta APP. That URL is BotBee's today, so the statuses reach this server
- * only if BotBee relays them (handled on the BotBee route too). Pointing a Meta
- * app's `messages` webhook field here makes delivery tracking independent of
- * the relay. This route never replies to anybody — inbound MESSAGES stay with
- * BotBee and the keyword bot; a message posted here is ignored.
+ * the subscribed Meta app. Subscribing the ACTIV app to the WABA sends both
+ * incoming messages and delivery updates here. Incoming messages use the
+ * website's live membership/event logic and the direct Meta session sender.
  *
  * Mounted ABOVE the `businessRoutes` auth gate in routes.js (Meta holds no ACTIV
- * token). Answers 200 to anything it can authenticate, so Meta does not retry.
+ * token). Duplicate message IDs are claimed in MongoDB. Database failures
+ * answer 500 so Meta can retry; successful deliveries answer 200.
  *
  * AUTHENTICITY. With META_APP_SECRET set, the `X-Hub-Signature-256` HMAC over
  * the raw body is REQUIRED (app.js keeps the raw body for this path). Without
@@ -53,7 +53,7 @@ const signatureOk = (req) => {
 
 let warnedNoSecret = false;
 
-router.post('/webhook', (req, res) => {
+router.post('/webhook', async (req, res) => {
     if (!signatureOk(req)) {
         logger.warn('Meta webhook refused: signature does not verify');
         return res.status(401).json({ received: false });
@@ -63,11 +63,20 @@ router.post('/webhook', (req, res) => {
         logger.warn('META_APP_SECRET is not set; Meta status callbacks are accepted unsigned');
     }
 
-    res.status(200).json({ received: true });
-
-    Promise.resolve()
-        .then(() => deliveryStatus.applyFromWebhook(req.body || {}))
-        .catch((error) => logger.error('Meta status callback failed', { error: error && error.message }));
+    try {
+        await deliveryStatus.applyFromWebhook(req.body || {});
+        // Unsigned callbacks may annotate delivery logs for compatibility, but
+        // must never reveal an account or cause a message to be sent.
+        if (!config.metaCloud.appSecret && inbound.messagesFrom(req.body).length) {
+            return res.status(503).json({ received: false });
+        }
+        if (config.metaCloud.appSecret) await inbound.handleWebhook(req.body || {});
+        res.set('X-ACTIV-Bot-Version', 'app-aware-v1');
+        return res.status(200).json({ received: true });
+    } catch (error) {
+        logger.error('Meta webhook processing failed', { error: error && error.message });
+        return res.status(500).json({ received: false });
+    }
 });
 
 module.exports = router;

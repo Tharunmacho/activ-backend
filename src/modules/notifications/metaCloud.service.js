@@ -18,15 +18,12 @@ const botbeeService = require('./botbee.service');
  * and nothing else.
  *
  * ---------------------------------------------------------------------------
- * TEMPLATES ONLY. Free text stays on BotBee.
+ * Templates and replies to authenticated incoming WhatsApp messages.
  * ---------------------------------------------------------------------------
  *
- * The inbound webhook, the keyword bot, the 24-hour session replies and the
- * dashboard all live on BotBee, and Meta will deliver inbound events to exactly
- * one webhook URL. Moving the session traffic here would mean re-pointing that
- * webhook, losing the dashboard, and rebuilding the bot -- to fix a half that is
- * not broken. `sendTextMessage` is deliberately absent from this file so the
- * question cannot be answered by accident.
+ * The signed Meta webhook now uses the same membership and event journeys as
+ * the website. Free-form sends are used only in response to an incoming message
+ * within its customer-service window; lifecycle notifications use templates.
  *
  * NOTHING HERE THROWS, for the same reason nothing in `botbee.service` does:
  * every caller is inside a registration, an approval or a payment, and a
@@ -40,6 +37,38 @@ const botbeeService = require('./botbee.service');
  * screen's id column and nobody would notice for weeks.
  */
 class MetaCloudService {
+    async sendTextMessage(phoneNumber, messageText, options = {}) {
+        const phone = this.normalizePhoneNumber(phoneNumber);
+        const text = String(messageText || '').trim();
+        if (!phone || !text || text.length > 4096) {
+            return { success: false, to: phone, error: 'A usable number and text of 1–4096 characters are required' };
+        }
+        // Never report an unsent conversation reply as a successful mock.
+        if (!this.isConfigured()) return { success: false, to: phone, error: 'Meta WhatsApp sender is not configured' };
+        const { baseUrl, apiVersion, phoneNumberId, accessToken, timeoutMs } = config.metaCloud;
+        const body = {
+            messaging_product: 'whatsapp', recipient_type: 'individual', to: phone,
+            type: 'text', text: { body: text, preview_url: false }
+        };
+        if (options.replyTo) body.context = { message_id: String(options.replyTo) };
+        try {
+            const response = await axios.post(`${baseUrl}/${apiVersion}/${phoneNumberId}/messages`, body, {
+                headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                timeout: timeoutMs, validateStatus: () => true
+            });
+            const data = response.data || {};
+            const messageId = data.messages && data.messages[0] && data.messages[0].id;
+            if (data.error || response.status < 200 || response.status >= 300 || !messageId) {
+                return { success: false, to: phone, provider: 'meta', status: response.status,
+                    error: String(data.error && data.error.message || 'Meta did not accept the reply') };
+            }
+            return { success: true, to: phone, provider: 'meta', messageId };
+        } catch (error) {
+            // Axios errors contain the access token; return only their message.
+            return { success: false, to: phone, provider: 'meta', error: String(error.message || 'Request failed') };
+        }
+    }
+
     /** Whether a token and a phone number id are both present. */
     isConfigured() {
         return config.metaCloud.isConfigured;

@@ -197,11 +197,9 @@ module.exports = {
      * parameter is the documented, universal way to fill a template. Talking to
      * it directly removes the broken hop.
      *
-     * TEMPLATES ONLY, DELIBERATELY. Free-text replies stay on BotBee: the
-     * inbound webhook, the keyword bot and the session window all live there,
-     * and moving them would mean re-pointing Meta's webhook away from BotBee and
-     * losing the dashboard. This is the smallest change that fixes the one
-     * broken thing.
+     * The signed Meta webhook also handles conversations using the website's
+     * account and event logic. Disable BotBee's static replies when subscribing
+     * the ACTIV app, so an incoming chat has only one automatic responder.
      *
      * INERT UNTIL A TOKEN EXISTS. With no `META_ACCESS_TOKEN` this is not
      * configured, `isConfigured` is false, and every template send goes to
@@ -236,7 +234,7 @@ module.exports = {
             baseUrl: (real(process.env.META_BASE_URL) || 'https://graph.facebook.com').replace(/\/+$/, ''),
             timeoutMs: parseInt(process.env.META_TIMEOUT_MS, 10) || 15000,
             /*
-             * The delivery-status webhook (/notifications/meta/webhook): the
+             * The conversation/status webhook (/notifications/meta/webhook): the
              * token typed into the Meta app's webhook setup, and the app secret
              * that signs every callback (X-Hub-Signature-256).
              */

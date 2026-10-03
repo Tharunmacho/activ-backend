@@ -3,6 +3,7 @@ const logger = require('../../config/logger');
 const botbeeService = require('./botbee.service');
 const regionalContacts = require('./regionalContacts.service');
 const notificationService = require('./notification.service');
+const { accountFor } = require('./emailAccounts');
 const { normalizeStatus } = require('../common/applicationStatus');
 
 /**
@@ -74,6 +75,9 @@ const COMMANDS = {
 const parseCommand = (text) => {
     const clean = String(text || '').trim().toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
     if (!clean) return null;
+
+    // Keep event registration/payment questions in the booking journey.
+    if (/\b(events?|bookings?|tickets?)\b/.test(clean)) return 'EVENTS';
 
     for (const [command, words] of Object.entries(COMMANDS)) {
         if (words.includes(clean)) return command;
@@ -236,7 +240,7 @@ const ambiguousReply = () => (
     'This WhatsApp number is registered against more than one ACTIV account, so we '
     + 'cannot tell which one is yours from a message alone.\n\n'
     + `Please sign in at ${config.frontendUrl} to see your application, or email `
-    + `${config.email.supportAddress} from your registered address.`
+    + `${accountFor('membership').supportAddress} from your registered address.`
 );
 
 const notRegisteredReply = () => (
@@ -263,7 +267,7 @@ const helpReply = async({ member, application }) => {
 
     if (!contact || !contact.nearest) {
         return `Hello ${who}, for help with your ACTIV membership please email `
-            + `${config.email.supportAddress}`;
+            + `${accountFor('membership').supportAddress}`;
     }
 
     let reply = `Hello ${who}, here is who handles your ACTIV membership:\n\n`
@@ -454,10 +458,8 @@ const eventsReply = async({ member = null, phone = '' } = {}) => {
     }
 };
 
-const menuReply = (identified) => {
-    const intro = identified
-        ? 'I did not recognise that.'
-        : 'Welcome to ACTIV.';
+const menuReply = (identified, unknown = false) => {
+    const intro = unknown ? 'I could not match that request. Welcome to ACTIV.' : 'Welcome to ACTIV.';
 
     return `${intro} Reply with one of:\n\n`
         + 'MEMBERSHIP — your plan, application status and next step\n'
@@ -520,12 +522,59 @@ const extractMessage = (body = {}) => {
 };
 
 /**
- * Handle one inbound message. Always resolves.
+ * Compose the website's next step from the caller's current account state.
  *
- * Returns what was decided so the route can report it and the tests can assert
- * on it without a network call.
+ * Separate from sending so account journeys can be checked without messaging.
  */
-const handleInbound = async(body = {}) => {
+const composeReply = async(incoming, identity) => {
+    const command = parseCommand(incoming.text);
+    let reply;
+    if (identity && identity.unavailable) {
+        reply = `We could not check your account right now. Please try again shortly or visit ${config.frontendUrl}.`;
+    } else if (identity && identity.ambiguous && command === 'EVENTS') {
+        reply = await eventsReply({ phone: incoming.from });
+    } else if (identity && identity.ambiguous) {
+        reply = ambiguousReply();
+    } else if (!identity) {
+        reply = command === 'EVENTS'
+            ? await eventsReply({ phone: incoming.from })
+            : (command && command !== 'MENU' ? notRegisteredReply() : menuReply(false, !command));
+    } else if (command === 'PAID') {
+        reply = 'If you paid through the website, check your payment status on your dashboard. '
+            + 'For a direct UPI transfer, email the UTR/reference, amount, payment date and your registered phone number to member@activ.org.in. '
+            + `The office will verify it before activation. Please do not pay twice.\n\n${config.frontendUrl}/member/application-status`;
+    } else if (['STATUS', 'REGISTER', 'PAYMENT', 'RENEW', 'UPI'].includes(command)) {
+        reply = await require('./membershipBot').reply(identity, command).catch(() =>
+            `We could not read your membership details right now. Please try again or sign in at ${config.frontendUrl}/member/application-status. No payment is needed until your status is confirmed.`);
+    } else if (command === 'HELP') {
+        reply = await helpReply(identity);
+    } else if (command === 'EVENTS') {
+        reply = await eventsReply({ ...identity, phone: incoming.from });
+    } else {
+        reply = menuReply(true, !command);
+    }
+    return { command: command || 'MENU', reply };
+};
+
+// Keep paragraphs together where possible, while respecting Meta's text limit.
+const replyChunks = (text, limit = 4096) => {
+    const chunks = [];
+    let rest = String(text || '').trim();
+    while (rest.length > limit) {
+        let end = rest.lastIndexOf('\n\n', limit);
+        if (end < limit / 2) end = rest.lastIndexOf('\n', limit);
+        if (end < limit / 2) end = rest.lastIndexOf(' ', limit);
+        if (end < limit / 2) end = limit;
+        // Do not cut a UTF-16 surrogate pair in half.
+        if (/^[\uDC00-\uDFFF]$/.test(rest[end])) end--;
+        chunks.push(rest.slice(0, end).trim());
+        rest = rest.slice(end).trim();
+    }
+    if (rest) chunks.push(rest);
+    return chunks;
+};
+
+const handleInbound = async(body = {}, options = {}) => {
     const incoming = extractMessage(body);
 
     if (!incoming || !incoming.from) {
@@ -542,62 +591,36 @@ const handleInbound = async(body = {}) => {
         return { handled: false, reason: 'no-text', from: incoming.from };
     }
 
-    const command = parseCommand(incoming.text);
     const identity = await findMemberByPhone(incoming.from);
-
-    let reply;
-    if (identity && identity.unavailable) {
-        reply = `We could not check your account right now. Please try again shortly or visit ${config.frontendUrl}.`;
-    } else if (identity && identity.ambiguous && command === 'EVENTS') {
-        // The public programme and this number's own bookings belong to no one
-        // account, so a number shared by several accounts can still have them.
-        reply = await eventsReply({ phone: incoming.from });
-    } else if (identity && identity.ambiguous) {
-        // Checked BEFORE the command: every command discloses something about a
-        // specific account, so there is no branch here that is safe to answer.
-        reply = ambiguousReply();
-    } else if (!identity) {
-        // An unknown number gets the same answer whatever it asks. Varying the
-        // reply by command would let a stranger probe which numbers are
-        // registered, and the answer they need is the same either way.
-        // EVENTS is the exception: the public programme and the bookings made
-        // under this number are not account information, and most people who
-        // booked a seat are guests with no account to find.
-        reply = command === 'EVENTS'
-            ? await eventsReply({ phone: incoming.from })
-            : (command ? notRegisteredReply() : menuReply(false));
-    } else if (command === 'PAID') {
-        reply = 'If you paid through the website, check your payment status on your dashboard. '
-            + 'For a direct UPI transfer, email the UTR/reference, amount, payment date and your registered phone number to member@activ.org.in. '
-            + `The office will verify it before activation. Please do not pay twice.\n\n${config.frontendUrl}/member/application-status`;
-    } else if (['STATUS', 'REGISTER', 'PAYMENT', 'RENEW', 'UPI'].includes(command)) {
-        reply = await require('./membershipBot').reply(identity, command).catch(() =>
-            `We could not read your membership details right now. Please try again or sign in at ${config.frontendUrl}/member/application-status. No payment is needed until your status is confirmed.`);
-    } else if (command === 'HELP') {
-        reply = await helpReply(identity);
-    } else if (command === 'EVENTS') {
-        reply = await eventsReply({ ...identity, phone: incoming.from });
-    } else {
-        reply = menuReply(true);
-    }
+    const { command, reply } = await composeReply(incoming, identity);
 
     // A reply to an inbound message is inside the 24-hour session window by
     // construction, so free-form text is permitted here where an unprompted
     // message would have to be an approved template.
-    const sent = await botbeeService.sendTextMessage(incoming.from, reply);
-
-    await notificationService.log({
-        user: identity && !identity.ambiguous && identity.member && identity.member._id,
-        event: 'BOT_REPLY',
-        channel: 'whatsapp',
-        recipient: sent.to || String(incoming.from),
-        subject: command || 'MENU',
-        status: sent.success ? 'sent' : 'failed',
-        mock: !!sent.mock,
-        providerMessageId: sent.messageId,
-        lastError: sent.error,
-        data: { inbound: String(incoming.text).slice(0, 500), command, text: reply }
-    });
+    const sender = options.provider === 'meta' ? require('./metaCloud.service') : botbeeService;
+    const sends = [];
+    const chunks = replyChunks(reply);
+    for (let i = 0; i < chunks.length; i++) {
+        const sent = await sender.sendTextMessage(incoming.from, chunks[i], { replyTo: incoming.messageId });
+        sends.push(sent);
+        await notificationService.log({
+            user: identity && !identity.ambiguous && identity.member && identity.member._id,
+            event: 'BOT_REPLY',
+            channel: 'whatsapp',
+            recipient: sent.to || String(incoming.from),
+            subject: command || 'MENU',
+            status: sent.success ? 'sent' : 'failed',
+            mock: !!sent.mock,
+            providerMessageId: sent.messageId,
+            lastError: sent.error,
+            provider: options.provider === 'meta' ? 'meta' : 'botbee',
+            data: { inbound: String(incoming.text).slice(0, 500), inboundMessageId: incoming.messageId,
+                command, text: chunks[i], part: i + 1, parts: chunks.length }
+        });
+        if (!sent.success) break;
+    }
+    const sent = { ...sends[sends.length - 1], success: sends.length === chunks.length && sends.every(s => s.success),
+        messageIds: sends.map(s => s.messageId).filter(Boolean) };
 
     return {
         handled: true,
@@ -647,6 +670,8 @@ module.exports = {
     extractMessage,
     findMemberByPhone,
     handleInbound,
+    composeReply,
+    replyChunks,
     verifyChallenge,
     statusReply,
     helpReply,

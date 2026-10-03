@@ -124,6 +124,7 @@ const MODELS = {
 
 /** Raw (non-Mongoose) collections: key -> [area, collection, legacy db, legacy collection]. */
 const RAW = {
+    whatsappInbound: ['notifications', 'whatsapp_inbound', A, 'whatsapp_inbound'],
     membershipCounters: ['members', 'membership_counters', A, 'membership_counters'],
     donationCounters: ['payments', 'donation_counters', A, 'donation_counters'],
     // GridFS: one bucket, two collections. `uploads` is the bucket name.
