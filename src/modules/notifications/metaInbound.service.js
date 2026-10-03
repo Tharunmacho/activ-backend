@@ -59,7 +59,7 @@ const handleWebhook = async (body = {}) => {
         try {
             const result = await bot.handleInbound(envelope, { provider: 'meta' });
             await collection.updateOne({ _id: id }, { $set: {
-                status: result.sent && result.sent.success ? 'replied' : 'failed',
+                status: result.handled === false ? 'ignored' : result.sent && result.sent.success ? 'replied' : 'failed',
                 completedAt: new Date(), outboundMessageIds: result.sent && result.sent.messageIds || [],
                 error: result.sent && result.sent.error || null
             } });

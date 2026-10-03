@@ -71,7 +71,7 @@ router.post('/webhook', async (req, res) => {
             return res.status(503).json({ received: false });
         }
         if (config.metaCloud.appSecret) await inbound.handleWebhook(req.body || {});
-        res.set('X-ACTIV-Bot-Version', 'conversational-v2');
+        res.set('X-ACTIV-Bot-Version', 'conversational-v3');
         return res.status(200).json({ received: true });
     } catch (error) {
         logger.error('Meta webhook processing failed', { error: error && error.message });

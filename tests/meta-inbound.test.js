@@ -61,7 +61,7 @@ async function main() {
     const payload = envelope([message('first'), message('second', 'hello')]);
     const [a, b] = await Promise.all([post(payload), post(payload)]);
     assert.equal(a.status, 200); assert.equal(b.status, 200);
-    assert.equal(a.headers['x-activ-bot-version'], 'conversational-v2');
+    assert.equal(a.headers['x-activ-bot-version'], 'conversational-v3');
     assert.equal(sent.length, 2, 'concurrent duplicate deliveries send one reply per actual message');
     assert.match(sent[0].text.body, /\/register/);
     assert.match(sent[1].text.body, /Welcome to ACTIV/);
@@ -101,6 +101,13 @@ async function main() {
     assert.match(pending.reply, /No payment is due yet/);
     const duplicate = await bot.composeReply({ from: '919999999999', text: 'membership' }, { ambiguous: true });
     assert.match(duplicate.reply, /member@activ.org.in/);
+    const beforeChat = sent.length;
+    const normal = envelope([message('normal-human-chat', 'Ok sir I will complete all the things by today tomorrow if u are free means will guide u sir will place the app in play store so once u check and say sir')]);
+    assert.equal((await post(normal)).status, 200);
+    assert.equal(sent.length, beforeChat, 'ordinary human conversation must not send an automated reply');
+    assert.equal(rows.get('our-number-id:normal-human-chat').status, 'ignored');
+    assert.equal((await post(normal)).status, 200);
+    assert.equal(sent.length, beforeChat, 'ignored chats also stay quiet on webhook retries');
     console.log('Signed inbound routing, batched messages, duplicate protection, session window, old buttons and account journeys passed.');
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

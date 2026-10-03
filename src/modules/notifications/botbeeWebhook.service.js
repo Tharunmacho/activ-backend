@@ -512,6 +512,12 @@ const composeReply = async(incoming, identity, context = {}) => {
             ? await conversation.previousCommand(incoming.from) : context.previousCommand;
         command = chatIntent.resolveFollowup(command, previous);
     }
+    if (['ACK', 'THANKS', 'SOCIAL'].includes(command)) {
+        const previous = context.previousCommand === undefined
+            ? await conversation.previousCommand(incoming.from) : context.previousCommand;
+        if (!chatIntent.CONTEXT_COMMANDS.has(previous)) return { command: null, reply: null };
+    }
+    if (!command) return { command: null, reply: null };
     const publicText = conversation.publicReply(command);
     let reply;
     if (publicText) {
@@ -545,8 +551,7 @@ const composeReply = async(incoming, identity, context = {}) => {
         reply = await conversation.accountReply(command, identity).catch(() =>
             `Please sign in to check your account:\n${config.frontendUrl}/member/application-status\n\nFor help, contact ${accountFor('membership').supportAddress}.`);
     } else if (command === 'MENU') {
-        reply = `Hello ${firstNameOf(identity.member.fullName)}! You can ask me in normal sentences about your application, membership, payments or events.\n\n`
-            + await statusReply(identity).catch(() => `Check your account:\n${config.frontendUrl}/member/application-status`);
+        reply = `Hello ${firstNameOf(identity.member.fullName)}! Welcome to ACTIV. You can ask me in normal sentences about membership, your application, payments or events. How can I help you?`;
     } else {
         reply = 'I’m here to help. Is this about your membership application, an event booking, a payment or signing in? Tell me a little more so I can guide you.';
     }
@@ -588,8 +593,10 @@ const handleInbound = async(body = {}, options = {}) => {
         return { handled: false, reason: 'no-text', from: incoming.from };
     }
 
+    if (!parseCommand(incoming.text)) return { handled: false, reason: 'no-intent', from: incoming.from };
     const identity = await findMemberByPhone(incoming.from);
     const { command, reply } = await composeReply(incoming, identity);
+    if (!reply) return { handled: false, reason: 'no-intent', from: incoming.from };
 
     // A reply to an inbound message is inside the 24-hour session window by
     // construction, so free-form text is permitted here where an unprompted

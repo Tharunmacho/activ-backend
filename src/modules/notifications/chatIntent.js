@@ -6,9 +6,15 @@ const normalize = text => String(text || '').normalize('NFKC').toLowerCase()
 const parse = text => {
     const clean = normalize(text);
     if (!clean) return null;
+    // The business number also receives ordinary conversations with people.
+    // A commitment or a discussion of publishing the app is not a bot request.
+    const request = /\b(how|what|where|when|can you|could you|please|show|tell|send me|i need|i want|help me|check my)\b/.test(clean);
+    if (/\b(play store|playstore|app store|appstore|deployment|publish the app|publish app)\b/.test(clean)
+        && !/\b(membership|member|event|booking|upi|payment)\b/.test(clean)) return null;
+    if (/\b(i will|we will|i ll|we ll|i am going to|we are going to)\b/.test(clean) && !request) return null;
     if (/\b(events?|bookings?|tickets?|programmes?|programs?|meetings?|conference)\b|நிகழ்ச்சி/.test(clean)) return 'EVENTS';
     if (/\b(forgot|forget|reset|lost|change)\b.*\b(password|pwd)\b|\b(password|pwd)\b.*\b(forgot|forget|reset|lost)\b/.test(clean)) return 'RESET';
-    if (/\b(login|log in|sign in|signin|google|otp)\b/.test(clean)) return 'LOGIN';
+    if (/\b(login|log in|sign in|signin|otp)\b/.test(clean)) return 'LOGIN';
     if (/\b(human|person|officer|admin|support|contact|complaint|helpline|help)\b|உதவி/.test(clean)) return 'HELP';
     if (/\b(not paid|haven t paid|have not paid|unpaid|payment failed|failed payment|money deducted|refund|charged twice|debited)\b/.test(clean)) return 'PAYMENT_ISSUE';
     if (/\b(already paid|i paid|have paid|payment done|payment completed|payment successful|utr|transaction reference)\b/.test(clean) || clean === 'paid') return 'PAID';
@@ -21,7 +27,8 @@ const parse = text => {
     if (/\b(profile|phone number|whatsapp number|change email|update email|edit details|address change)\b/.test(clean)) return 'PROFILE';
     if (/\b(forms?|personal details|business details|student details|aspirant details|declaration|documents?|upload|fill|submit|submission)\b/.test(clean)) return 'FORMS';
     if (/\b(register|registration|join|become a?\s*member|create account|new account)\b/.test(clean)) return 'REGISTER';
-    if (/\b(status|application|membership|member|track|check|review|verify|verification|approved|approval|rejected|pending)\b|உறுப்பினர்/.test(clean)) return 'STATUS';
+    if (/\b(membership|member|application status|my application|track application|application approved|application rejected|application pending)\b|உறுப்பினர்/.test(clean)
+        || /^(status|application|my status|check status|track)$/.test(clean)) return 'STATUS';
     if (/\b(about|what is activ|who are you|association|organisation|organization)\b/.test(clean)) return 'ABOUT';
     if (/^(hi|hello|hey|hai|hii+|good morning|good afternoon|good evening|vanakkam|வணக்கம்)(\s+(sir|madam|activ|team))?$/.test(clean)
         || /^(menu|start|options)$/.test(clean)) return 'MENU';
@@ -35,6 +42,6 @@ const parse = text => {
 const CONTEXT_COMMANDS = new Set(['STATUS', 'REGISTER', 'FORMS', 'PAYMENT', 'PAYMENT_ISSUE', 'PAID', 'UPI', 'RENEW',
     'FEES', 'BENEFITS', 'EVENTS', 'HELP', 'LOGIN', 'RESET', 'PROFILE', 'CARD', 'ABOUT']);
 const resolveFollowup = (command, previous) => command === 'FOLLOWUP'
-    ? (CONTEXT_COMMANDS.has(previous) ? previous : 'STATUS') : command;
+    ? (CONTEXT_COMMANDS.has(previous) ? previous : null) : command;
 
 module.exports = { normalize, parse, resolveFollowup, CONTEXT_COMMANDS };

@@ -50,10 +50,15 @@ const previousCommand = async phone => {
         const normalized = require('./botbee.service').normalizePhoneNumber(phone);
         if (!normalized) return null;
         const Log = require('./notificationLog.model');
-        const row = await Log.findOne({ event: 'BOT_REPLY', channel: 'whatsapp', recipient: normalized, status: 'sent',
+        const rows = await Log.find({ event: 'BOT_REPLY', channel: 'whatsapp', recipient: normalized, status: 'sent',
             mock: { $ne: true }, 'data.command': { $in: [...require('./chatIntent').CONTEXT_COMMANDS] },
-            createdAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
-        }).sort({ createdAt: -1 }).select('data.command').lean();
+            createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) }
+        }).sort({ createdAt: -1 }).limit(5).select('data.command data.inbound').lean();
+        const intent = require('./chatIntent');
+        const row = rows.find(entry => {
+            const parsed = intent.parse(entry.data && entry.data.inbound);
+            return parsed && (intent.CONTEXT_COMMANDS.has(parsed) || parsed === 'FOLLOWUP');
+        });
         return row && row.data && row.data.command || null;
     } catch { return null; }
 };
