@@ -61,7 +61,7 @@ async function main() {
     const payload = envelope([message('first'), message('second', 'hello')]);
     const [a, b] = await Promise.all([post(payload), post(payload)]);
     assert.equal(a.status, 200); assert.equal(b.status, 200);
-    assert.equal(a.headers['x-activ-bot-version'], 'app-aware-v1');
+    assert.equal(a.headers['x-activ-bot-version'], 'conversational-v2');
     assert.equal(sent.length, 2, 'concurrent duplicate deliveries send one reply per actual message');
     assert.match(sent[0].text.body, /\/register/);
     assert.match(sent[1].text.body, /Welcome to ACTIV/);

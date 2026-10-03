@@ -5,13 +5,14 @@ const regionalContacts = require('./regionalContacts.service');
 const notificationService = require('./notification.service');
 const { accountFor } = require('./emailAccounts');
 const { normalizeStatus } = require('../common/applicationStatus');
+const chatIntent = require('./chatIntent');
+const conversation = require('./conversationReply');
 
 /**
  * The inbound half of the WhatsApp bot.
  *
- * A member messages the ACTIV number, BotBee posts that message here, and this
- * decides what to say back. Three commands, and each answers a question a
- * member currently has to open a browser and sign in to answer:
+ * Signed Meta messages and legacy BotBee forwards use the same account-aware
+ * replies. Ordinary sentences select a website journey, including:
  *
  *   STATUS  — where is my application right now?
  *   HELP    — who do I talk to about it?
@@ -63,32 +64,10 @@ const COMMANDS = {
 };
 
 /**
- * Which command a message is, or `null`.
- *
- * Exact match first, then a whole-word containment test. The order matters and
- * the word boundary matters: a member typing "what is my application status"
- * should reach STATUS, but a member typing "I need help with the event" should
- * not silently reach EVENTS because the word appears somewhere in the sentence
- * — the earlier command in the list wins, and HELP is listed before EVENTS for
- * exactly that case.
+ * Which journey an ordinary message requests. Event questions stay in the
+ * booking journey; greetings never override a more specific request.
  */
-const parseCommand = (text) => {
-    const clean = String(text || '').trim().toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!clean) return null;
-
-    // Keep event registration/payment questions in the booking journey.
-    if (/\b(events?|bookings?|tickets?)\b/.test(clean)) return 'EVENTS';
-
-    for (const [command, words] of Object.entries(COMMANDS)) {
-        if (words.includes(clean)) return command;
-    }
-    for (const [command, words] of Object.entries(COMMANDS)) {
-        if (words.some((word) => new RegExp(`\\b${word.replace(/\s+/g, '\\s+')}\\b`).test(clean))) {
-            return command;
-        }
-    }
-    return null;
-};
+const parseCommand = chatIntent.parse;
 
 /**
  * How a status reads to the member whose application it is.
@@ -526,10 +505,20 @@ const extractMessage = (body = {}) => {
  *
  * Separate from sending so account journeys can be checked without messaging.
  */
-const composeReply = async(incoming, identity) => {
-    const command = parseCommand(incoming.text);
+const composeReply = async(incoming, identity, context = {}) => {
+    let command = parseCommand(incoming.text);
+    if (command === 'FOLLOWUP') {
+        const previous = context.previousCommand === undefined
+            ? await conversation.previousCommand(incoming.from) : context.previousCommand;
+        command = chatIntent.resolveFollowup(command, previous);
+    }
+    const publicText = conversation.publicReply(command);
     let reply;
-    if (identity && identity.unavailable) {
+    if (publicText) {
+        reply = publicText;
+    } else if (command === 'FEES' || command === 'BENEFITS') {
+        reply = await conversation.plansReply(command);
+    } else if (identity && identity.unavailable) {
         reply = `We could not check your account right now. Please try again shortly or visit ${config.frontendUrl}.`;
     } else if (identity && identity.ambiguous && command === 'EVENTS') {
         reply = await eventsReply({ phone: incoming.from });
@@ -538,7 +527,9 @@ const composeReply = async(incoming, identity) => {
     } else if (!identity) {
         reply = command === 'EVENTS'
             ? await eventsReply({ phone: incoming.from })
-            : (command && command !== 'MENU' ? notRegisteredReply() : menuReply(false, !command));
+            : command === 'MENU' ? menuReply(false)
+                : command ? notRegisteredReply()
+                    : `Hello! I can help with ACTIV accounts, membership applications, payments and events. Tell me what you need to check.\n\nTo create an account:\n${config.frontendUrl}/register`;
     } else if (command === 'PAID') {
         reply = 'If you paid through the website, check your payment status on your dashboard. '
             + 'For a direct UPI transfer, email the UTR/reference, amount, payment date and your registered phone number to member@activ.org.in. '
@@ -550,10 +541,16 @@ const composeReply = async(incoming, identity) => {
         reply = await helpReply(identity);
     } else if (command === 'EVENTS') {
         reply = await eventsReply({ ...identity, phone: incoming.from });
+    } else if (['FORMS', 'PROFILE', 'CARD', 'PAYMENT_ISSUE'].includes(command)) {
+        reply = await conversation.accountReply(command, identity).catch(() =>
+            `Please sign in to check your account:\n${config.frontendUrl}/member/application-status\n\nFor help, contact ${accountFor('membership').supportAddress}.`);
+    } else if (command === 'MENU') {
+        reply = `Hello ${firstNameOf(identity.member.fullName)}! You can ask me in normal sentences about your application, membership, payments or events.\n\n`
+            + await statusReply(identity).catch(() => `Check your account:\n${config.frontendUrl}/member/application-status`);
     } else {
-        reply = menuReply(true, !command);
+        reply = 'I’m here to help. Is this about your membership application, an event booking, a payment or signing in? Tell me a little more so I can guide you.';
     }
-    return { command: command || 'MENU', reply };
+    return { command: command || 'CLARIFY', reply };
 };
 
 // Keep paragraphs together where possible, while respecting Meta's text limit.
