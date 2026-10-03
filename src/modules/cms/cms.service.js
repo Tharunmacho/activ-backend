@@ -112,6 +112,7 @@ const pickEventDetail = (event = {}) => ({
     showQrOnPage: event.showQrOnPage !== false,
     attachments: Array.isArray(event.attachments) ? event.attachments : [],
     videoUrl: event.videoUrl || '',
+    whatsappChannelUrl: event.whatsappChannelUrl || '',
     /*
      * The home page BANNER, and the words over this event there — the
      * gallery's own banner fields, on an event. See the schema.
@@ -146,9 +147,9 @@ const withJoinLink = (mapped = {}, event = {}, privileged = false) => {
      * and WhatsApp) — like the joining link, only an editor ever reads them
      * back; the public page and API never carry them.
      */
-    const { attachments, videoUrl, ...publicFields } = mapped;
+    const { attachments, videoUrl, whatsappChannelUrl, ...publicFields } = mapped;
     return privileged
-        ? { ...publicFields, onlineUrl: event.onlineUrl || '', attachments: Array.isArray(event.attachments) ? event.attachments : [], videoUrl: event.videoUrl || '' }
+        ? { ...publicFields, onlineUrl: event.onlineUrl || '', attachments: Array.isArray(event.attachments) ? event.attachments : [], videoUrl: event.videoUrl || '', whatsappChannelUrl: event.whatsappChannelUrl || '' }
         : publicFields;
 };
 
@@ -183,6 +184,13 @@ const eventDetailUpdates = (payload = {}) => {
     if (payload.videoUrl !== undefined) {
         const v = String(payload.videoUrl || '').trim();
         update.videoUrl = /^https?:\/\//i.test(v) ? v.slice(0, 500) : '';
+    }
+    if (payload.whatsappChannelUrl !== undefined) {
+        const url = String(payload.whatsappChannelUrl || '').trim();
+        if (url && !/^https:\/\/whatsapp\.com\/channel\/[A-Za-z0-9]+\/?$/.test(url)) {
+            throw new ApiError(400, 'Enter a valid WhatsApp channel link (https://whatsapp.com/channel/...)');
+        }
+        update.whatsappChannelUrl = url;
     }
     if (payload.reminderOffsetsHours !== undefined) {
         update.reminderOffsetsHours = sanitizeReminders(parseArray(payload.reminderOffsetsHours));

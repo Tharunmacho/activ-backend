@@ -50,6 +50,8 @@ const notificationLogSchema = new mongoose.Schema({
              */
             'EVENT_DOCUMENT_CONFIRMED',
             'EVENT_DOCUMENT_REMINDER',
+            'EVENT_CHANNEL_CONFIRMED',
+            'EVENT_CHANNEL_REMINDER',
             /*
              * Emails sent through core/utils/mailer rather than the lifecycle
              * dispatcher. They were never logged at all, so a reset link or a

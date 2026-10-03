@@ -133,7 +133,7 @@ const testRealInfoOnly = () => {
     // actually delivers); the detailed template is the first step after them.
     const steps = chainOf(full.whatsapp);
     check('the approved flexible confirmation is tried first by default',
-        steps[0].template === 'activ_evt_confirmed_v3', steps.map((s) => s.template).join(' > '));
+        steps[0].template === 'activ_evt_confirmed_readable_v1', steps.map((s) => s.template).join(' > '));
     const first = steps.find((s) => !/^activ_evt_/.test(s.template)) || {};
     check('with a full contact + two notes the detailed template is first after them', /event_booking_v4$/.test(first.template), first.template);
     check('its values are the organiser\'s own',

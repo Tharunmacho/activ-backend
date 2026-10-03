@@ -573,8 +573,7 @@ const absoluteMediaUrl = (value) => {
      * on under the same `/uploads/` name, the old host answers 404, and Meta
      * drops a WhatsApp template whose header image it cannot fetch.
      */
-    const i = raw.indexOf('/uploads/');
-    if (i > 0 && /^https?:\/\/[^/]*\.sslip\.io\//i.test(raw)) raw = raw.slice(i);
+    raw = require('../../core/storage/uploadUrls').relativizeUploadUrl(raw);
     if (/^https?:\/\//i.test(raw)) return raw;
     /*
      * The VALIDATED public origin, not BACKEND_URL: on the live deployment
@@ -583,7 +582,7 @@ const absoluteMediaUrl = (value) => {
      * own origin serves `/uploads` (see config/publicUrl.js).
      */
     const publicUrl = require('../../config/publicUrl');
-    const base = publicUrl.isPublic() ? publicUrl.publicOrigin() : '';
+    const base = String(process.env.PUBLIC_MEDIA_URL || (publicUrl.isPublic() ? publicUrl.publicOrigin() : '')).replace(/\/+$/, '');
     if (!base) return '';
     return `${base}${raw.startsWith('/') ? raw : `/${raw}`}`;
 };
@@ -1749,6 +1748,7 @@ class EventBookingService {
                 }))
                 .filter((a) => a.url),
             videoUrl: str(event.videoUrl),
+            whatsappChannelUrl: str(event.whatsappChannelUrl),
             seats,
             seatsLabel: `${seats} seat${seats === 1 ? '' : 's'}`,
             participantNames: (b.participants || []).map((p) => (p && p.name) || '').filter(Boolean),
@@ -1887,7 +1887,8 @@ class EventBookingService {
                         ctx.bookingRef || '-'
                     ];
                     const headerDocument = { link: doc.url, filename: doc.name };
-                    const sent = await whatsappTemplate.sendTemplateMessage(toPhone, template, docParams, 'en', '', { headerDocument })
+                    const sent = await require('./eventDocument').validateDocument(doc.url)
+                        .then(() => whatsappTemplate.sendTemplateMessage(toPhone, template, docParams, 'en', '', { headerDocument }))
                         .catch((e) => ({ success: false, error: e && e.message }));
                     await notificationService.log({
                         user: booking.userId || null,
@@ -1912,6 +1913,24 @@ class EventBookingService {
                     }).catch(() => {});
                 }
             };
+            const sendChannel = async (toPhone, toName) => {
+                if (!toPhone || !ctx.whatsappChannelUrl || !['confirmed', 'reminder'].includes(resolvedKind)) return;
+                const template = require('../../config').botbee.templates.eventChannel;
+                if (!template || template === 'none') return;
+                const params = [ctx.eventTitle, ctx.bookingRef, ctx.whatsappChannelUrl];
+                const sent = await require('../notifications/whatsappTemplate').sendTemplateMessage(toPhone, template, params, 'en', '', { noHeader: true })
+                    .catch((error) => ({ success: false, error: error.message }));
+                await notificationService.log({
+                    user: booking.userId || null, event: `EVENT_CHANNEL_${resolvedKind.toUpperCase()}`,
+                    channel: 'whatsapp', recipient: sent.to || toPhone, templateId: template,
+                    subject: ctx.eventTitle, status: sent.success ? 'sent' : 'failed', mock: !!sent.mock,
+                    providerMessageId: sent.messageId, lastError: sent.error, provider: sent.provider,
+                    deliveryStatus: sent.mock ? undefined : sent.success ? 'accepted' : 'failed',
+                    bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
+                    recipientName: str(toName), data: { params, bookingRef: ctx.bookingRef },
+                }).catch(() => {});
+            };
+            await sendChannel(phone, (booking.bookedBy && booking.bookedBy.name) || '');
             await sendDocuments(phone, (booking.bookedBy && booking.bookedBy.name) || '');
 
             if (!['confirmed', 'reminder', 'cancelled'].includes(resolvedKind)) return;
@@ -1950,6 +1969,7 @@ class EventBookingService {
                     bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
                 }));
                 await sendDocuments(str(person.phone), str(person.name));
+                await sendChannel(str(person.phone), str(person.name));
             }
         })().catch((error) => {
             logger.warn('Event booking message not sent', {
@@ -2044,6 +2064,23 @@ class EventBookingService {
         const channel = row.channel === 'email' ? 'email' : 'whatsapp';
         const notificationService = require('../notifications/notification.service');
 
+        if (/^EVENT_CHANNEL_/.test(event)) {
+            const ctx = await this.messageContext(booking, kind);
+            const template = require('../../config').botbee.templates.eventChannel;
+            if (!ctx.whatsappChannelUrl || !template || template === 'none') return { skipped: true, reason: 'Event channel is not configured' };
+            const params = [ctx.eventTitle, ctx.bookingRef, ctx.whatsappChannelUrl];
+            const outcome = await require('../notifications/whatsappTemplate').sendTemplateMessage(row.recipient, template, params, 'en', '', { noHeader: true });
+            const fresh = await notificationService.log({
+                user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
+                templateId: template, subject: ctx.eventTitle, status: outcome.success ? 'sent' : 'failed',
+                mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error, provider: outcome.provider,
+                deliveryStatus: outcome.mock ? undefined : outcome.success ? 'accepted' : 'failed',
+                bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
+                recipientName: row.recipientName, resendOf: row._id, data: { params, bookingRef: ctx.bookingRef },
+            });
+            return { row: fresh, outcome };
+        }
+
         /* A DOCUMENT: the same file, same template, to the same number. */
         if (/^EVENT_DOCUMENT_/.test(event)) {
             const data = row.data || {};
@@ -2051,8 +2088,9 @@ class EventBookingService {
                 return { skipped: true, reason: 'This document row predates resend support — send the confirmation again instead' };
             }
             const whatsappTemplate = require('../notifications/whatsappTemplate');
-            const outcome = await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '',
-                { headerDocument: data.headerDocument }).catch((e) => ({ success: false, error: e && e.message }));
+            const outcome = await require('./eventDocument').validateDocument(data.headerDocument.link)
+                .then(() => whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '',
+                    { headerDocument: data.headerDocument })).catch((e) => ({ success: false, error: e && e.message }));
             const fresh = await notificationService.log({
                 user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
                 templateId: row.templateId, subject: row.subject, status: outcome.success ? 'sent' : 'failed',

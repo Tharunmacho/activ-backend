@@ -883,7 +883,7 @@ class NotificationService {
             };
         }
 
-        if (/^EVENT_(BOOKING|PARTICIPANT|DOCUMENT)_/.test(String(row.event || ''))) {
+        if (/^EVENT_(BOOKING|PARTICIPANT|DOCUMENT|CHANNEL)_/.test(String(row.event || ''))) {
             const bookingService = require('../events/eventbooking.service');
             const resent = await bookingService.resendLoggedMessage(row.toObject ? row.toObject() : row);
             /*

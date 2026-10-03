@@ -119,7 +119,7 @@ const emailFiles = (ctx = {}) => splitFiles(ctx).attached
 /** One professional note about the attachments, and the video as a single button. */
 const documentsHtml = (ctx = {}) => {
     const { attached, tooBig } = splitFiles(ctx);
-    if (!attached.length && !tooBig.length && !ctx.videoUrl) return '';
+    if (!attached.length && !tooBig.length && !ctx.videoUrl && !ctx.whatsappChannelUrl) return '';
     const names = (list) => list.map((a) => `<strong style="color:#0f172a;">${esc(a.name)}</strong>`).join(', ');
     return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
                    style="background-color:#ffffff; border:1px solid #dbe4fb; border-radius:14px; border-collapse:separate; margin-bottom:16px;">
@@ -130,6 +130,7 @@ const documentsHtml = (ctx = {}) => {
             <a href="${esc(ctx.videoUrl)}" target="_blank"
                style="display:inline-block; background-color:#dc2626; color:#ffffff; text-decoration:none; font-weight:700;
                       padding:10px 18px; border-radius:10px;">▶ Watch the event video</a></div>` : ''}
+          ${ctx.whatsappChannelUrl ? `<div style="padding-top:14px;"><a href="${esc(ctx.whatsappChannelUrl)}" target="_blank" style="color:#15803d;font-weight:700;">Join this event's WhatsApp channel</a></div>` : ''}
         </td></tr></table>`;
 };
 
@@ -561,7 +562,15 @@ const flexNames = (kind, ctx = {}) => {
     const message = FLEX.messageFor(kind, ctx);
     const [image, plain] = FLEX_CONFIG[message] || [];
     if (!image) return {};
-    return { image: flexOn(TPL[image], FLEX.NAMES[message].image), plain: flexOn(TPL[plain], FLEX.NAMES[message].plain) };
+    const names = { image: flexOn(TPL[image], FLEX.NAMES[message].image), plain: flexOn(TPL[plain], FLEX.NAMES[message].plain) };
+    // These readable replacements were approved on this account. Migrate
+    // deployments still explicitly naming the older crowded templates too.
+    if (FLEX.READABLE_NAMES[message]) {
+        for (const variant of ['image', 'plain']) {
+            if (names[variant] === FLEX.NAMES[message][variant]) names[variant] = FLEX.READABLE_NAMES[message][variant];
+        }
+    }
+    return names;
 };
 /** A step keeps the poster header unless it is the no-header variant. */
 const withHeader = (image) => ({ noHeader, ...step }) => (noHeader ? step : { ...step, headerImage: image });
@@ -1197,6 +1206,27 @@ const TEMPLATES = {
  */
 const WHATSAPP_TEMPLATES = [
     {
+        name: 'activ_event_channel_v1', envKey: 'BOTBEE_TPL_EVENT_CHANNEL',
+        category: 'Utility', meta: true,
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Event information for your registration\n\n'
+            + '*Event:* {{1}}\n\n*Booking ID:* {{2}}\n\n'
+            + '*WhatsApp channel for event updates:*\n{{3}}\n\n'
+            + 'Please keep these details with your booking confirmation.',
+        params: ['event', 'booking ID', 'WhatsApp channel link'],
+        samples: ['Entrepreneurship Awareness Programme', 'ACTIVB-TEST-1234', 'https://whatsapp.com/channel/0029VaDdseGKLaHrWNV7ZK1X'],
+    },
+    {
+        name: 'activ_event_document_readable_v2', envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
+        category: 'Utility', meta: true, header: 'DOCUMENT',
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Dear *{{1}}*,\n\nHere is a document attached to your event registration.\n\n'
+            + '*Document:* {{2}}\n\n*Event:* {{3}}\n\n*Schedule:* {{4}}\n\n*Booking ID:* {{5}}\n\n'
+            + 'Please keep this document with your booking confirmation.',
+        params: ['name', 'document name', 'event', 'date & time', 'booking ID'],
+        samples: ['Tharun', 'Agenda.pdf', 'Entrepreneurship Awareness Programme', 'Friday, 23 October 2026, 9:00 AM IST', 'ACTIVB-TEST-1234'],
+    },
+    {
         /* One event DOCUMENT (agenda PDF …) as a real WhatsApp file, sent after the confirmation. */
         name: 'activ_event_document_v1',
         envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
@@ -1618,6 +1648,9 @@ const render = (eventName, ctx = {}) => {
         out.email.afterHtml = passesHtml(ctx.passes) + (out.email.afterHtml || '');
     }
     if (out && WITH_DOCUMENTS.includes(eventName)) {
+        if (out.whatsapp && out.whatsapp.text && ctx.whatsappChannelUrl) {
+            out.whatsapp.text += `\n\n*WhatsApp channel for this event:*\n${ctx.whatsappChannelUrl}`;
+        }
         if (out.email) out.email.fileAttachments = emailFiles(ctx);
         const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];
         if (out.whatsapp && out.whatsapp.text && files.length) {

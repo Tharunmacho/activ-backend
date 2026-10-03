@@ -292,6 +292,7 @@ const stat = { icon: 'users', value: '10', label: 'Members' };
         bannerAlign: 'right', reachEveryone: 'true', targets: JSON.stringify([{ state: 'Kerala' }]),
         attachments: JSON.stringify([{ url: '/uploads/a.pdf', name: 'a.pdf' }]),
         videoUrl: 'https://youtu.be/x', mode: 'offline', onlinePlatform: 'Zoom', onlineUrl: 'https://zoom.us/j/1',
+        whatsappChannelUrl: 'https://whatsapp.com/channel/0029VaDdseGKLaHrWNV7ZK1X',
         venueAddress: 'Addr', venueMapUrl: 'https://maps.app.goo.gl/x', contactName: 'N', contactPhone: '1',
         contactEmail: 'e@x.in', registrationEnabled: 'true', registrationDeadline: '2026-10-09T00:00:00.000Z',
         capacity: 50, registrationFee: 100, memberFee: 50, registrationNote: 'RN', topic: 'Topic',
@@ -303,7 +304,7 @@ const stat = { icon: 'users', value: '10', label: 'Members' };
         'title', 'description', 'startAt', 'endAt', 'venue', 'category', 'bannerUrl', 'bannerAlt', 'bannerFit',
         'bannerPosition', 'status', 'audience', 'channel', 'showOnOnboarding', 'showQrOnPage', 'showOnHome',
         'showInBanner', 'bannerHeadline', 'bannerHighlight', 'bannerSubheadline', 'bannerAlign', 'reachEveryone',
-        'targets', 'attachments', 'videoUrl', 'mode', 'onlinePlatform', 'onlineUrl', 'venueAddress', 'venueMapUrl',
+        'targets', 'attachments', 'videoUrl', 'whatsappChannelUrl', 'mode', 'onlinePlatform', 'onlineUrl', 'venueAddress', 'venueMapUrl',
         'contactName', 'contactPhone', 'contactEmail', 'registrationEnabled', 'registrationDeadline', 'capacity',
         'registrationFee', 'memberFee', 'registrationNote', 'topic', 'language', 'agenda', 'speakers',
     ];

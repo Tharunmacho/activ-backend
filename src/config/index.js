@@ -413,10 +413,11 @@ module.exports = {
                  * numbers: the member got no WhatsApp. Set a key to `none` to
                  * switch one off. `_PLAIN` is the same body with no poster.
                  */
-                bookingFlex: real(process.env.BOTBEE_TPL_BOOKING_FLEX) || 'activ_evt_confirmed_v3',
-                bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN) || 'activ_evt_confirmed_plain_v3',
-                webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX) || 'activ_evt_online_v1',
-                webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN) || 'activ_evt_online_plain_v1',
+                bookingFlex: real(process.env.BOTBEE_TPL_BOOKING_FLEX) || 'activ_evt_confirmed_readable_v1',
+                bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN) || 'activ_evt_confirmed_readable_plain_v1',
+                webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX) || 'activ_evt_online_readable_v1',
+                webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN) || 'activ_evt_online_readable_plain_v1',
+                eventChannel: real(process.env.BOTBEE_TPL_EVENT_CHANNEL) || '',
                 reminderFlex: real(process.env.BOTBEE_TPL_REMINDER_FLEX) || 'activ_evt_reminder_v1',
                 reminderFlexPlain: real(process.env.BOTBEE_TPL_REMINDER_FLEX_PLAIN) || 'activ_evt_reminder_plain_v1',
                 cancelFlex: real(process.env.BOTBEE_TPL_CANCEL_FLEX) || 'activ_evt_cancelled_v1',

@@ -11,7 +11,7 @@ const escapeRe = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '
 
 /** Everything a Super Admin means by "automation": email + WhatsApp, not the bot. */
 const NOT_AUTOMATION = ['BOT_REPLY', 'CUSTOM'];
-const BOOKING_EVENT_RE = /^EVENT_(BOOKING|PARTICIPANT|DOCUMENT)_/;
+const BOOKING_EVENT_RE = /^EVENT_(BOOKING|PARTICIPANT|DOCUMENT|CHANNEL)_/;
 /** Account and donation mail (core/utils/mailer) — their own Super Admin tab. */
 const ACCOUNT_EVENTS = ['PASSWORD_RESET', 'ADMIN_WELCOME', 'DONATION_RECEIPT', 'DONATION_STATEMENT'];
 
