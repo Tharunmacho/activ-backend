@@ -52,7 +52,11 @@ const siteOrigin = (req) => {
 const shareImage = (req, raw) => {
     let url = str(raw);
     if (!url) return '';
-    if (!/^https?:\/\//i.test(url)) url = `${siteOrigin(req)}${url.startsWith('/') ? '' : '/'}${url}`;
+    url = require('../../core/storage/uploadUrls').relativizeUploadUrl(url);
+    if (!/^https?:\/\//i.test(url)) {
+        const origin = require('../../core/storage/publicMedia').publicMediaOrigin();
+        url = `${origin.replace(/\/+$/, '')}${url.startsWith('/') ? '' : '/'}${url}`;
+    }
     try {
         const parsed = new URL(url);
         if (/^\/uploads\/.+\.(jpe?g|png|webp)$/i.test(parsed.pathname) && !parsed.searchParams.has('w')) {
@@ -150,7 +154,7 @@ const page = ({ title, description, image, alt, url, type = 'article', imageMeta
         ['property', 'og:image:height', imageMeta ? String(imageMeta.height) : ''],
         ['property', 'og:image:alt', alt || title],
         ['property', 'og:locale', 'en_IN'],
-        ['property', 'fb:app_id', /^\d+$/.test(str(process.env.META_APP_ID)) ? str(process.env.META_APP_ID) : ''],
+        ['property', 'fb:app_id', /^\d+$/.test(str(process.env.META_APP_ID)) ? str(process.env.META_APP_ID) : '654787660325955'],
         ['name', 'twitter:card', image ? 'summary_large_image' : 'summary'],
         ['name', 'twitter:title', title],
         ['name', 'twitter:description', description],

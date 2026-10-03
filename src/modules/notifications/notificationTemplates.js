@@ -130,7 +130,7 @@ const documentsHtml = (ctx = {}) => {
             <a href="${esc(ctx.videoUrl)}" target="_blank"
                style="display:inline-block; background-color:#dc2626; color:#ffffff; text-decoration:none; font-weight:700;
                       padding:10px 18px; border-radius:10px;">▶ Watch the event video</a></div>` : ''}
-          ${ctx.whatsappChannelUrl ? `<div style="padding-top:14px;"><a href="${esc(ctx.whatsappChannelUrl)}" target="_blank" style="color:#15803d;font-weight:700;">Join this event's WhatsApp channel</a></div>` : ''}
+          ${ctx.whatsappChannelUrl ? `<div style="padding-top:14px;"><a href="${esc(ctx.whatsappChannelUrl)}" target="_blank" style="color:#15803d;font-weight:700;">Join this event's ${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)}</a></div>` : ''}
         </td></tr></table>`;
 };
 
@@ -1649,7 +1649,7 @@ const render = (eventName, ctx = {}) => {
     }
     if (out && WITH_DOCUMENTS.includes(eventName)) {
         if (out.whatsapp && out.whatsapp.text && ctx.whatsappChannelUrl) {
-            out.whatsapp.text += `\n\n*WhatsApp channel for this event:*\n${ctx.whatsappChannelUrl}`;
+            out.whatsapp.text += `\n\n*${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)} for this event:*\n${ctx.whatsappChannelUrl}`;
         }
         if (out.email) out.email.fileAttachments = emailFiles(ctx);
         const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];

@@ -187,8 +187,8 @@ const eventDetailUpdates = (payload = {}) => {
     }
     if (payload.whatsappChannelUrl !== undefined) {
         const url = String(payload.whatsappChannelUrl || '').trim();
-        if (url && !/^https:\/\/whatsapp\.com\/channel\/[A-Za-z0-9]+\/?$/.test(url)) {
-            throw new ApiError(400, 'Enter a valid WhatsApp channel link (https://whatsapp.com/channel/...)');
+        if (!require('../events/whatsappLink').isWhatsAppEventLink(url)) {
+            throw new ApiError(400, 'Enter a valid WhatsApp group link (https://chat.whatsapp.com/...)');
         }
         update.whatsappChannelUrl = url;
     }

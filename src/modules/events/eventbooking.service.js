@@ -582,7 +582,8 @@ const absoluteMediaUrl = (value) => {
      * own origin serves `/uploads` (see config/publicUrl.js).
      */
     const publicUrl = require('../../config/publicUrl');
-    const base = String(process.env.PUBLIC_MEDIA_URL || (publicUrl.isPublic() ? publicUrl.publicOrigin() : '')).replace(/\/+$/, '');
+    const base = publicUrl.isPublic() || process.env.PUBLIC_MEDIA_URL
+        ? require('../../core/storage/publicMedia').publicMediaOrigin() : '';
     if (!base) return '';
     return `${base}${raw.startsWith('/') ? raw : `/${raw}`}`;
 };
@@ -1914,6 +1915,10 @@ class EventBookingService {
                 }
             };
             const sendChannel = async (toPhone, toName) => {
+                // Confirmations already include the link in the approved readable
+                // message. Group links also travel in reminder details, so never
+                // describe a group as a channel or send a duplicate invitation.
+                if (resolvedKind === 'confirmed' || /chat\.whatsapp\.com\//.test(ctx.whatsappChannelUrl || '')) return;
                 if (!toPhone || !ctx.whatsappChannelUrl || !['confirmed', 'reminder'].includes(resolvedKind)) return;
                 const template = require('../../config').botbee.templates.eventChannel;
                 if (!template || template === 'none') return;

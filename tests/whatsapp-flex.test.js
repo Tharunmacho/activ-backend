@@ -305,9 +305,9 @@ const testWiring = () => {
             const [first, second, third] = chain;
             const label = `${eventName}${ctx.isOnline ? ' (online)' : ''}`;
             say(`flags on: ${label} → ${prefix} (image) first, even with no organiser contact or notes`,
-                first.template === (Object.values(flex.NAMES).find((n) => n.image.startsWith(prefix)) || {}).image, chain.map((s) => s.template).join(' > '));
+                first.template === (Object.values({ ...flex.NAMES, ...flex.READABLE_NAMES }).find((n) => n.image.startsWith(prefix)) || {}).image, chain.map((s) => s.template).join(' > '));
             say(`  …with the poster header`, first.headerImage === ctx.posterUrl);
-            say(`  …then ${prefix} (no header)`, second.template === (Object.values(flex.NAMES).find((n) => n.image.startsWith(prefix)) || {}).plain && !second.headerImage);
+            say(`  …then ${prefix} (no header)`, second.template === (Object.values({ ...flex.NAMES, ...flex.READABLE_NAMES }).find((n) => n.image.startsWith(prefix)) || {}).plain && !second.headerImage);
             say('  …then the existing chain as the fallback', !!third && !/^activ_evt_/.test(third.template), third && third.template);
             say('  …every parameter filled', chain.every((s) => (s.params || []).every((p) => String(p).trim())));
             const hits = INVENTED.filter((re) => re.test(first.params.join('\n')));
@@ -315,11 +315,11 @@ const testWiring = () => {
         }
 
         // A deployment that names its own approved template.
-        TPL.bookingFlex = 'activ_evt_confirmed_v3';
+        TPL.bookingFlex = 'custom_confirmation';
         TPL.bookingFlexPlain = 'none';
         const named = chainOf(templates.render('EVENT_BOOKING_CONFIRMED', renderCtx()).whatsapp);
         say('an explicit name is used as given; `none` switches a variant off',
-            named[0].template === 'activ_evt_confirmed_v3' && !named.some((s) => s.template === 'activ_evt_confirmed_plain_v3'),
+            named[0].template === 'custom_confirmation' && !named.some((s) => s.template === 'activ_evt_confirmed_readable_plain_v1'),
             named.map((s) => s.template).join(' > '));
 
         // Participant: their name, the booker named, no payment.
@@ -327,7 +327,7 @@ const testWiring = () => {
         const p = chainOf(templates.render('EVENT_PARTICIPANT_CONFIRMED', renderCtx({ participantName: 'Priya',
             settledVia: 'online', amountLabel: 'Rs 1,500', paymentLabel: 'Paid online' })).whatsapp)[0];
         say('participant message greets the participant and names the booker, no amount',
-            p.params[0] === 'Priya' && /Booked for you by Sampath Kumar/.test(p.params[4]) && !/1,500/.test(p.params.join(' ')),
+            p.params[0] === 'Priya' && /Booked for you by Sampath Kumar/.test(p.params[6]) && !/1,500/.test(p.params.join(' ')),
             JSON.stringify(p.params));
     } finally {
         FLAGS.forEach((k) => { TPL[k] = saved[k]; });

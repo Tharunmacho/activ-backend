@@ -382,6 +382,7 @@ class NotificationService {
                     });
 
                     const sent = await emailService.sendEmail({
+                        category: require('./emailAccounts').categoryForEvent(eventName),
                         to: email,
                         subject: rendered.email.subject,
                         html,
@@ -917,6 +918,7 @@ class NotificationService {
             });
 
             outcome = await emailService.sendEmail({
+                category: require('./emailAccounts').categoryForEvent(row.event),
                 to: row.recipient,
                 subject: row.subject || 'ACTIV notification',
                 html,

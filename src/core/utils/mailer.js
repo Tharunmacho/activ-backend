@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const config = require('../../config');
 const logger = require('../../config/logger');
+const { accountFor } = require('../../modules/notifications/emailAccounts');
 
 /**
  * Outbound mail, used to hand a newly onboarded admin their credentials.
@@ -29,7 +30,7 @@ let initialised = false;
  * different variable name for the password entirely — one sender live, the
  * other silently mocking. One predicate, one set of variables.
  */
-const isConfigured = () => !!(config.email && config.email.isConfigured);
+const isConfigured = () => accountFor('membership').isConfigured;
 
 const getTransporter = () => {
     if (initialised) return transporter;
@@ -41,13 +42,14 @@ const getTransporter = () => {
     }
 
     try {
+        const account = accountFor('membership');
         transporter = nodemailer.createTransport({
-            host: config.email.host,
-            port: config.email.port,
+            host: account.host,
+            port: account.port,
             // 465 is implicit TLS; everything else negotiates STARTTLS. Decided
             // in `config.email` now, so both transports agree.
-            secure: config.email.secure,
-            auth: { user: config.email.user, pass: config.email.password }
+            secure: account.secure,
+            auth: { user: account.user, pass: account.password }
         });
     } catch (err) {
         logger.error('Failed to create the SMTP transport', { error: err && err.message });
@@ -84,7 +86,7 @@ const record = async(log, target, subject, result, messageId) => {
             recipient: target || 'unknown',
             recipientName: log.recipientName,
             subject,
-            sender: config.email.from,
+            sender: accountFor('membership').from,
             status: result.sent ? 'sent' : 'failed',
             // No SMTP on this server: shown as "not sent", not as a failure of
             // this one message.
@@ -121,7 +123,7 @@ const send = async({ to, subject, text, html, log }) => {
 
     try {
         const info = await transport.sendMail({
-            from: config.email.from,
+            from: accountFor('membership').from,
             to: target,
             // The office keeps a copy of everything sent (config.email.archiveCopy).
             ...archiveFields(target),

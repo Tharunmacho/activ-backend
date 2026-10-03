@@ -3,6 +3,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const config = require('../../config');
 const logger = require('../../config/logger');
+const { accountFor } = require('./emailAccounts');
 
 /** The logo, attached inline to every message whose HTML refers to it. */
 const LOGO_CID = 'activ-logo';
@@ -62,7 +63,16 @@ class EmailService {
      * it a host that cannot be reached is re-created on every single send, and
      * the warning is logged once per notification rather than once per boot.
      */
-    getTransporter() {
+    getTransporter(category = 'events') {
+        if (category !== 'events') {
+            const account = accountFor(category);
+            if (!account.isConfigured) return null;
+            if (!this.memberTransporter) this.memberTransporter = nodemailer.createTransport({
+                host: account.host, port: account.port, secure: account.secure,
+                auth: { user: account.user, pass: account.password },
+            });
+            return this.memberTransporter;
+        }
         if (this.initialised) return this.transporter;
         this.initialised = true;
 
@@ -122,13 +132,14 @@ class EmailService {
      * message is decided here and nowhere else, so the two headers cannot
      * disagree about which office is writing.
      */
-    resolveSender(contact = null, overrideReplyTo = null) {
-        const fromAddress = config.email.defaultFrom;
-        const fromName = (contact && contact.fromName) || config.email.fromName;
+    resolveSender(contact = null, overrideReplyTo = null, category = 'events') {
+        const account = accountFor(category);
+        const fromAddress = account.defaultFrom;
+        const fromName = (contact && contact.fromName) || account.fromName;
 
         const replyTo = overrideReplyTo
             || (contact && contact.replyTo)
-            || config.email.supportAddress
+            || account.supportAddress
             || fromAddress;
 
         /*
@@ -136,9 +147,7 @@ class EmailService {
          * deployment says its aliases are verified. Anything else is a message
          * the provider refuses to send or the recipient never sees.
          */
-        const envelopeFrom = config.email.useRegionalFrom && contact && contact.replyTo
-            ? contact.replyTo
-            : fromAddress;
+        const envelopeFrom = fromAddress;
 
         return {
             fromEmail: envelopeFrom,
@@ -157,7 +166,7 @@ class EmailService {
      * forgotten would turn a completed, terminal approval into a 500 the admin
      * retries against a status that refuses retries.
      */
-    async sendEmail({ to, subject, html, text, contact = null, replyTo = null, headers = {}, inlineImages = [], files = [] }) {
+    async sendEmail({ to, subject, html, text, category = 'membership', contact = null, replyTo = null, headers = {}, inlineImages = [], files = [] }) {
         const recipient = String(to || '').trim();
         if (!recipient) {
             return { success: false, error: 'Recipient email address is required' };
@@ -166,8 +175,8 @@ class EmailService {
             return { success: false, error: 'Subject is required' };
         }
 
-        const sender = this.resolveSender(contact, replyTo);
-        const transporter = this.getTransporter();
+        const sender = this.resolveSender(contact, replyTo, category);
+        const transporter = this.getTransporter(category);
 
         const envelope = {
             recipient,

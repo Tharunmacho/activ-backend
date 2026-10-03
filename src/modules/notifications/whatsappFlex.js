@@ -207,6 +207,7 @@ const detailItems = (kind, ctx = {}) => {
     add('contact', contactOf(ctx) ? `Organiser: ${contactOf(ctx)}` : '', 2);
     add('notes', notesOf(ctx) ? `Note: ${notesOf(ctx)}` : '', 3);
     add('video', ctx.videoUrl ? `Event video: ${one(ctx.videoUrl, 300)}` : '', 9);
+    add('whatsapp', ctx.whatsappChannelUrl ? `${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)}: ${ctx.whatsappChannelUrl}` : '', 0);
     return items;
 };
 
@@ -484,7 +485,10 @@ const readableParams = (message, ctx = {}) => {
         one(ctx.timeLabel, 60) || 'Time to be confirmed',
         ctx.isOnline ? whereOf(ctx, { withLink: false }) : one(ctx.venueLabel || ctx.venue, 220) || 'To be announced by the organiser',
         seatsOf(ctx), feeOf(ctx) || 'See payment details in your booking',
-        ref, one(ctx.registrationNo, 40) || ref, link,
+        ref, one(ctx.registrationNo, 40) || ref, [link,
+            ctx.whatsappChannelUrl ? `${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)}: ${ctx.whatsappChannelUrl}` : '',
+            ctx.videoUrl ? `Video: ${ctx.videoUrl}` : '',
+        ].filter(Boolean).join(' | '),
     ], [5, 6, 7, 8, 9]);
     return { params, missing: [], rendered: renderBody(body, params) };
 };

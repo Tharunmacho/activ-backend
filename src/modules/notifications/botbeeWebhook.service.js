@@ -42,13 +42,18 @@ const { normalizeStatus } = require('../common/applicationStatus');
 
 /** Every command the bot understands, and the words that reach it. */
 const COMMANDS = {
+    PAID: ['paid', 'already paid', 'payment done', 'payment completed', 'utr', 'transaction reference'],
+    UPI: ['upi', 'direct payment', 'bank transfer'],
+    RENEW: ['renew', 'renewal', 'renew membership', 'membership renewal'],
+    PAYMENT: ['pay', 'payment', 'pay membership', 'membership payment'],
+    REGISTER: ['register', 'join', 'become member', 'become a member', 'registration'],
+    MENU: ['hi', 'hello', 'hey', 'menu', 'start'],
     STATUS: [
         'status', 'application', 'my status', 'application status', 'track',
-        'membership status', 'my membership status', 'check status', 'membership'
+        'membership status', 'my membership status', 'check status', 'membership', 'member'
     ],
     HELP: [
-        'help', 'contact', 'support', 'admin', 'officer', 'hi', 'hello', 'hey', 'menu', 'start',
-        'help & support', 'support & help', 'become member', 'become a member', 'register'
+        'help', 'contact', 'support', 'admin', 'officer', 'help & support', 'support & help'
     ],
     EVENTS: [
         'events', 'event', 'programme', 'program', 'meetings',
@@ -210,7 +215,7 @@ const findMemberByPhone = async(rawPhone) => {
         logger.warn('WhatsApp bot could not look up an inbound number', {
             error: error && error.message
         });
-        return null;
+        return { unavailable: true };
     }
 };
 
@@ -238,72 +243,12 @@ const notRegisteredReply = () => (
     'We could not find an ACTIV account registered to this WhatsApp number.\n\n'
     + `If you have an account under a different number, please sign in at ${config.frontendUrl} `
     + 'and update your phone number.\n\n'
-    + `To join ACTIV, register at ${config.frontendUrl}`
+    + `To join ACTIV, register at ${config.frontendUrl}/register\n\n`
+    + 'Then complete your personal details, business/student/aspirant details and declaration and submit the application. '
+    + 'After approval, you can pay for your eligible membership plan. Reply MEMBERSHIP to check your next step.'
 );
 
-const statusReply = async({ member, application }) => {
-    const who = firstNameOf(member.fullName);
-
-    if (!application) {
-        return `Hello ${who}, your ACTIV account exists but no membership application has been `
-            + `submitted yet.\n\nComplete your application at ${config.frontendUrl}`;
-    }
-
-    const status = normalizeStatus(application.status);
-    const stage = STAGE_COPY[status] || status || 'In review';
-    const region = [application.block, application.district, application.state]
-        .filter(Boolean).join(', ');
-
-    // The reference is the tail of the id, which is what every other surface in
-    // the product shows a member. Printing the whole ObjectId reads as an error.
-    const reference = String(application._id || '').slice(-6).toUpperCase();
-
-    let reply = `Hello ${who}, here is your ACTIV application:\n\n`
-        + `Status: ${stage}\n`
-        + `Reference: ${reference}`;
-
-    if (region) reply += `\nRegion: ${region}`;
-
-    if (status === 'Rejected' && application.rejectionReason) {
-        reply += `\n\nReason: ${application.rejectionReason}`;
-    }
-
-    // The one status that has something for the member to DO carries the link.
-    if (status === 'Approved') {
-        /*
-         * AN APPLICATION STAYS `Approved` AFTER THE MEMBER PAYS.
-         *
-         * Payment is recorded on the MEMBER (`membershipStatus: 'active'`), not
-         * on the application — `paymentOrder.completePayment` and
-         * `payment.service` both write it there, and the workflow's terminal
-         * `Approved` never moves again. So reading the application alone told
-         * every paid member, for the rest of time, to "complete your payment to
-         * activate your membership" and handed them the checkout link. The
-         * website already knows better: `useMembershipGate` reads
-         * `membershipStatus`, which is why the dashboard says active while this
-         * said unpaid.
-         *
-         * `isPaidStatus` is the shared list, so this cannot drift from the
-         * website's answer the way a second inline check would.
-         */
-        const { isPaidStatus } = require('../common/memberContext');
-
-        if (isPaidStatus(member.membershipStatus)) {
-            reply = `Hello ${who}, your ACTIV membership is ACTIVE.\n\n`
-                + `Reference: ${reference}`
-                + (region ? `\nRegion: ${region}` : '')
-                + `\n\nYour certificates, the member directory and members-only events are all `
-                + `open to you at ${config.frontendUrl}/payment/member-dashboard\n\n`
-                + `Reply EVENTS for what is coming up, or HELP for your regional admin.`;
-            return reply;
-        }
-
-        reply += `\n\nComplete your payment to activate your membership:\n${config.frontendUrl}/payment/membership-plans`;
-    }
-
-    reply += '\n\nReply HELP for your regional admin\'s contact details.';
-    return reply;
-};
+const statusReply = (identity) => require('./membershipBot').reply(identity, 'STATUS');
 
 const helpReply = async({ member, application }) => {
     const who = firstNameOf(member.fullName);
@@ -515,7 +460,11 @@ const menuReply = (identified) => {
         : 'Welcome to ACTIV.';
 
     return `${intro} Reply with one of:\n\n`
-        + 'STATUS — your membership application status\n'
+        + 'MEMBERSHIP — your plan, application status and next step\n'
+        + 'REGISTER — create an account or finish your application\n'
+        + 'PAYMENT — pay after approval\n'
+        + 'RENEW — check renewal eligibility\n'
+        + 'UPI — direct payment instructions for your eligible plan\n'
         + 'HELP — your regional admin\'s contact details\n'
         + 'EVENTS — upcoming events in your region';
 };
@@ -597,7 +546,9 @@ const handleInbound = async(body = {}) => {
     const identity = await findMemberByPhone(incoming.from);
 
     let reply;
-    if (identity && identity.ambiguous && command === 'EVENTS') {
+    if (identity && identity.unavailable) {
+        reply = `We could not check your account right now. Please try again shortly or visit ${config.frontendUrl}.`;
+    } else if (identity && identity.ambiguous && command === 'EVENTS') {
         // The public programme and this number's own bookings belong to no one
         // account, so a number shared by several accounts can still have them.
         reply = await eventsReply({ phone: incoming.from });
@@ -615,8 +566,13 @@ const handleInbound = async(body = {}) => {
         reply = command === 'EVENTS'
             ? await eventsReply({ phone: incoming.from })
             : (command ? notRegisteredReply() : menuReply(false));
-    } else if (command === 'STATUS') {
-        reply = await statusReply(identity);
+    } else if (command === 'PAID') {
+        reply = 'If you paid through the website, check your payment status on your dashboard. '
+            + 'For a direct UPI transfer, email the UTR/reference, amount, payment date and your registered phone number to member@activ.org.in. '
+            + `The office will verify it before activation. Please do not pay twice.\n\n${config.frontendUrl}/member/application-status`;
+    } else if (['STATUS', 'REGISTER', 'PAYMENT', 'RENEW', 'UPI'].includes(command)) {
+        reply = await require('./membershipBot').reply(identity, command).catch(() =>
+            `We could not read your membership details right now. Please try again or sign in at ${config.frontendUrl}/member/application-status. No payment is needed until your status is confirmed.`);
     } else if (command === 'HELP') {
         reply = await helpReply(identity);
     } else if (command === 'EVENTS') {

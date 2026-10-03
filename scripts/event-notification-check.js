@@ -8,12 +8,14 @@ async function main() {
     const Event = require('../src/modules/events/event.model');
     const { ContactSettings, SiteSettings, SINGLETON_KEY } = require('../src/modules/cms/cms.models');
     const events = await Event.find({ title: /Entrepreneurship Awareness|Zero Cost Social|SCST Economic/i })
-        .select('title startAt endAt venue attachments whatsappChannelUrl').lean();
+        .select('title startAt endAt venue bannerUrl attachments whatsappChannelUrl').lean();
     console.log(JSON.stringify(events, null, 2));
     if (process.argv.includes('--send-tests') || process.argv.includes('--send-banner-test')) {
         // Only the two recipients explicitly supplied for this task. No booking is created.
         const service = require('../src/modules/events/eventbooking.service');
-        const event = events.find(e => e.title === 'Entrepreneurship Awareness Programme');
+        const event = process.argv.includes('--send-banner-test')
+            ? events.find(e => /SCST Economic/i.test(e.title) && e.bannerUrl)
+            : events.find(e => e.title === 'Entrepreneurship Awareness Programme');
         if (!event) throw new Error('Test event not found');
         process.env.PUBLIC_MEDIA_URL = 'https://api.activ.org.in';
         const ctx = await service.messageContext({
@@ -30,7 +32,7 @@ async function main() {
         const email = require('../src/modules/notifications/email.service');
         const html = email.buildHtmlTemplate({ ...rendered.email, recipientName: ctx.name });
         const emailResult = process.argv.includes('--send-tests')
-            ? await email.sendEmail({ to: 'tharunroobika@gmail.com', subject: `[TEST] ${rendered.email.subject}`, html }) : null;
+            ? await email.sendEmail({ category: 'events', to: 'tharunroobika@gmail.com', subject: `[TEST] ${rendered.email.subject}`, html }) : null;
         const flex = require('../src/modules/notifications/whatsappFlex');
         const output = flex.readableParams('confirmed', ctx);
         if (output.missing.length) throw new Error(output.missing.join(', '));
