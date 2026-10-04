@@ -66,6 +66,17 @@ class CacheClient {
         }
     }
 
+    // Atomically reserve a one-time key. Concurrent OAuth exchanges must not
+    // both issue a session; a configured Redis failure must fail closed.
+    async claim(key, value, ttl = this.defaultTTL) {
+        const redis = getRedisClient();
+        if (redis) return (await redis.set(key, JSON.stringify(value), { NX: true, EX: ttl })) === 'OK';
+        const cached = this.memoryCache.get(key);
+        if (cached && cached.expiry > Date.now()) return false;
+        this.memoryCache.set(key, { value, expiry: Date.now() + ttl * 1000 });
+        return true;
+    }
+
     async delPattern(pattern) {
         try {
             const redis = getRedisClient();

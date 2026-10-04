@@ -27,6 +27,11 @@ const dataLayout = require('../../config/dataLayout');
  * checkout is a change of who issues the signature — not a redesign.
  */
 const paymentOrderSchema = new mongoose.Schema({
+    planAudience: { type: String, enum: ['business', 'student', 'aspirant', 'platinum', ''], default: '' },
+    purchasePurpose: { type: String, enum: ['membership', 'upgrade'], default: 'membership' },
+    upgradeKind: { type: String, enum: ['business', 'student', 'aspirant', ''], default: '' },
+    upgradeCommencementYear: { type: String, default: '' },
+    previousPlanId: { type: String, default: '' },
     /** Server-generated. The only handle a client ever gets. */
     orderId: {
         type: String,
@@ -136,6 +141,11 @@ const paymentOrderSchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    /** Preserve the request ID after settlement for repeated webhooks. */
+    gatewayRequestId: { type: String, trim: true, default: '', index: true },
+    /** Recoverable claim shared by the webhook, return page and reconcile. */
+    settlementToken: { type: String, default: '' },
+    settlementStartedAt: { type: Date },
     /** 'card' | 'upi' | 'netbanking', as reported at completion. */
     paymentMethod: {
         type: String,
@@ -152,6 +162,11 @@ const paymentOrderSchema = new mongoose.Schema({
 
     paidAt: {
         type: Date
+    },
+    /** Audited office confirmation. Waivers have amount 0, never fake revenue. */
+    manualConfirmation: {
+        by: String, byName: String, at: Date, note: String,
+        expectedAmount: Number, waivedAmount: Number, receiptNumber: String, admission: Boolean
     },
 
     /**

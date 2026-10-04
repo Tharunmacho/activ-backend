@@ -1,17 +1,6 @@
 const logger = require('../../config/logger');
 
-/**
- * The canonical India state → district → block reference.
- *
- * This is *not* the source of truth for routing — the `admins` collection is.
- * This file exists for one narrower job: turning whatever casing or spacing a
- * super admin types into the one canonical spelling, so `"tamil nadu"`,
- * `"Tamil  Nadu"` and `"TAMIL NADU"` can never become three different regions
- * that each need their own admin and each strand applications.
- *
- * Lookups are lazy and memoised: the dataset is ~360KB and parsing it on every
- * request would show up as latency on the registration screen.
- */
+/** National LGD location choices and canonical spellings. Admins determine review coverage. */
 
 let index = null;
 
@@ -40,14 +29,7 @@ const isPlaceholderName = (value) => {
     return !name || name === 'nan' || name === 'null' || name === 'undefined' || name === 'none' || name === '-';
 };
 
-/**
- * Fold one dataset into the index.
- *
- * Called twice: the bundled export first, then the supplement. Later entries
- * merge into an existing state rather than replacing it, so the supplement can
- * add the districts of a state the export already has without discarding the
- * blocks the export knows.
- */
+/** Fold the dated LGD export into the lookup index. */
 const absorb = (states, raw) => {
     (raw && raw.states ? raw.states : []).forEach((stateEntry) => {
         const stateName = String((stateEntry && stateEntry.state) || '').trim();
@@ -91,19 +73,6 @@ const build = () => {
     }
 
     absorb(states, raw);
-
-    // States and districts the bundled export omits outright — Delhi and
-    // Chandigarh are real and were simply absent. Loaded separately so the
-    // 360KB export stays the untouched upstream artefact and the corrections
-    // are reviewable on their own.
-    try {
-        // eslint-disable-next-line global-require
-        absorb(states, require('./data/india-geography.supplement.json'));
-    } catch (err) {
-        logger.warn('India geography supplement could not be loaded; some states will be missing from the reference', {
-            error: err && err.message
-        });
-    }
 
     return states;
 };
@@ -159,6 +128,11 @@ const listBlocks = (state, district) => {
     return [...districtEntry.blocks.values()].sort((a, b) => a.localeCompare(b));
 };
 
+// Urban districts can have no development blocks. Unknown/custom districts
+// keep the existing requirement rather than bypassing location validation.
+const requiresBlock = (state, district) => !canonicalDistrict(state, district)
+    || listBlocks(state, district).length > 0;
+
 /**
  * Normalise a region triple to canonical spellings.
  *
@@ -206,7 +180,9 @@ module.exports = {
     listStates,
     listDistricts,
     listBlocks,
+    requiresBlock,
     normalizeRegion,
+    metadata: () => require('./data/india-geography.json').source,
     // Exposed for tests, which need a deterministic starting point.
     _reset: () => { index = null; }
 };

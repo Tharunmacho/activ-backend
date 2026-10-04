@@ -16,7 +16,15 @@ const previewBytes = async event => {
         if (store.safeRel(name) !== name) throw new Error('Invalid event banner path');
         bytes = await require('../../core/storage/imageVariants').readOriginal(store.UPLOADS_DIR, name, store);
     } else {
-        const response = await fetch(source, { signal: AbortSignal.timeout(8000) });
+        const remote = new URL(source);
+        // Unsplash's original can be several megabytes. Request a banner-sized
+        // source so a public preview does not time out downloading the original.
+        if (remote.hostname === 'images.unsplash.com') {
+            remote.searchParams.set('w', '1600');
+            remote.searchParams.set('fit', 'max');
+            remote.searchParams.set('fm', 'jpg');
+        }
+        const response = await fetch(remote.toString(), { signal: AbortSignal.timeout(20000) });
         if (!response.ok || !/^image\//i.test(response.headers.get('content-type') || '')) throw new Error('Event banner unavailable');
         bytes = Buffer.from(await response.arrayBuffer());
     }

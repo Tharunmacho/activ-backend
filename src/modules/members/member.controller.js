@@ -270,7 +270,7 @@ const updateMember = asyncHandler(async(req, res) => {
             phoneNumber: profileData.phoneNumber || personalInfo.phoneNumber,
             state: profileData.state || personalInfo.state,
             district: profileData.district || personalInfo.district,
-            block: profileData.block || personalInfo.block,
+            block: profileData.block ?? personalInfo.block,
             city: profileData.city || personalInfo.city,
             isInternational: abroad.international,
             place: abroad.international ? (profileData.place || personalInfo.place || member.place || '') : '',
@@ -289,7 +289,7 @@ const updateMember = asyncHandler(async(req, res) => {
             phoneNumber: profileData.phoneNumber || personalFallback.phoneNumber,
             state: profileData.state || personalFallback.state,
             district: profileData.district || personalFallback.district,
-            block: profileData.block || personalFallback.block,
+            block: profileData.block ?? personalFallback.block,
             city: profileData.city || personalFallback.city,
             isInternational: abroad.international,
             place: abroad.international ? (profileData.place || member.place || '') : '',
@@ -339,8 +339,11 @@ const updateMember = asyncHandler(async(req, res) => {
 
     let coreChanged = false;
     Object.entries(coreUpdates).forEach(([key, value]) => {
-        // Only overwrite with a real value — never blank out existing data.
-        if (value !== undefined && value !== null && String(value).trim() !== '') {
+        // A district with no development blocks must be able to clear the old
+        // block when a member moves. Other blank fields keep their saved values.
+        const districtOnly = key === 'block' && value === ''
+            && !require('../regions/geography').requiresBlock(coreUpdates.state || member.state, coreUpdates.district || member.district);
+        if (value !== undefined && value !== null && (String(value).trim() !== '' || districtOnly)) {
             member[key] = value;
             coreChanged = true;
         }
@@ -896,6 +899,24 @@ const getMyProfile = asyncHandler(async(req, res) => {
         isLocked: false
     };
     
+    // Paid-plan identity comes from the receipt, rather than an old application
+    // or a profile edit that has not yet been paid for.
+    const paidOrder = await require('../payment/paymentorder.model').findOne({
+        memberId: member._id, orderType: 'membership', status: 'paid'
+    }).sort({ paidAt: -1, createdAt: -1 }).select('planId planName planAudience upgradeKind orderId gatewayPaymentId amount paymentMethod provider paidAt').lean();
+    profileData.paidMembership = paidOrder ? {
+        planId: paidOrder.planId, planName: paidOrder.planName,
+        kind: paidOrder.upgradeKind || paidOrder.planAudience || '',
+        orderId: paidOrder.orderId, paymentId: paidOrder.gatewayPaymentId,
+        amount: paidOrder.amount, paymentMethod: paidOrder.paymentMethod || paidOrder.provider, paidAt: paidOrder.paidAt
+    } : null;
+    if (paidOrder) {
+        profileData.lastPaymentAmount = paidOrder.amount;
+        profileData.paymentAmount = paidOrder.amount;
+        profileData.paymentMethod = paidOrder.paymentMethod || paidOrder.provider;
+        profileData.lastPaymentDate = paidOrder.paidAt || profileData.lastPaymentDate;
+    }
+
     // Disable caching to ensure fresh data
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');

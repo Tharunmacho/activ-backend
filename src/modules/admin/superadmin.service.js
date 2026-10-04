@@ -1113,8 +1113,8 @@ class SuperAdminService {
                 rows.set(key, {
                     id: key,
                     name: key,
-                    state: context.state || (level === 'state' ? key : parentState),
-                    district: context.district || (level === 'district' ? key : parentDistrict),
+                    state: level === 'state' ? key : context.state || parentState,
+                    district: level === 'state' ? '' : level === 'district' ? key : context.district || parentDistrict,
                     block: level === 'block' ? key : '',
                     applications: 0,
                     pending: 0,

@@ -17,7 +17,7 @@ const publicNode = (node) => ({
 });
 
 const getStates = asyncHandler(async(req, res) => {
-    const tree = await regionService.getTree();
+    const tree = await regionService.getLocationTree();
     res.json(ApiResponse.success({
         states: tree.map(publicNode),
         // A client that gets an empty list needs to know the difference between
@@ -28,7 +28,7 @@ const getStates = asyncHandler(async(req, res) => {
 
 const getDistricts = asyncHandler(async(req, res) => {
     const state = String(req.query.state || '').trim();
-    const tree = await regionService.getTree();
+    const tree = await regionService.getLocationTree();
     const node = tree.find(entry => entry.name.toLowerCase() === state.toLowerCase());
 
     res.json(ApiResponse.success({
@@ -42,7 +42,7 @@ const getBlocks = asyncHandler(async(req, res) => {
     const state = String(req.query.state || '').trim();
     const district = String(req.query.district || '').trim();
 
-    const tree = await regionService.getTree();
+    const tree = await regionService.getLocationTree();
     const stateNode = tree.find(entry => entry.name.toLowerCase() === state.toLowerCase());
     const districtNode = stateNode
         ? stateNode.districts.find(entry => entry.name.toLowerCase() === district.toLowerCase())
@@ -62,20 +62,12 @@ const getBlocks = asyncHandler(async(req, res) => {
  * A mobile client on a slow connection would otherwise make three round-trips
  * while the applicant waits between dropdowns. Names and counts only.
  *
- * `?include=all` widens it from the SELECTABLE regions to every region the
- * admin database knows. The default stays `selectable`, because the callers
- * that predate this parameter are the registration screens, and a dropdown
- * there must not offer an applicant a state they cannot finish choosing
- * through. Content targeting asks the opposite question and passes
- * `include=all` — see `getTree` in the service for why the two differ.
- *
- * Compared against the literal `'all'` rather than treated as a boolean, so a
- * stray `?include=1` or `?include=true` from a client that half-implemented
- * this falls back to the narrower, safer answer.
+ * Both include modes expose the national location directory. Coverage counts
+ * still report actual staffing; they do not restrict member registration.
  */
 const getTree = asyncHandler(async(req, res) => {
     const includeAll = String(req.query.include || '').toLowerCase() === 'all';
-    const tree = await regionService.getTree({ prune: !includeAll });
+    const tree = await regionService.getLocationTree();
 
     res.json(ApiResponse.success({
         // What this listing actually is, echoed back. A client cannot otherwise
@@ -84,6 +76,7 @@ const getTree = asyncHandler(async(req, res) => {
         // parameter.
         include: includeAll ? 'all' : 'selectable',
         coverageAvailable: tree.length > 0,
+        source: geography.metadata(),
         states: tree.map(stateNode => ({
             name: stateNode.name,
             admins: stateNode.admins,

@@ -45,6 +45,12 @@ const adminRepository = require('../admin/admin.repository');
  */
 
 const env = (name) => String(process.env[name] || '').trim();
+const facebookVersion = () => /^v\d+\.\d+$/.test(env('FACEBOOK_GRAPH_VERSION')) ? env('FACEBOOK_GRAPH_VERSION') : 'v26.0';
+const accessToken = (response) => {
+    const token = response && response.data && response.data.access_token;
+    if (typeof token !== 'string' || !token.trim()) throw new Error('The provider did not return an access token.');
+    return token;
+};
 
 const PROVIDERS = {
     google: {
@@ -63,7 +69,7 @@ const PROVIDERS = {
                 grant_type: 'authorization_code'
             }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 });
             const info = await axios.get('https://openidconnect.googleapis.com/v1/userinfo', {
-                headers: { Authorization: `Bearer ${token.data.access_token}` }, timeout: 15000
+                headers: { Authorization: `Bearer ${accessToken(token)}` }, timeout: 15000
             });
             return { email: info.data.email, verified: info.data.email_verified === true, name: info.data.name };
         }
@@ -72,11 +78,11 @@ const PROVIDERS = {
         label: 'Facebook',
         clientId: () => env('FACEBOOK_APP_ID'),
         clientSecret: () => env('FACEBOOK_APP_SECRET'),
-        authorizeUrl: 'https://www.facebook.com/v19.0/dialog/oauth',
+        get authorizeUrl() { return `https://www.facebook.com/${facebookVersion()}/dialog/oauth`; },
         scope: 'email,public_profile',
         extraParams: {},
         async profile(code, redirectUri) {
-            const token = await axios.get('https://graph.facebook.com/v19.0/oauth/access_token', {
+            const token = await axios.get(`https://graph.facebook.com/${facebookVersion()}/oauth/access_token`, {
                 params: {
                     code,
                     client_id: this.clientId(),
@@ -85,10 +91,13 @@ const PROVIDERS = {
                 },
                 timeout: 15000
             });
-            const info = await axios.get('https://graph.facebook.com/v19.0/me', {
-                params: { fields: 'id,name,email', access_token: token.data.access_token }, timeout: 15000
+            const bearer = accessToken(token);
+            const proof = crypto.createHmac('sha256', this.clientSecret()).update(bearer).digest('hex');
+            const info = await axios.get(`https://graph.facebook.com/${facebookVersion()}/me`, {
+                headers: { Authorization: `Bearer ${bearer}` },
+                params: { fields: 'id,name,email', appsecret_proof: proof }, timeout: 15000
             });
-            // Facebook only returns an email the person has confirmed with them.
+            // Without the granted email permission there is no account to match.
             return { email: info.data.email, verified: !!info.data.email, name: info.data.name };
         }
     },
@@ -108,9 +117,11 @@ const PROVIDERS = {
                 grant_type: 'authorization_code'
             }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 });
             const info = await axios.get('https://api.linkedin.com/v2/userinfo', {
-                headers: { Authorization: `Bearer ${token.data.access_token}` }, timeout: 15000
+                headers: { Authorization: `Bearer ${accessToken(token)}` }, timeout: 15000
             });
-            return { email: info.data.email, verified: info.data.email_verified !== false, name: info.data.name };
+            // LinkedIn makes email_verified optional. An absent claim cannot
+            // prove ownership of an existing ACTIV member's login address.
+            return { email: info.data.email, verified: info.data.email_verified === true, name: info.data.name };
         }
     }
 };
@@ -119,7 +130,19 @@ const COOKIE = 'activ_oauth';
 const STATE_TTL_S = 10 * 60;
 const HANDOFF_TTL_S = 60;
 
-const isConfigured = (p) => !!(PROVIDERS[p] && PROVIDERS[p].clientId() && PROVIDERS[p].clientSecret());
+const providerFor = (key) => Object.prototype.hasOwnProperty.call(PROVIDERS, key) ? PROVIDERS[key] : null;
+const isConfigured = (p) => !!(providerFor(p) && providerFor(p).clientId() && providerFor(p).clientSecret());
+
+// Only fixed error categories reach clients/logs. Provider messages can carry
+// credentials, request URLs or other private data, so never forward them.
+const providerFailure = (raw) => {
+    const code = typeof raw === 'object' && raw ? raw.code : raw;
+    if (['invalid_client', 'unauthorized_client', 101, '101'].includes(code)) return 'configuration';
+    if (['redirect_uri_mismatch', 'invalid_redirect_uri', 'redirect_uri_invalid'].includes(code)) return 'callback';
+    if (['invalid_scope', 'unauthorized_scope_error', 'insufficient_scope', 10, '10', 200, '200'].includes(code)) return 'permissions';
+    if (['access_denied', 'user_cancelled_login', 'user_cancelled_authorize'].includes(code)) return 'cancelled';
+    return 'failed';
+};
 
 const redirectBase = () => (env('OAUTH_REDIRECT_BASE') || `${config.backendUrl}/api/v1/auth/oauth`).replace(/\/+$/, '');
 const redirectUriFor = (provider) => `${redirectBase()}/${provider}/callback`;
@@ -128,7 +151,7 @@ const frontendCallback = () => `${String(config.frontendUrl || '').replace(/\/+$
 const readCookie = (req, name) => {
     const raw = String((req.headers && req.headers.cookie) || '');
     const hit = raw.split(';').map((c) => c.trim()).find((c) => c.startsWith(`${name}=`));
-    return hit ? decodeURIComponent(hit.slice(name.length + 1)) : '';
+    try { return hit ? decodeURIComponent(hit.slice(name.length + 1)) : ''; } catch { return ''; }
 };
 
 const isHttps = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').startsWith('https');
@@ -181,7 +204,7 @@ const listProviders = () => Object.keys(PROVIDERS)
 
 /** Where to send the browser to start. Sets the CSRF cookie on `res`. */
 const startUrl = (provider, req, res) => {
-    const p = PROVIDERS[provider];
+    const p = providerFor(provider);
     if (!p) throw ApiError.notFound('Unknown sign-in provider');
     if (!isConfigured(provider)) throw ApiError.badRequest(`${p.label} sign-in is not set up yet.`);
 
@@ -221,7 +244,7 @@ const toFrontend = (fields) => `${frontendCallback()}#${new URLSearchParams(fiel
  * never throws, because an error page on the API host is a dead end for a person.
  */
 const handleCallback = async(provider, req, res) => {
-    const p = PROVIDERS[provider];
+    const p = providerFor(provider);
     res.clearCookie(COOKIE, { path: '/' });
     // '' (the website) unless this server's own state token named the app.
     const client = clientFromState(req && req.query && req.query.state);
@@ -229,7 +252,7 @@ const handleCallback = async(provider, req, res) => {
     if (!p || !isConfigured(provider)) return back({ error: 'unavailable' });
 
     const { code, state, error } = req.query || {};
-    if (error) return back({ error: 'cancelled', provider });
+    if (error) return back({ error: providerFailure(error), provider });
 
     let claims = null;
     try {
@@ -242,16 +265,15 @@ const handleCallback = async(provider, req, res) => {
         logger.warn('OAuth callback with a bad or missing state', { provider });
         return back({ error: 'expired', provider });
     }
+    if (typeof code !== 'string' || !code) return back({ error: 'failed', provider });
 
     let who;
     try {
         who = await p.profile(String(code || ''), redirectUriFor(provider));
     } catch (err) {
-        logger.warn('OAuth code exchange failed', {
-            provider, status: err.response && err.response.status,
-            error: (err.response && JSON.stringify(err.response.data)) || err.message
-        });
-        return back({ error: 'failed', provider });
+        const reason = providerFailure(err.response?.data?.error);
+        logger.warn('OAuth code exchange failed', { provider, status: err.response?.status, reason });
+        return back({ error: reason, provider });
     }
 
     const email = String((who && who.email) || '').toLowerCase().trim();
@@ -278,15 +300,14 @@ const exchange = async(code) => {
     } catch (e) {
         throw ApiError.unauthorized('That sign-in has expired. Please try again.');
     }
-    if (!claims || claims.t !== 'oauth-handoff' || !claims.e) {
+    if (!claims || claims.t !== 'oauth-handoff' || !claims.e || !claims.jti || !providerFor(claims.p)) {
         throw ApiError.unauthorized('That sign-in has expired. Please try again.');
     }
 
     const usedKey = `oauth:used:${claims.jti}`;
-    if (await cacheClient.get(usedKey).catch(() => null)) {
+    if (!await cacheClient.claim(usedKey, 1, HANDOFF_TTL_S * 2)) {
         throw ApiError.unauthorized('That sign-in has already been used. Please try again.');
     }
-    await cacheClient.set(usedKey, 1, HANDOFF_TTL_S * 2).catch(() => null);
 
     const authService = require('./auth.service');
     const member = await MemberAuth.findOne({ email: claims.e }).select('isActive').lean().catch(() => null);
@@ -303,5 +324,5 @@ const exchange = async(code) => {
 
 module.exports = {
     listProviders, startUrl, handleCallback, exchange, isConfigured, PROVIDERS,
-    clientFrom, clientFromState, toClient
+    clientFrom, clientFromState, toClient, providerFailure
 };

@@ -56,6 +56,7 @@ const query = (value) => {
 };
 
 let written = null;
+const writesByModel = new Map();
 const capture = (update) => {
     const set = (update && (update.$set || update)) || {};
     written = { ...set, ...((update && update.$setOnInsert) || {}) };
@@ -68,11 +69,12 @@ const stub = (Model) => {
     Model.find = () => query([]);
     Model.countDocuments = () => query(0);
     Model.exists = () => query(null);
-    Model.findOneAndUpdate = (filter, update) => query(capture(update));
-    Model.findByIdAndUpdate = (id, update) => query(capture(update));
-    Model.updateOne = (filter, update) => query(capture(update));
+    const save = update => { const doc = capture(update); writesByModel.set(Model, doc); return doc; };
+    Model.findOneAndUpdate = (filter, update) => query(save(update));
+    Model.findByIdAndUpdate = (id, update) => query(save(update));
+    Model.updateOne = (filter, update) => query(save(update));
     Model.create = async(doc) => {
-        const saved = capture(doc);
+        const saved = save(doc);
         return { ...saved, toObject: () => saved, toJSON: () => saved };
     };
 };
@@ -119,9 +121,10 @@ const present = (v) => !(v === undefined || v === null || v === ''
  * `fields` are the editor's paths that must survive into the write.
  */
 const verify = async(label, Model, run, fields) => {
-    written = null;
+    written = null; writesByModel.clear();
     try {
         await run();
+        written = writesByModel.get(Model) || written;
     } catch (error) {
         check(`${label}: the write runs`, false, error.message);
         return;
@@ -153,7 +156,7 @@ const stat = { icon: 'users', value: '10', label: 'Members' };
         header: { navLinks: [link], ctaLabel: 'Join', ctaHref: '/join', background: '#ffffff', textColor: '#000000' },
         footer: {
             addressLines: ['a'], linkColumns: [{ heading: 'H', links: [link] }], contactHeading: 'C',
-            phones: ['1'], email: 'e@x.in', socials: [{ icon: 'facebook', href: 'https://f' }],
+            phones: ['1'], email: 'e@x.in', socials: [{ icon: 'facebook', href: 'https://facebook.com/activind' }],
             copyright: '©', legalLinks: [link], note: 'n',
         },
         extraFields: extra, sections,

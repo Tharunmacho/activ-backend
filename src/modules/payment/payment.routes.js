@@ -12,6 +12,9 @@ const { verifyToken, optionalAuth, requireRole } = require('../../core/middlewar
 const logger = require('../../config/logger');
 
 const router = express.Router();
+router.get('/upgrade/plans', verifyToken, requireRole('member'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('../members/membershipUpgrade').eligibility(req.user.userId)));
+}));
 
 /**
  * Is the server standing in for the gateway, or is a real one connected?
@@ -91,6 +94,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
     let bookingContact = null;
     /** The event the booking is for — from the BOOKING, never from the client. */
     let bookingEventId = null;
+    let upgradeFields = {};
 
     if (orderType === 'event_booking') {
         if (!bookingRef) {
@@ -115,6 +119,9 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
             return res.status(400).json(ApiResponse.error('Invalid membership type'));
         }
         membershipPlan = plan;
+        if (req.body.upgrade === true) {
+            upgradeFields = await require('../members/membershipUpgrade').validate(user.userId, membershipType, req.body.commencementYear);
+        }
         calculatedAmount = Number(plan.amount);
         finalPurpose = purpose || `ACTIV Membership - ${membershipType}`;
     }
@@ -183,6 +190,16 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         ));
     }
 
+    if (orderType === 'membership') {
+        if (!profile || profile.isActive === false) {
+            return res.status(403).json(ApiResponse.error('This member account is unavailable.'));
+        }
+        const renewal = require('../members/membershipState').renewalFor(profile);
+        if (req.body.upgrade !== true && renewal.state === 'active' && !renewal.canRenew) {
+            return res.status(400).json(ApiResponse.error('Your membership is active. Use the membership upgrade page to change plans, or renew when your renewal window opens.'));
+        }
+    }
+
     /*
      * THE ORDER ID IS MINTED BEFORE THE REQUEST, so it can travel in the
      * return URL.
@@ -229,11 +246,13 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
     // Create the PaymentOrder to track the Instamojo payment request
     const PaymentOrder = require('./paymentorder.model');
     await PaymentOrder.create({
+        ...upgradeFields,
         orderId,
         memberId: profile ? profile._id : null,
         email: buyerEmail,
         planId: orderType === 'membership' ? planId : undefined,
         planName: orderType === 'membership' ? ((membershipPlan && membershipPlan.name) || planId) : undefined,
+        planAudience: orderType === 'membership' ? membershipPlan.audience : undefined,
         amount: calculatedAmount,
         /*
          * HOW LONG IT RUNS — 'annual' or 'lifetime' — from the plan. This wrote
@@ -254,6 +273,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         bookingRef: bookingRef,
         provider: 'instamojo',
         gatewayPaymentId: result.payment_request_id, // Store the Instamojo request ID here
+        gatewayRequestId: result.payment_request_id,
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
     });
 
@@ -284,7 +304,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
  * calling the signed-in `/order/:id` sent every guest to the login screen
  * with their money gone. For an event booking it verifies the payment with
  * Instamojo itself and confirms the booking (see `resolveReturn`); for a
- * membership it only reports the order's state.
+ * membership it also verifies the gateway and activates the stored member.
  */
 const returnLimiter = require('../../core/middleware/rateLimit')
     .createRateLimiter({ windowMs: 10 * 60 * 1000, max: 200 });
@@ -364,7 +384,9 @@ router.get('/plans', asyncHandler(async(req, res) => {
 router.post('/order', verifyToken, asyncHandler(async(req, res) => {
     const { receipt } = await orderService.createOrder(req.user, {
         planId: req.body && req.body.planId,
-        applicationId: req.body && req.body.applicationId
+        applicationId: req.body && req.body.applicationId,
+        upgrade: req.body && req.body.upgrade === true,
+        commencementYear: req.body && req.body.commencementYear
     });
 
     /*

@@ -134,6 +134,11 @@ class EmailService {
      */
     resolveSender(contact = null, overrideReplyTo = null, category = 'events') {
         const account = accountFor(category);
+        if (category === 'membership') {
+            const office = require('./membershipContact');
+            return { fromEmail: account.defaultFrom, fromName: office.name,
+                fromHeader: `"${office.name}" <${account.defaultFrom}>`, replyTo: office.email };
+        }
         const fromAddress = account.defaultFrom;
         const fromName = (contact && contact.fromName) || account.fromName;
 
@@ -325,7 +330,7 @@ class EmailService {
      */
     buildHtmlTemplate({
         title, recipientName, preheader, bodyHtml, actionButton, contact = null, facts = [],
-        tone = 'info', badge = '', highlight = null, secondaryButton = null, poster = '', afterHtml = ''
+        tone = 'info', badge = '', highlight = null, secondaryButton = null, poster = '', afterHtml = '', category = 'membership'
     }) {
         const esc = (v) => this.escape(v);
         const font = "font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;";
@@ -334,8 +339,9 @@ class EmailService {
         const logoSrc = process.env.EMAIL_LOGO_URL || (EMBEDDED_LOGO ? `cid:${LOGO_CID}` : '');
         const siteUrl = process.env.EMAIL_SITE_URL || 'https://activ.org.in';
         const orgName = 'Adidravidar Confederation of Trade and Industrial Vision';
-        const orgPhone = process.env.EMAIL_ORG_PHONE || '+91 82201 12188';
-        const orgEmail = process.env.EMAIL_ORG_EMAIL || 'enquiry@activ.org.in';
+        const membership = category === 'membership' ? require('./membershipContact') : null;
+        const orgPhone = membership?.phone || process.env.EMAIL_ORG_PHONE || '+91 82201 12188';
+        const orgEmail = membership?.email || process.env.EMAIL_ORG_EMAIL || 'enquiry@activ.org.in';
         // The address is often configured with the organisation's name in front
         // of it; the footer already prints the name, so it is not said twice.
         const orgAddress = String(process.env.EMAIL_ORG_ADDRESS
@@ -459,7 +465,9 @@ class EmailService {
             </td></tr>` : '';
 
         /* ------------------------------------------------------------- help */
-        const office = contact && contact.nearest
+        const office = membership
+            ? `<strong style="color:${INK};">ACTIV Membership support</strong><br />Phone: ${esc(membership.phone)}<br />Email: ${esc(membership.email)}. Reply to this email for help.`
+            : contact && contact.nearest
             ? `Replying to this email reaches your
                <strong style="color:${INK};">${esc([contact.nearest.regionName, contact.nearest.tierLabel].filter(Boolean).join(' '))}
                Admin</strong>${contact.nearest.name ? ` (${esc(contact.nearest.name)})` : ''} directly.

@@ -77,7 +77,9 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     block: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredForDevelopmentDistrict() {
+            return this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
+        },
         trim: true,
         index: true
     },
@@ -308,6 +310,8 @@ const memberDetailsSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, default: '' },
 
     /*
      * PLATINUM — the lifetime tier the Super Admin GRANTS for a fee received
@@ -355,6 +359,12 @@ const memberDetailsSchema = new mongoose.Schema({
 });
 
 // Indexes for efficient queries
+memberDetailsSchema.pre(/^(find|countDocuments)/, function () {
+    this.where({ deletedAt: null });
+});
+memberDetailsSchema.pre('aggregate', function () {
+    this.pipeline().unshift({ $match: { deletedAt: null } });
+});
 memberDetailsSchema.index({ state: 1, district: 1, block: 1 });
 memberDetailsSchema.index({ membershipStatus: 1, membershipType: 1 });
 memberDetailsSchema.index({ createdAt: -1 });

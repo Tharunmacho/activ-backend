@@ -159,6 +159,7 @@ router.get('/:id/attendance/export', requireRole(...ATTENDANCE_VIEWERS), asyncHa
 router.get('/:id/bookings/:ref', requireRole(...BOOKING_VIEWERS), controller.getBooking);
 router.post('/:id/bookings/:ref/record-payment', requireRole(...BOOKING_VIEWERS), controller.recordBookingPayment);
 router.post('/:id/bookings/:ref/cancel', requireRole(...BOOKING_VIEWERS), controller.cancelBooking);
+router.delete('/:id/bookings/:ref', requireRole('super_admin'), controller.deleteBooking);
 
 // Write: super admin only.
 router.post('/', requireRole(...EVENT_MANAGERS), upload.single('banner'), controller.createEvent);

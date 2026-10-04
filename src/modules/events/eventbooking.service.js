@@ -1594,6 +1594,23 @@ class EventBookingService {
      * A waitlist entry can be cancelled too; it holds no seat, but the person
      * on it is still waiting to hear.
      */
+    async deleteBooking(eventId, bookingRef, actor = {}) {
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can delete bookings.');
+        if (!mongoose.isValidObjectId(eventId)) throw ApiError.badRequest('A valid event id is required');
+        const ref = str(bookingRef).toUpperCase();
+        const previous = await EventBooking.findOne({ eventId, bookingRef: ref, deletedAt: null }).lean();
+        if (!previous) throw ApiError.notFound('No booking for this event with that reference');
+        const removed = await EventBooking.findOneAndUpdate({ eventId, bookingRef: ref, deletedAt: null }, { $set: {
+            status: 'cancelled', cancelledAt: new Date(), expiresAt: null,
+            deletedAt: new Date(), deletedBy: String(actor.userId || actor.id || actor._id || '')
+        } }, { new: true });
+        if (!removed) throw ApiError.notFound('Booking already deleted');
+        if (['active', 'waitlist'].includes(previous.status)) {
+            this.announce(removed, 'cancelled', { reason: 'Booking removed by the Super Admin. Contact the event organiser for assistance.' });
+        }
+        return { bookingRef: ref, deleted: true };
+    }
+
     async cancelBooking(bookingRef, { reason } = {}) {
         const ref = str(bookingRef).toUpperCase();
 

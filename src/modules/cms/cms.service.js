@@ -1174,6 +1174,8 @@ class CmsService {
 
     async getSiteSettings() {
         const doc = await readSingleton(SiteSettings, EMPTY_SITE);
+        const contact = await readSingleton(ContactSettings, EMPTY_CONTACT);
+        const socials = contactOffices.socialRows(contactOffices.mergeSocial(contact.social, doc.footer?.socials));
         return {
             ...doc,
             brand: {
@@ -1191,7 +1193,7 @@ class CmsService {
                 // document written before the field existed.
                 hidden: (doc.acrossIndia || {}).hidden || [],
             },
-            footer: { ...EMPTY_SITE.footer, ...(doc.footer || {}) },
+            footer: { ...EMPTY_SITE.footer, ...(doc.footer || {}), socials },
         };
     }
 
@@ -1250,10 +1252,7 @@ class CmsService {
                 contactHeading: str(f.contactHeading),
                 phones: stringList(f.phones),
                 email: str(f.email),
-                socials: asArray(f.socials)
-                    .map(s => ({ icon: icon(s.icon, 'facebook'), href: str(s.href) }))
-                    // A social icon linking nowhere is a dead button.
-                    .filter(s => s.href),
+                socials: contactOffices.socialRows(contactOffices.mergeSocial({}, asArray(f.socials))),
                 copyright: str(f.copyright),
                 legalLinks: cleanLinks(f.legalLinks),
                 note: str(f.note),
@@ -1297,6 +1296,11 @@ class CmsService {
             { $set: { ...set, key: SINGLETON_KEY } },
             { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
         );
+
+        if (payload.footer?.socials !== undefined) {
+            const social = contactOffices.mergeSocial({}, payload.footer.socials);
+            await ContactSettings.findOneAndUpdate({ key: SINGLETON_KEY }, { $set: { social, key: SINGLETON_KEY } }, { upsert: true, runValidators: true });
+        }
 
         await reclaim(previous);
         return this.getSiteSettings();
@@ -1839,6 +1843,7 @@ class CmsService {
 
     async getContactInfo() {
         const doc = await readSingleton(ContactSettings, EMPTY_CONTACT);
+        const site = await readSingleton(SiteSettings, EMPTY_SITE);
         /*
          * Offices, head office first. A document written before offices existed
          * becomes ONE head office built from the legacy fields, so nothing that
@@ -1858,7 +1863,7 @@ class CmsService {
             heroMedia: (doc.heroMedia || []).map(m => ({ ...EMPTY_MEDIA, ...(m || {}) })),
             formCard: { ...EMPTY_CONTACT.formCard, ...(doc.formCard || {}) },
             infoCard: { ...EMPTY_CONTACT.infoCard, ...(doc.infoCard || {}) },
-            social: { ...EMPTY_CONTACT.social, ...contactOffices.cleanSocial(doc.social || {}) },
+            social: { ...EMPTY_CONTACT.social, ...contactOffices.mergeSocial(doc.social, site.footer?.socials) },
             banner: { ...EMPTY_CONTACT.banner, ...(doc.banner || {}) },
             regionsBand: { ...EMPTY_CONTACT.regionsBand, ...(doc.regionsBand || {}) },
             extraFields: doc.extraFields || [],
@@ -1945,7 +1950,7 @@ class CmsService {
             // Every link normalised on the way in: "@activ" or "instagram.com/x"
             // become URLs a browser opens; a javascript: link becomes nothing.
             // Absent means untouched, as with offices.
-            ...(payload.social !== undefined ? { social: contactOffices.cleanSocial(social) } : {}),
+            ...(payload.social !== undefined ? { social: contactOffices.mergeSocial(social) } : {}),
 
             banner: {
                 enabled: boolOf(banner.enabled, true),
@@ -1967,6 +1972,12 @@ class CmsService {
             extraFields: cleanExtraFields(payload.extraFields),
             sections: cleanSections(payload.sections),
         }, user);
+
+        if (payload.social !== undefined) {
+            const social = contactOffices.mergeSocial(payload.social);
+            await SiteSettings.findOneAndUpdate({ key: SINGLETON_KEY }, { $set: { key: SINGLETON_KEY, 'footer.socials': contactOffices.socialRows(social) } }, { upsert: true, runValidators: true });
+            saved.social = social;
+        }
 
         // A hero image removed from the pair above.
         await reclaim(previous);

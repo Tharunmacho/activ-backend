@@ -1,5 +1,6 @@
 const express = require('express');
 const controller = require('./cms.controller');
+const sharePreviews = require('./cms.sharePreviews.controller');
 const upload = require('../../core/middleware/upload');
 const multer = require('multer');
 const path = require('path');
@@ -68,6 +69,7 @@ const contactFormLimiter = createRateLimiter({
  * without a token — including on the login screen itself.
  */
 router.get('/site', publicLimiter, controller.getSiteSettings);
+router.get('/share-previews/resolve', publicLimiter, sharePreviews.resolve);
 
 router.get('/home', publicLimiter, controller.getHome);
 router.get('/about', publicLimiter, controller.getAbout);
@@ -293,6 +295,10 @@ router.delete('/schemes-admin/schemes/:id', ...contentEditors, controller.delete
 router.put('/schemes-admin/settings', ...contentEditors, controller.saveSchemeSettings);
 
 router.use(verifyToken, requireRole('super_admin', 'cms_admin'));
+
+router.get('/share-previews', sharePreviews.editorData);
+router.put('/share-previews', sharePreviews.save);
+router.delete('/share-previews', sharePreviews.reset);
 
 router.get('/overview', controller.getOverview);
 

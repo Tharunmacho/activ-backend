@@ -60,9 +60,12 @@ const chainOf = (wa) => {
     return list;
 };
 
-/* The website's real routes, so no message links to a page that does not exist. */
-const appTsx = fs.readFileSync(path.join(__dirname, '..', '..', 'website', 'src', 'App.tsx'), 'utf8');
-const ROUTES = [...appTsx.matchAll(/path="([^"]+)"/g)].map((m) => m[1]);
+/* Optional companion checkout: backend-only CI can still test message rendering. */
+const websiteRoot = process.env.ACTIV_WEBSITE_ROOT || path.join(__dirname, '..', '..', 'website');
+const appPath = path.join(websiteRoot, 'src', 'App.tsx');
+const appTsx = fs.existsSync(appPath) ? fs.readFileSync(appPath, 'utf8') : null;
+const ROUTES = [...(appTsx || '').matchAll(/path="([^"]+)"/g)].map((m) => m[1]);
+if (appTsx === null) console.log('SKIP: website route checks (set ACTIV_WEBSITE_ROOT to the website checkout to include them).');
 const routeExists = (url) => {
     const p = String(url).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
     return ROUTES.some((r) => new RegExp(`^${r.replace(/:[A-Za-z]+/g, '[^/]+')}$`).test(p));
@@ -84,7 +87,7 @@ const testRendering = () => {
             if (out.email) {
                 check(`${event} (${label}) email has a subject and a body`, !!out.email.subject && !!out.email.bodyHtml);
                 const button = out.email.actionButton && out.email.actionButton.url;
-                check(`${event} (${label}) button goes to a real page`, !button || routeExists(button), button);
+                if (appTsx !== null) check(`${event} (${label}) button goes to a real page`, !button || routeExists(button), button);
             }
 
             const steps = chainOf(out.whatsapp);
@@ -102,8 +105,8 @@ const testRendering = () => {
                 }
             }
             if (label === 'full') {
-                check(`${event} text names the member's office`, !out.whatsapp.text || event === 'ADMIN_NEW_APPLICATION'
-                    || out.whatsapp.text.includes('Guindy Block Admin'));
+                check(`${event} text names membership support`, !out.whatsapp.text || event === 'ADMIN_NEW_APPLICATION'
+                    || (out.whatsapp.text.includes('member@activ.org.in') && out.whatsapp.text.includes('+91 82201 12188')));
             }
         }
     }
@@ -229,11 +232,11 @@ const testContactAndRegion = () => {
 
     // A region office with no phone must not borrow ACTIV's number.
     const noPhone = help({ ...full, officePhone: '' });
-    check('no phone -> ACTIV office as a set', /ACTIV Office/.test(noPhone) && /82201 12188/.test(noPhone)
-        && /enquiry@activ\.org\.in/.test(noPhone) && !/Guindy/.test(noPhone), noPhone);
+    check('no phone -> ACTIV office as a set', /ACTIV Membership/.test(noPhone) && /82201 12188/.test(noPhone)
+        && /member@activ\.org\.in/.test(noPhone) && !/Guindy/.test(noPhone), noPhone);
     const whole = help(full);
-    check('a full contact is printed as given', /Guindy Block Admin/.test(whole) && /90000 00000/.test(whole)
-        && /block\.guindy@/.test(whole), whole);
+    check('regional contact is replaced by membership support', /ACTIV Membership/.test(whole) && /82201 12188/.test(whole)
+        && /member@activ\.org\.in/.test(whole) && !/Guindy|90000 00000|block\.guindy@/.test(whole), whole);
 
     for (const ev of ['ACCOUNT_REGISTERED', 'APPLICATION_SUBMITTED', 'ADMIN_NEW_APPLICATION']) {
         const r = templates.render(ev, full);

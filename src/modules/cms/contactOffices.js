@@ -287,6 +287,40 @@ const cleanSocial = (social = {}) => {
     return out;
 };
 
+// Legacy footer rows sometimes carry the wrong icon. The URL identifies the
+// network before the icon is used as a fallback for a bare handle.
+const socialPlatform = (href, icon = '') => {
+    let host = '';
+    try { host = new URL(/^https?:\/\//i.test(str(href)) ? href : `https://${href}`).hostname.replace(/^www\./, '').toLowerCase(); } catch {}
+    const hosts = { facebook: ['facebook.com', 'fb.com'], instagram: ['instagram.com'], x: ['x.com', 'twitter.com'], linkedin: ['linkedin.com'], youtube: ['youtube.com', 'youtu.be'], whatsapp: ['whatsapp.com', 'wa.me'], telegram: ['t.me', 'telegram.me'], threads: ['threads.com', 'threads.net'] };
+    for (const [p, names] of Object.entries(hosts)) if (names.some(h => host === h || host.endsWith(`.${h}`))) return p;
+    const p = icon === 'twitter' ? 'x' : str(icon).toLowerCase();
+    return SOCIAL_PLATFORMS.includes(p) ? p : null;
+};
+const footerSocial = (rows = []) => {
+    const out = {};
+    for (const row of rows) {
+        const p = socialPlatform(row?.href, row?.icon);
+        const href = p ? socialUrl(p, row?.href) : '';
+        if (href && !out[p]) out[p] = href;
+    }
+    return cleanSocial(out);
+};
+const mergeSocial = (social = {}, rows = []) => {
+    const out = footerSocial(rows), primary = cleanSocial(social);
+    for (const p of SOCIAL_PLATFORMS) if (primary[p]) out[p] = primary[p];
+    // Threads uses the Instagram handle when the association has not specified
+    // a separate one, matching the existing public social buttons.
+    if (!out.threads && out.instagram) {
+        try { const handle = new URL(out.instagram).pathname.split('/').filter(Boolean)[0];
+            if (handle && !['p', 'reel', 'explore', 'stories'].includes(handle)) out.threads = socialUrl('threads', `@${handle}`);
+        } catch {}
+    }
+    return out;
+};
+const socialRows = (social = {}) => SOCIAL_PLATFORMS.filter(p => social[p])
+    .map(p => ({ icon: p === 'x' ? 'twitter' : p, href: social[p] }));
+
 module.exports = {
     normalizeMap,
     resolveMap,
@@ -296,6 +330,7 @@ module.exports = {
     legacyOffice,
     socialUrl,
     cleanSocial,
+    socialPlatform, footerSocial, mergeSocial, socialRows,
     SOCIAL_PLATFORMS,
     isGoogleHost,
 };

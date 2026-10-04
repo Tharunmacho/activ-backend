@@ -1,7 +1,7 @@
 const config = require('../../config');
 const logger = require('../../config/logger');
 const botbeeService = require('./botbee.service');
-const regionalContacts = require('./regionalContacts.service');
+
 const notificationService = require('./notification.service');
 const { accountFor } = require('./emailAccounts');
 const { normalizeStatus } = require('../common/applicationStatus');
@@ -233,46 +233,11 @@ const notRegisteredReply = () => (
 
 const statusReply = (identity) => require('./membershipBot').reply(identity, 'STATUS');
 
-const helpReply = async({ member, application }) => {
-    const who = firstNameOf(member.fullName);
-
-    const contact = application
-        ? await regionalContacts.resolveForApplication(application)
-        : await regionalContacts.resolveForRegion({
-            state: member.state,
-            district: member.district,
-            block: member.block
-        });
-
-    if (!contact || !contact.nearest) {
-        return `Hello ${who}, for help with your ACTIV membership please email `
-            + `${accountFor('membership').supportAddress}`;
-    }
-
-    let reply = `Hello ${who}, here is who handles your ACTIV membership:\n\n`
-        + `${regionalContacts.formatContact(contact.nearest)}`;
-
-    /*
-     * The rungs ABOVE the nearest one, when they are staffed.
-     *
-     * Not decoration: this platform does not require a parent admin to exist, so
-     * a member's nearest contact can legitimately be their State Admin with
-     * nothing beneath. Showing the chain tells them who to escalate to when the
-     * first contact does not answer, which is the actual reason somebody types
-     * HELP a second time.
-     */
-    // District and State only — Block admin mailboxes are placeholders.
-    const others = regionalContacts.CONTACT_TIERS
-        .map((tier) => contact.contacts[tier])
-        .filter((entry) => entry && entry.staffed && entry.tier !== contact.nearest.tier);
-
-    if (others.length) {
-        reply += '\n\n— Also available —\n'
-            + others.map((entry) => regionalContacts.formatContact(entry)).join('\n\n');
-    }
-
-    reply += '\n\nReply STATUS for your application status, or EVENTS for the programme.';
-    return reply;
+const helpReply = async ({ member }) => {
+    const office = require('./membershipContact');
+    return `Hello ${firstNameOf(member.fullName)}, contact ACTIV Membership support:\n\n`
+        + `Phone: ${office.phone}\nEmail: ${office.email}\n\n`
+        + 'Reply STATUS for your application status, or EVENTS for the programme.';
 };
 
 /* ------------------------------------------------------------ EVENTS reply */
@@ -426,7 +391,7 @@ const eventsReply = async({ member = null, phone = '' } = {}) => {
         }
 
         parts.push(`🌐 Full programme: ${config.frontendUrl}/events\n`
-            + (member ? 'Reply *STATUS* for your membership · *HELP* for your regional admin'
+            + (member ? 'Reply *STATUS* for your membership · *HELP* for ACTIV Membership support'
                 : `Not a member yet? Join ACTIV at ${config.frontendUrl}`));
 
         return parts.join('\n\n');
@@ -446,7 +411,7 @@ const menuReply = (identified, unknown = false) => {
         + 'PAYMENT — pay after approval\n'
         + 'RENEW — check renewal eligibility\n'
         + 'UPI — direct payment instructions for your eligible plan\n'
-        + 'HELP — your regional admin\'s contact details\n'
+        + 'HELP — ACTIV Membership support\'s contact details\n'
         + 'EVENTS — upcoming events in your region';
 };
 

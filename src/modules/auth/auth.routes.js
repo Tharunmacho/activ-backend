@@ -94,9 +94,7 @@ router.get('/oauth/:provider/start', authLimiter, (req, res) => {
         // The mobile app (`?client=app`, allowlisted) gets its answer on its own
         // deep link; with no client this branch is skipped and nothing changes.
         const client = oauthService.clientFrom(req.query && req.query.client);
-        if (client) return res.redirect(oauthService.toClient(client, { error: reason }));
-        const base = String(require('../../config').frontendUrl || '').replace(/\/+$/, '');
-        res.redirect(`${base}/auth/social#error=${reason}`);
+        res.redirect(oauthService.toClient(client, { error: reason, provider: String(req.params.provider || '').toLowerCase() }));
     }
 });
 
@@ -107,8 +105,7 @@ router.get('/oauth/:provider/callback', authLimiter, async(req, res) => {
             // Same rule as above: only a state token this server issued for the
             // app sends the failure there; everything else is unchanged.
             const client = oauthService.clientFromState(req.query && req.query.state);
-            if (client) return oauthService.toClient(client, { error: 'failed' });
-            return `${String(require('../../config').frontendUrl || '').replace(/\/+$/, '')}/auth/social#error=failed`;
+            return oauthService.toClient(client, { error: 'failed', provider: String(req.params.provider || '').toLowerCase() });
         });
     res.redirect(target);
 });

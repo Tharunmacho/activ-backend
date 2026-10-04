@@ -216,7 +216,7 @@ class NotificationService {
                  * which may be that same admin — would be a loop; it goes to the
                  * support desk instead.
                  */
-                if (payload.noRegionalContact) contact = null;
+                if (require('./emailAccounts').categoryForEvent(eventName) === 'membership' || payload.noRegionalContact) contact = null;
                 else contact = payload.application
                     ? await regionalContacts.resolveForApplication(payload.application)
                     : await regionalContacts.resolveForRegion({
@@ -366,6 +366,7 @@ class NotificationService {
                     }
 
                     const html = emailService.buildHtmlTemplate({
+                        category: require('./emailAccounts').categoryForEvent(eventName),
                         title: rendered.email.title,
                         recipientName: ctx.name,
                         preheader: rendered.email.preheader,
@@ -909,6 +910,7 @@ class NotificationService {
 
         if (row.channel === 'email') {
             const html = emailService.buildHtmlTemplate({
+                category: require('./emailAccounts').categoryForEvent(row.event),
                 title: row.subject || 'ACTIV',
                 recipientName: data.recipientName || 'Member',
                 preheader: row.subject,
@@ -932,7 +934,7 @@ class NotificationService {
             outcome = row.templateId
                 // The header the template was approved with, when recorded —
                 // Meta refuses an image-header template sent without one.
-                ? await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, data.params || [], 'en', '', {
+                ? await whatsappTemplate.sendTemplateMessage(row.recipient, row.templateId, this.retryParams(row, data), 'en', '', {
                     headerImage: data.headerImage || '',
                     headerDocument: data.headerDocument || undefined
                 })
@@ -953,6 +955,16 @@ class NotificationService {
         await row.save().catch(() => null);
 
         return { row, outcome };
+    }
+
+    retryParams(row, data = {}) {
+        const params = [...(data.params || [])];
+        if (require('./emailAccounts').categoryForEvent(row.event) !== 'membership') return params;
+        const spec = templates.WHATSAPP_TEMPLATES.find(t => t.name === row.templateId);
+        const contact = require('./membershipContact');
+        const values = { 'office name': contact.name, 'office phone': contact.phone, 'office email': contact.email };
+        for (const [index, label] of (spec?.params || []).entries()) if (values[label] && index < params.length) params[index] = values[label];
+        return params;
     }
 }
 

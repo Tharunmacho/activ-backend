@@ -102,6 +102,7 @@ const MODELS = {
 
     // ---- website: the public site's CMS content
     CmsSiteSettings: ['website', 'site_settings', W, 'web_site_settings'],
+    CmsSharePreview: ['website', 'share_previews', W, 'web_share_previews'],
     CmsHome: ['website', 'home', W, 'web_home'],
     CmsAbout: ['website', 'about', W, 'web_about'],
     CmsLeaderMessage: ['website', 'leader_messages', W, 'web_leader_messages'],
@@ -125,6 +126,7 @@ const MODELS = {
 /** Raw (non-Mongoose) collections: key -> [area, collection, legacy db, legacy collection]. */
 const RAW = {
     whatsappInbound: ['notifications', 'whatsapp_inbound', A, 'whatsapp_inbound'],
+    adminIdCounters: ['admins', 'admin_id_counters', A, 'admin_id_counters'],
     membershipCounters: ['members', 'membership_counters', A, 'membership_counters'],
     donationCounters: ['payments', 'donation_counters', A, 'donation_counters'],
     // GridFS: one bucket, two collections. `uploads` is the bucket name.

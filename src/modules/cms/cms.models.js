@@ -1619,7 +1619,7 @@ const ICON_NAMES = [
     // navigation
     'arrow-right', 'external-link', 'home',
     // social — used by the footer
-    'facebook', 'instagram', 'linkedin', 'twitter', 'youtube',
+    'facebook', 'instagram', 'linkedin', 'twitter', 'youtube', 'whatsapp', 'telegram', 'threads',
 ];
 
 /** Kept as its own export: the feature cards were shipped against this name. */
@@ -2633,6 +2633,16 @@ const statePageSchema = new mongoose.Schema({
 /** The menu asks "which states have a page", once, for every visitor. */
 statePageSchema.index({ regionKey: 1, status: 1 });
 
+// One public URL per document. Saving its share card never replaces the page
+// content, the header/footer, or another route's preview.
+const sharePreviewSchema = new mongoose.Schema({
+    path: { type: String, required: true, unique: true, trim: true },
+    title: text(),
+    description: text(),
+    image: media(),
+    updatedBy: editedBy,
+}, { timestamps: true });
+
 module.exports = {
     SINGLETON_KEY,
     ICON_NAMES,
@@ -2640,6 +2650,7 @@ module.exports = {
     LegalDocument: dataLayout.model('CmsLegalDocument', legalDocumentSchema),
     LegalRevision: dataLayout.model('CmsLegalRevision', legalRevisionSchema),
     SiteSettings: dataLayout.model('CmsSiteSettings', siteSettingsSchema),
+    SharePreview: dataLayout.model('CmsSharePreview', sharePreviewSchema),
     Home: dataLayout.model('CmsHome', homeSchema),
     About: dataLayout.model('CmsAbout', aboutSchema),
     EventsSettings: dataLayout.model('CmsEventsSettings', eventsSettingsSchema),

@@ -34,6 +34,11 @@ router.get('/super/admins', requireRole('super_admin'), controller.listAdmins);
  * literal captured by the parameter route in front of it.
  */
 router.get('/super/membership/plans', requireRole('super_admin'), controller.listMembershipPlans);
+const membershipDashboard = require('./adminMembershipDashboard.controller');
+router.get('/super/membership/registrations', requireRole('super_admin'), membershipDashboard.overview);
+router.get('/super/membership/registrations/:memberId', requireRole('super_admin'), membershipDashboard.detail);
+router.post('/super/membership/registrations/:memberId/confirm', requireRole('super_admin'), membershipDashboard.confirm);
+router.delete('/super/membership/registrations/:memberId', requireRole('super_admin'), membershipDashboard.remove);
 router.put('/super/membership/settings', requireRole('super_admin'), controller.updateMembershipSettings);
 router.post('/super/membership/plans/align', requireRole('super_admin'), controller.alignMembershipBands);
 router.post('/super/membership/plans', requireRole('super_admin'), controller.createMembershipPlan);
@@ -46,6 +51,7 @@ router.delete('/super/membership/plans/:key', requireRole('super_admin'), contro
  * bought online. See `members/platinum.service`. `/search` before `/:memberId`.
  */
 const platinum = require('../members/platinum.controller');
+router.post('/super/membership/platinum/accounts', requireRole('super_admin'), require('../auth/auth.validators').registerValidator, platinum.createAccount);
 router.get('/super/membership/platinum', requireRole('super_admin'), platinum.overview);
 router.get('/super/membership/platinum/search', requireRole('super_admin'), platinum.search);
 router.get('/super/membership/platinum/requests', requireRole('super_admin'), platinum.listRequests);

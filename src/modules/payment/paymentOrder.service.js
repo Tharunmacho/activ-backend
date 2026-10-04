@@ -112,7 +112,8 @@ class PaymentOrderService {
      * The caller names a plan; the price comes from the server's table. Nothing
      * in the request influences what is charged.
      */
-    async createOrder(user = {}, { planId, applicationId } = {}) {
+    async createOrder(user = {}, { planId, applicationId, upgrade = false, commencementYear } = {}) {
+        upgrade = upgrade === true;
         const userId = user.userId || user.id || user._id;
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             throw ApiError.unauthorized('No member on this token');
@@ -141,6 +142,7 @@ class PaymentOrderService {
 
         const member = await MemberDetails.findById(userId).catch(() => null);
         if (!member) throw ApiError.notFound('No member profile for this account');
+        const upgradeFields = upgrade === true ? await require('../members/membershipUpgrade').validate(member._id, planId, commencementYear) : {};
 
         /*
          * Refuse only a membership that has genuinely been paid for.
@@ -154,7 +156,7 @@ class PaymentOrderService {
          * members entitled to it.
          */
         /*
-         * RENEWAL IS THE ONE WAY A PAID MEMBER PAYS AGAIN.
+         * A PAID MEMBER MAY RENEW OR BUY A VALIDATED PROFILE UPGRADE.
          *
          * An expired membership (the sweep writes `expired`, and an `active` row
          * past its end date counts too) and one inside its last 30 days may open
@@ -162,7 +164,7 @@ class PaymentOrderService {
          * button so the button is never offered where this would refuse it.
          */
         const renewal = renewalFor(member.toObject ? member.toObject() : member);
-        if (isPaidStatus(member.membershipStatus) && !renewal.canRenew) {
+        if (!upgrade && isPaidStatus(member.membershipStatus) && !renewal.canRenew) {
             // Not merely wasteful: a second activation would overwrite the
             // first payment's record on the member.
             throw ApiError.badRequest(renewal.lifetime
@@ -173,11 +175,13 @@ class PaymentOrderService {
         }
 
         const order = await PaymentOrder.create({
+            ...upgradeFields,
             orderId: 'ord_' + crypto.randomBytes(16).toString('hex'),
             memberId: member._id,
             email: member.email,
             planId: plan.id,
             planName: plan.name,
+            planAudience: plan.audience,
             amount: plan.amount,
             membershipType: plan.membershipType,
             applicationId: applicationId || '',
@@ -425,7 +429,7 @@ class PaymentOrderService {
         const expiresAt = claimed.membershipType === 'lifetime'
             ? null
             : (() => {
-                const base = renewing ? renewalBase(before) : new Date();
+                const base = renewing && claimed.purchasePurpose !== 'upgrade' ? renewalBase(before) : new Date();
                 base.setFullYear(base.getFullYear() + 1);
                 return base;
             })();
@@ -446,6 +450,7 @@ class PaymentOrderService {
                  * single list every reader checks against.
                  */
                 membershipStatus: 'active',
+                ...(claimed.purchasePurpose === 'upgrade' ? { memberType: claimed.upgradeKind, registrationType: claimed.upgradeKind } : {}),
                 membershipType: claimed.membershipType,
                 membershipActivatedAt: (renewing && before && before.membershipActivatedAt) || new Date(),
                 membershipExpiresAt: expiresAt,
@@ -471,6 +476,7 @@ class PaymentOrderService {
          * the mechanism — a member who has just paid and is still shown the
          * unpaid association is the one staleness that cache must not produce.
          */
+        await require('../members/membershipUpgrade').applyPaidProfile(claimed);
         invalidateMemberContext(member._id);
 
         // ACTIV-2026-001: numbered on first activation, kept for life after.
@@ -494,10 +500,17 @@ class PaymentOrderService {
         return {
             orderId: order.orderId,
             status: order.status,
+            orderType: order.orderType || 'membership',
+            provider: order.provider,
+            paymentMethod: order.paymentMethod || order.provider,
+            gatewayPaymentId: order.gatewayPaymentId || '',
             amount: order.amount,
             currency: order.currency,
             planId: order.planId,
             planName: order.planName,
+            membershipType: order.membershipType,
+            planAudience: order.planAudience,
+            receiptNumber: order.manualConfirmation?.receiptNumber || '',
             paidAt: order.paidAt || null,
             expiresAt: order.expiresAt
         };

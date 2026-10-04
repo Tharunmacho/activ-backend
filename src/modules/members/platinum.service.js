@@ -68,8 +68,9 @@ const shape = (m, outcome = '') => ({
     membershipType: m.membershipType || 'none',
     membershipTier: m.membershipTier || 'standard',
     applicationOutcome: outcome,
+    canAdmitManually: m.isActive !== false && m.membershipTier !== 'platinum' && outcome !== STATUS.REJECTED && (!m.role || m.role === 'member' || ['business', 'student', 'aspirant'].includes(m.role)),
     /** Why a grant would be refused, or '' when it can go ahead. */
-    blockedReason: m.membershipTier === 'platinum'
+    blockedReason: m.isActive === false ? 'Unblock this account before admission' : m.membershipTier === 'platinum'
         ? 'Already a Platinum member'
         : (outcome === STATUS.APPROVED || isPaidStatus(m.membershipStatus))
             ? ''
@@ -140,6 +141,24 @@ const requestWatchers = async () => {
 };
 
 class PlatinumService {
+    async createAccount(body, actor = {}) {
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can create a Platinum member account.');
+        const email = String(body.email || '').trim().toLowerCase();
+        const phone = String(body.phoneNumber || '').replace(/\D/g, '').slice(-10);
+        if (!email && phone.length !== 10) throw ApiError.badRequest('Enter the member email or mobile number.');
+        // Prefer the exact login email when older accounts share a contact
+        // number. MongoDB's first $or match must not pick another member.
+        let existing = email ? await MemberDetails.findOne({ email }).lean() : null;
+        if (!existing && phone.length === 10) existing = await MemberDetails.findOne({ phoneNumber: new RegExp(`${phone}$`) }).lean();
+        if (existing) {
+            if (email && existing.email?.toLowerCase() !== email) throw ApiError.conflict('This mobile belongs to a different account. Select that member before recording payment.');
+            const outcome = (await outcomesFor([existing._id])).get(String(existing._id)) || '';
+            return { ...shape(existing, outcome), existingAccount: true };
+        }
+        const result = await require('../auth/auth.service').register(body);
+        // Never return the member's password or sign-in token to the admin UI.
+        return shape(result.memberDetails, '');
+    }
     /* ================================================== member's request */
 
     /** The member's latest request, or null. */
@@ -237,7 +256,7 @@ class PlatinumService {
             requests: rows.map((r) => {
                 const m = memberById.get(String(r.memberId)) || {};
                 const shaped = shape({ ...m, _id: r.memberId, fullName: r.name, email: r.email }, outcomes.get(String(r.memberId)) || '');
-                return { ...shapeRequest(r), blockedReason: shaped.blockedReason, membershipTier: m.membershipTier || 'standard' };
+                return { ...shapeRequest(r), blockedReason: shaped.blockedReason, canAdmitManually: shaped.canAdmitManually, membershipTier: m.membershipTier || 'standard' };
             }),
             counts: { ...byStatus, all: Object.values(byStatus).reduce((a, b) => a + b, 0) }
         };
@@ -375,28 +394,34 @@ class PlatinumService {
     }
 
     async grant(memberId, body = {}, actor = {}) {
-        const member = await MemberDetails.findById(memberId);
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can admit a Platinum member.');
+        let member = await MemberDetails.findById(memberId);
         if (!member) throw ApiError.notFound('Member not found');
+        if (member.isActive === false || (member.role && !['member', 'business', 'student', 'aspirant'].includes(member.role))) throw ApiError.badRequest('Choose an active member account.');
         if (member.membershipTier === 'platinum') throw ApiError.badRequest('This member is already a Platinum member.');
 
         const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
-        if (outcome !== STATUS.APPROVED && !isPaidStatus(member.membershipStatus)) {
+        const manualAdmission = body.manualAdmission === true && outcome !== STATUS.REJECTED && String(body.note || '').trim();
+        if (outcome !== STATUS.APPROVED && !isPaidStatus(member.membershipStatus) && !manualAdmission) {
             throw ApiError.badRequest(shape(member.toObject(), outcome).blockedReason
                 + ' — Platinum is granted to an approved applicant or an existing member.');
         }
 
         const plan = await this.plan();
         const amount = Number(body.amount);
-        if (!Number.isFinite(amount) || amount < 0) throw ApiError.badRequest('Enter the amount received.');
-        const paymentMode = MODES.includes(body.paymentMode) ? body.paymentMode : 'cash';
+        if (!plan.active) throw ApiError.badRequest('The Platinum plan is not active.');
+        if (!Number.isFinite(amount) || amount <= 0) throw ApiError.badRequest('Enter the actual positive amount received.');
+        if (!MODES.includes(body.paymentMode)) throw ApiError.badRequest('Choose a valid payment mode.');
+        const paymentMode = body.paymentMode;
+        if (amount !== plan.price && !String(body.note || '').trim()) throw ApiError.badRequest('Explain why the amount received differs from the Platinum fee.');
         const receivedOn = body.receivedOn ? new Date(body.receivedOn) : new Date();
-        if (Number.isNaN(receivedOn.getTime())) throw ApiError.badRequest('The date received is not a date.');
+        if (Number.isNaN(receivedOn.getTime()) || receivedOn.getTime() > Date.now()) throw ApiError.badRequest('Enter a valid payment date that is not in the future.');
 
         const now = new Date();
         const orderId = `OFF-${now.getFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
         // The receipt, as a paid membership order — see the note at the top.
-        await PaymentOrder.create({
+        const receipt = await PaymentOrder.create({
             orderId,
             memberId: member._id,
             email: member.email,
@@ -410,6 +435,9 @@ class PlatinumService {
             paymentMethod: paymentMode,
             gatewayPaymentId: String(body.receiptNumber || '').trim() || orderId,
             paidAt: receivedOn,
+            manualConfirmation: { by: String(actor.userId || actor.id || ''), byName: actor.email || 'Super Admin', at: now,
+                note: `${manualAdmission ? 'Super Admin office admission. ' : ''}${String(body.note || '').trim()}`.slice(0, 500),
+                expectedAmount: plan.price, waivedAmount: Math.max(0, plan.price - amount), receiptNumber: String(body.receiptNumber || '').trim() },
             expiresAt: now
         });
 
@@ -438,12 +466,23 @@ class PlatinumService {
         member.paymentId = orderId;
         member.paymentAmount = amount;
         member.lastPaymentDate = receivedOn;
-        member.markModified('platinumGrant');
-        await member.save();
+        try {
+            const saved = await MemberDetails.findOneAndUpdate({ _id: member._id, updatedAt: member.updatedAt,
+                membershipTier: { $ne: 'platinum' }, isActive: { $ne: false } }, { $set: {
+                platinumGrant: member.platinumGrant, membershipTier: 'platinum', membershipStatus: 'active',
+                membershipType: 'lifetime', membershipExpiresAt: null, membershipActivatedAt: member.membershipActivatedAt,
+                paymentId: orderId, paymentAmount: amount, lastPaymentDate: receivedOn
+            } }, { new: true });
+            if (!saved) throw ApiError.conflict('Member details changed or Platinum was already granted. Refresh before trying again.');
+            member = saved;
+        } catch (error) {
+            await PaymentOrder.updateOne({ _id: receipt._id }, { $set: { status: 'cancelled' } });
+            throw error;
+        }
         invalidateMemberContext(member._id);
 
         // ACTIV-2026-001: numbered on first activation, kept for life after.
-        const assignedNumber = await require('./memberNumber').assignMembershipNumber(member);
+        const assignedNumber = await require('./memberNumber').assignMembershipNumber(member).catch(() => '');
         if (assignedNumber) member.membershipNumber = assignedNumber;
 
         try {

@@ -73,9 +73,9 @@ const reply = async (identity, command = 'STATUS') => {
         + `Complete your personal details, business/student/aspirant details and declaration, then submit for review:\n${base()}/member/forms/personal`;
     if (outcome === 'Rejected') return `Hello ${name}, your application needs attention.\n\n`
         + (application.rejectionReason ? `Reason: ${application.rejectionReason}\n\n` : '')
-        + `Review it here:\n${base()}/member/application-status\n\nReply HELP to contact your regional office before paying.`;
+        + `Review it here:\n${base()}/member/application-status\n\nReply HELP to contact ACTIV Membership support before paying.`;
     if (outcome !== 'Approved') return `Hello ${name}, your application is with the administrators for review. No payment is due yet.\n\n`
-        + `Track your application:\n${base()}/member/application-status\n\nReply HELP for your regional office.`;
+        + `Track your application:\n${base()}/member/application-status\n\nReply HELP for ACTIV Membership support.`;
     return `Hello ${name}, your application is approved. Complete your membership payment to activate it.\n\n`
         + await paymentGuidance(identity, command === 'UPI');
 };

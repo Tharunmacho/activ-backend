@@ -148,7 +148,7 @@ const ROW_PROJECTION = {
     _id: 1, role: 1, adminType: 1, fullName: 1, name: 1, email: 1,
     phoneNumber: 1, phone: 1, state: 1, district: 1, block: 1, meta: 1,
     isActive: 1, active: 1, createdVia: 1, mustResetPassword: 1,
-    parentAdminId: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
+    parentAdminId: 1, notificationEmail: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
 };
 
 const escapeRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -237,24 +237,23 @@ const collectionForRole = (role) => LEGACY_COLLECTIONS[normalizeRole(role)] || '
  * would otherwise both compute the same number and the second insert would
  * fail on the unique index.
  */
-const nextAdminId = async(role) => {
+const allocateAdminIds = async (role, size = 1) => {
     await adminsDb.ensureReady();
     const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA', super_admin: 'SUPER', cms_admin: 'CMS', events_admin: 'EVT', attendance_admin: 'ATT' }[normalizeRole(role)] || 'AD';
     const name = collectionForRole(role);
     const handle = name ? legacyCol(name) : null;
-    if (!handle) return `${prefix}${Date.now().toString(36).toUpperCase()}`;
-
-    const count = await handle.estimatedDocumentCount().catch(() => 0);
-
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-        const candidate = `${prefix}${String(count + 1 + attempt).padStart(4, '0')}`;
-        // eslint-disable-next-line no-await-in-loop
-        const taken = await handle.findOne({ adminId: candidate }).catch(() => null);
-        if (!taken) return candidate;
-    }
-
-    return `${prefix}${Date.now().toString(36).toUpperCase()}`;
+    if (!handle) throw new Error('Admin collection is unavailable');
+    const stored = await handle.find({}, { projection: { adminId: 1 } }).toArray();
+    const rx = new RegExp(`^${prefix}(\\d+)$`);
+    const maximum = stored.reduce((n, row) => Math.max(n, Number(rx.exec(String(row.adminId || ''))?.[1] || 0)), 0);
+    const counters = require('../../config/dataLayout').collection('adminIdCounters');
+    await counters.updateOne({ _id: normalizeRole(role) }, { $max: { seq: maximum } }, { upsert: true });
+    const result = await counters.findOneAndUpdate({ _id: normalizeRole(role) }, { $inc: { seq: size } }, { returnDocument: 'after' });
+    const end = Number((result?.value || result)?.seq);
+    if (!Number.isSafeInteger(end) || end < size) throw new Error('Could not allocate admin IDs');
+    return Array.from({ length: size }, (_, i) => `${prefix}${String(end - size + 1 + i).padStart(4, '0')}`);
 };
+const nextAdminId = async role => (await allocateAdminIds(role))[0];
 
 /** Normalise the many spellings a role has been stored under. */
 const normalizeRole = (value) => {
@@ -286,6 +285,7 @@ const toAdminRow = (doc = {}, source = PRIMARY_COLLECTION) => {
         source,
         fullName: doc.fullName || doc.name || '',
         email: String(doc.email || '').toLowerCase(),
+        notificationEmail: String(doc.notificationEmail || '').toLowerCase().trim(),
         phoneNumber: doc.phoneNumber || doc.phone || '',
         role,
         roleLabel: ROLE_LABELS[role] || 'Admin',
@@ -711,6 +711,7 @@ const toTierDocument = (doc = {}, adminId = '') => {
     return {
         adminId,
         email: String(doc.email || '').toLowerCase().trim(),
+        notificationEmail: String(doc.notificationEmail || '').toLowerCase().trim(),
         passwordHash: doc.passwordHash || doc.password || '',
         fullName: String(doc.fullName || '').trim(),
         phoneNumber: String(doc.phoneNumber || doc.phone || '').trim(),
@@ -787,14 +788,10 @@ const insertMany = async(docs) => {
             throw new Error(`Cannot create ${role} accounts: the adminsdb connection is unavailable.`);
         }
 
-        // Sequential ids are allocated once per group rather than per row, so a
-        // 400-row import is one count query instead of 400.
-        // eslint-disable-next-line no-await-in-loop
-        const base = await handle.estimatedDocumentCount().catch(() => 0);
-        const prefix = { block_admin: 'BA', district_admin: 'DA', state_admin: 'SA' }[role] || 'AD';
-
-        const documents = group.map((doc, i) =>
-            toTierDocument(doc, `${prefix}${String(base + 1 + i).padStart(4, '0')}`));
+        // Reserve IDs atomically above the highest historical suffix. Counts
+        // can reuse existing IDs after removals or older bulk imports.
+        const allocated = await allocateAdminIds(role, group.length);
+        const documents = group.map((doc, i) => toTierDocument(doc, allocated[i]));
 
         // eslint-disable-next-line no-await-in-loop
         const result = await handle.insertMany(documents, { ordered: false });
@@ -902,6 +899,25 @@ const updateById = async(hit, update) => {
     invalidate();
 };
 
+/** Rename an explicitly planned import without touching credentials or regions. */
+const renameImportedLogins = async(changes) => {
+    await adminsDb.ensureReady();
+    const all = sources();
+    let changed = 0;
+    try {
+        for (const source of all) {
+            const rows = changes.filter(row => row.source === source.key);
+            if (!rows.length) continue;
+            const result = await source.handle.bulkWrite(rows.map(row => ({ updateOne: {
+                filter: { _id: new mongoose.Types.ObjectId(row.id), email: row.previousEmail },
+                update: { $set: { email: row.email, updatedAt: new Date() } },
+            } })), { ordered: true });
+            changed += result.modifiedCount;
+        }
+    } finally { invalidate(); }
+    return changed;
+};
+
 /**
  * Remove an account from every collection in both databases that holds its email.
  *
@@ -951,7 +967,9 @@ module.exports = {
     emailExists,
     insert,
     insertMany,
+    allocateAdminIds,
     updateById,
+    renameImportedLogins,
     translateUpdate,
     alternateSpellings,
     deleteEverywhere,

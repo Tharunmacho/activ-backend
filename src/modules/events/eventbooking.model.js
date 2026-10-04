@@ -325,12 +325,22 @@ const eventBookingSchema = new mongoose.Schema({
      * endpoint that writes rows needs something to look at when it is abused,
      * and an IP with no user agent beside it identifies very little.
      */
-    source: { type: String, trim: true, default: 'web' }
+    source: { type: String, trim: true, default: 'web' },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, default: '' }
 }, {
     timestamps: true
 });
 
 /** The organiser's list: this event's bookings, newest first. */
+// Deleted bookings retain their receipts for audit, but must never hold seats,
+// return to the door list, or be revived by a late payment/retry.
+eventBookingSchema.pre(/^(find|countDocuments)/, function () {
+    this.where({ deletedAt: null });
+});
+eventBookingSchema.pre('aggregate', function () {
+    this.pipeline().unshift({ $match: { deletedAt: null } });
+});
 eventBookingSchema.index({ eventId: 1, createdAt: -1 });
 
 /** Seat counting, which filters on all three of these together. */

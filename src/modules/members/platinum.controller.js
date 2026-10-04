@@ -8,6 +8,9 @@ const overview = asyncHandler(async (req, res) => {
     const [plan, members] = await Promise.all([platinumService.plan(), platinumService.listMembers()]);
     res.json(ApiResponse.success({ plan, members, modes: platinumService.MODES || [] }));
 });
+const createAccount = asyncHandler(async (req, res) => {
+    res.status(201).json(ApiResponse.success(await platinumService.createAccount(req.body, req.user), 'Member account created. Record the payment to admit them.'));
+});
 
 const search = asyncHandler(async (req, res) => {
     res.json(ApiResponse.success(await platinumService.search(req.query.q)));
@@ -50,4 +53,4 @@ const createRequest = asyncHandler(async (req, res) => {
         result.existing ? 'We already have your request' : 'Request received — the ACTIV office will contact you'));
 });
 
-module.exports = { overview, search, grant, revoke, listRequests, requestDetail, updateRequest, myRequest, createRequest };
+module.exports = { overview, createAccount, search, grant, revoke, listRequests, requestDetail, updateRequest, myRequest, createRequest };

@@ -168,6 +168,10 @@ const cancelBooking = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data, 'Booking cancelled'));
 });
 
+const deleteBooking = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await bookingService.deleteBooking(req.params.id, req.params.ref, req.user), 'Booking deleted; payment records retained'));
+});
+
 /* ==================================================== the organiser's overview */
 
 /**
@@ -295,6 +299,7 @@ module.exports = {
     getBooking,
     recordBookingPayment,
     cancelBooking,
+    deleteBooking,
     bookingOverview,
     listBookingPeople,
     getBookingPerson,

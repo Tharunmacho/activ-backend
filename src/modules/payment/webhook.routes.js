@@ -16,7 +16,7 @@ router.post('/instamojo', asyncHandler(async(req, res) => {
 
     logger.info('Received Instamojo webhook', {
         paymentId: webhookData.payment_id,
-        status: webhookData.payment_status,
+        status: webhookData.status || webhookData.payment_status,
         buyer: webhookData.buyer
     });
 
@@ -31,8 +31,9 @@ router.post('/instamojo', asyncHandler(async(req, res) => {
             paymentId: webhookData.payment_id
         });
 
-        // Still return 200 to prevent retry storms
-        res.status(200).json(ApiResponse.error('Webhook processing failed', 500));
+        // Reject invalid signatures and let Instamojo retry temporary failures.
+        const status = [400, 401, 404].includes(error.statusCode) ? error.statusCode : 500;
+        res.status(status).json(ApiResponse.error('Webhook processing failed', status));
     }
 }));
 

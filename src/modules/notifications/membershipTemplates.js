@@ -32,21 +32,9 @@ module.exports = (h) => {
     /** "Dear Tharun" — the full name when we have it, first name otherwise. */
     const greet = (ctx = {}) => oneLine(ctx.name || ctx.firstName, 60) || 'Member';
 
-    /**
-     * The office a member can reach — name, phone and email of ONE contact.
-     *
-     * All three come from the same place or none do. `notification.service`
-     * passes the first regional admin (block, then district, then state) who has
-     * a phone on file, with that admin's own email. When no tier has one, the
-     * member gets ACTIV's office as a matching set. Filling the blanks one field
-     * at a time is what printed "Guindy Block Admin" beside ACTIV's own number —
-     * a name and a phone that belonged to two different people.
-     */
-    const ACTIV_OFFICE = ['ACTIV Office', '+91 82201 12188', 'enquiry@activ.org.in'];
-    const office = (ctx = {}) => {
-        const trio = [oneLine(ctx.officeName, 80), oneLine(ctx.officePhone, 40), oneLine(ctx.officeEmail, 120)];
-        return trio.every(Boolean) ? trio : ACTIV_OFFICE.slice();
-    };
+    // Every membership message uses the central office, including regional reviews.
+    const contact = require('./membershipContact');
+    const office = () => [contact.name, contact.phone, contact.email];
 
     const regionOf = (ctx = {}) => ctx.regionLabel
         || [ctx.block, ctx.district, ctx.state].filter(Boolean).join(', ');
@@ -209,7 +197,7 @@ module.exports = (h) => {
     /** The "need help" block of a WhatsApp text, the same on every message. */
     const helpText = (ctx) => {
         const [n, p, e] = office(ctx);
-        return `📞 *Need help? Contact your regional office*\n👤 *Name:* ${n}\n📱 *Phone:* ${p}\n📧 *Email:* ${e}`;
+        return `📞 *Need help? Contact ACTIV Membership support*\n👤 *Name:* ${n}\n📱 *Phone:* ${p}\n📧 *Email:* ${e}`;
     };
 
     const BENEFITS = [
@@ -225,6 +213,9 @@ module.exports = (h) => {
         pay: appUrl('/payment/membership-plans'),
         dashboard: appUrl('/payment/member-dashboard'),
         certificate: appUrl('/member/certificate/membership'),
+        receipt: appUrl('/member/payment-success?view=receipt'),
+        taxCertificate: appUrl('/member/certificate/tax-exemption'),
+        documents: appUrl('/member/documents'),
         plan: appUrl('/member/plan')
     };
 
@@ -391,7 +382,7 @@ module.exports = (h) => {
                     title: 'Application not approved',
                     message: ctx.reason
                         ? `Your membership application was not approved. Reason: ${ctx.reason}`
-                        : 'Your membership application was not approved. Contact your regional office for details.',
+                        : 'Your membership application was not approved. Contact ACTIV Membership support for details.',
                     type: 'error'
                 },
                 email: {
@@ -399,15 +390,15 @@ module.exports = (h) => {
                     title: 'Your application was not approved',
                     badge: 'Decision made',
                     tone: 'danger',
-                    preheader: ctx.reason ? oneLine(ctx.reason, 90) : 'Contact your regional office for details.',
+                    preheader: ctx.reason ? oneLine(ctx.reason, 90) : 'Contact ACTIV Membership support for details.',
                     bodyHtml: `<p style="margin:0 0 12px 0;">Thank you for applying to ACTIV. After review, the
                         <strong>${esc(ctx.decidedBy || 'State Admin')}</strong> was not able to approve your membership
                         application at this time.</p>
                         ${ctx.reason ? `<p style="margin:0 0 6px 0;"><strong>Reason given</strong></p>
                         <p style="margin:0 0 12px 0; padding:12px 14px; background-color:#fef2f2; border-left:3px solid #dc2626;
                                   color:#7f1d1d; border-radius:0 8px 8px 0;">${ctx.reasonHtml || ''}</p>` : ''}
-                        <p style="margin:0;">If something can be corrected, reply to this email — it reaches your regional
-                        office, who can tell you what to do next.</p>`,
+                        <p style="margin:0;">If something can be corrected, reply to this email — it reaches ACTIV Membership
+                        support, who can tell you what to do next.</p>`,
                     facts: [
                         { label: 'Reference', value: ctx.reference },
                         { label: 'Decided by', value: ctx.decidedBy },
@@ -423,13 +414,13 @@ module.exports = (h) => {
                             template: TPL.status,
                             params: [ctx.firstName || 'Member', 'not approved',
                                 ctx.reason ? `the reason given is: ${clause(ctx.reason, 170)}`
-                                    : 'please contact your regional admin for the details']
+                                    : 'please contact ACTIV Membership support for the details']
                         }),
                     text: '*Update on your ACTIV application*\n\n'
                         + `Dear ${greet(ctx)},\nAfter review, your membership application was not approved at this time.\n\n`
                         + (ctx.reference ? `🔖 Reference: ${ctx.reference}` : '')
                         + (ctx.reason ? `\n📝 Reason: ${oneLine(ctx.reason, 400)}` : '')
-                        + `\n\nIf something can be corrected, your regional office can guide you.\n\n${helpText(ctx)}`
+                        + `\n\nIf something can be corrected, ACTIV Membership support can guide you.\n\n${helpText(ctx)}`
                         + `\n\n— ${ORG_SIGNATURE}`
                 }
             };
@@ -574,6 +565,7 @@ module.exports = (h) => {
                         { label: 'Plan', value: ctx.planName || ctx.membershipType },
                         { label: 'Amount paid', value: ctx.amountLabel },
                         { label: 'Payment reference', value: ctx.orderId },
+                        { label: 'Payment mode', value: ctx.paymentMode ? ctx.paymentMode.replace(/_/g, ' ') : '' },
                         { label: 'Active from', value: ctx.activatedLabel },
                         { label: 'Valid until', value: ctx.validUntilLabel },
                         // The two ids a member quotes, below the details.
@@ -582,7 +574,7 @@ module.exports = (h) => {
                     ],
                     actionButton: { label: 'Open your member dashboard', url: routes.dashboard },
                     secondaryButton: { label: 'Download your certificate', url: routes.certificate },
-                    afterHtml: listCard('Now open to you', BENEFITS)
+                    afterHtml: `<p style="margin:0 0 16px;line-height:1.8;"><a href="${esc(ctx.receiptUrl || routes.receipt)}">View your payment receipt</a><br><a href="${esc(routes.taxCertificate)}">View your tax certificate</a><br><a href="${esc(routes.documents)}">Open all membership documents</a></p>` + listCard('Now open to you', BENEFITS)
                 },
                 whatsapp: {
                     ...chain(TPL.membershipActive,
@@ -602,7 +594,7 @@ module.exports = (h) => {
                             ['💳', ctx.amountLabel ? `Amount paid: ${ctx.amountLabel}` : ''],
                             ['📅', ctx.validUntilLabel ? `Valid until: ${ctx.validUntilLabel}` : ''],
                             ['🔖', ctx.applicationRef ? `Application ID: ${ctx.applicationRef}` : '']])
-                        + `\n\n📊 Your dashboard: ${routes.dashboard}\n📜 Your certificate: ${routes.certificate}\n\n`
+                        + `\n\n📊 Your dashboard: ${routes.dashboard}\n📜 Your certificate: ${routes.certificate}\nPayment receipt: ${ctx.receiptUrl || routes.receipt}\nTax certificate: ${routes.taxCertificate}\nAll documents: ${routes.documents}\n\n`
                         + `${helpText(ctx)}\n\n— ${ORG_SIGNATURE}`
                 }
             };
@@ -783,9 +775,9 @@ module.exports = (h) => {
     /* ================================================== Meta template specs */
 
     const FOOTER = 'Adidravidar Confederation of Trade & Industrial Vision-ACTIV';
-    const HELP = '📞 *Need help? Contact your regional office*\n👤 *Name:* {{a}}\n📱 *Phone:* {{b}}\n📧 *Email:* {{c}}';
+    const HELP = '📞 *Need help? Contact ACTIV Membership support*\n👤 *Name:* {{a}}\n📱 *Phone:* {{b}}\n📧 *Email:* {{c}}';
     const helpAt = (n) => HELP.replace('{{a}}', `{{${n}}}`).replace('{{b}}', `{{${n + 1}}}`).replace('{{c}}', `{{${n + 2}}}`);
-    const OFFICE_SAMPLES = ['Ariyalur Block Admin', '+91 82201 12188', 'block.ariyalur@activ.org.in'];
+    const OFFICE_SAMPLES = [contact.name, contact.phone, contact.email];
     const spec = (name, envKey, bodyWithVariables, params, samples) => ({
         name, envKey, category: 'Utility', meta: true, header: 'IMAGE', footer: FOOTER,
         body: '(Meta template with variables - submit bodyWithVariables below)',
@@ -831,7 +823,7 @@ module.exports = (h) => {
         spec('activ_application_declined_v1', 'BOTBEE_TPL_APPLICATION_DECLINED',
             'Dear *{{1}}*,\n\nThank you for applying to ACTIV. After review, your membership application '
             + '(reference *{{2}}*) was not approved at this time.\n\n📝 *Reason:* {{3}}\n\n'
-            + `If something can be corrected, your regional office can guide you.\n\n${helpAt(4)}\n\nThank you for your interest in ACTIV.`,
+            + `If something can be corrected, ACTIV Membership support can guide you.\n\n${helpAt(4)}\n\nThank you for your interest in ACTIV.`,
             ['full name', 'reference', 'reason', 'office name', 'office phone', 'office email'],
             ['Tharun Kumar', 'A1B2C3', 'The business registration document could not be read', ...OFFICE_SAMPLES]),
         spec('activ_payment_pending_v1', 'BOTBEE_TPL_PAYMENT_PENDING',

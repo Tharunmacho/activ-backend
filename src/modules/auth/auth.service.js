@@ -764,6 +764,7 @@ class AuthService {
         return {
             kind: 'admin',
             email: normalizedEmail,
+            notificationEmail: row.notificationEmail || normalizedEmail,
             fullName: row.fullName || '',
             write: (set) => adminRepository.updateById(hit, set)
         };
@@ -812,7 +813,7 @@ class AuthService {
         const rawToken = await this.issueResetToken(account);
         const resetUrl = buildResetUrl(rawToken, account.kind);
         const delivery = await mailer.sendPasswordReset({
-            email: normalizedEmail,
+            email: account.notificationEmail || normalizedEmail,
             fullName: account.fullName,
             resetUrl,
             expiresInMinutes: RESET_TOKEN_TTL_MS / 60000,

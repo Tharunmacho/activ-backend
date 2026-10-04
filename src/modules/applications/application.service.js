@@ -1429,17 +1429,23 @@ class ApplicationService {
 
             const regionalContacts = require('../notifications/regionalContacts.service');
             const byTier = await regionalContacts.adminsForRegion(base.region);
-            const admins = tierReviews.TIER_ORDER
-                .flatMap((tier) => (byTier[tier] || []).map((admin) => ({ tier, admin })))
-                .slice(0, 10);
+            const regional = tierReviews.TIER_ORDER
+                .flatMap((tier) => (byTier[tier] || []).map((admin) => ({ tier, admin })));
+            // Without a state reviewer, the head office decides membership.
+            // Include its actual accounts so new national regions are noticed.
+            const office = (byTier.state || []).length ? []
+                : (await require('../admin/admin.repository').findActive())
+                    .filter(admin => admin.role === 'super_admin')
+                    .map(admin => ({ tier: 'super', admin }));
+            const admins = [...office, ...regional].slice(0, 10);
 
             for (const { tier, admin } of admins) {
                 const adminRegion = [admin.block, admin.district, admin.state].filter(Boolean).join(', ');
                 notificationService.dispatchInBackground('ADMIN_NEW_APPLICATION', {
-                    name: admin.fullName || `${regionalContacts.TIER_LABEL[tier]} Admin`,
+                    name: admin.fullName || `${tier === 'super' ? 'Super' : regionalContacts.TIER_LABEL[tier]} Admin`,
                     // Block admin addresses are sign-in ids, not mailboxes: they get
                     // WhatsApp and the bell, never email. District/State are real inboxes.
-                    email: tier === 'block' ? '' : admin.email,
+                    email: admin.notificationEmail || (tier === 'block' ? '' : admin.email),
                     phone: admin.phoneNumber
                 }, {
                     ...base,
@@ -1449,9 +1455,9 @@ class ApplicationService {
                     applicantPhone: application.phone,
                     applicantRegion: base.regionLabel,
                     adminRegion,
-                    adminTierLabel: regionalContacts.TIER_LABEL[tier],
-                    adminDecides: tier === tierReviews.DECIDING_TIER,
-                    reviewPath: `/${tier}-admin/approvals`
+                    adminTierLabel: tier === 'super' ? 'Super' : regionalContacts.TIER_LABEL[tier],
+                    adminDecides: tier === 'super' || tier === tierReviews.DECIDING_TIER,
+                    reviewPath: tier === 'super' ? '/super-admin/membership-registrations' : `/${tier}-admin/approvals`
                 });
             }
         } catch (error) {

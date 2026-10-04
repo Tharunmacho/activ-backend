@@ -64,7 +64,7 @@ const stateOf = (url) => new URL(url).searchParams.get('state');
         const expired = await oauth.handleCallback('google', { query: { code: 'x', state: webState }, headers: {} }, fakeRes());
         check('missing cookie -> website expired', expired === `${WEBSITE}#error=expired&provider=google`, expired);
         const noState = await oauth.handleCallback('google', { query: { error: 'x' }, headers: {} }, fakeRes());
-        check('no state -> website', noState === `${WEBSITE}#error=cancelled&provider=google`, noState);
+        check('no state -> website', noState === `${WEBSITE}#error=failed&provider=google`, noState);
         const unavailable = await oauth.handleCallback('nope', { query: {}, headers: {} }, fakeRes());
         check('unknown provider -> website unavailable', unavailable === `${WEBSITE}#error=unavailable`, unavailable);
         check('toClient("") is the website URL', oauth.toClient('', { code: 'abc', provider: 'google' }) === `${WEBSITE}#code=abc&provider=google`);

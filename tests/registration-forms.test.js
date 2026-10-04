@@ -378,13 +378,11 @@ const testLive = async() => {
             plans.every((p) => p && p.name && p.amount !== undefined),
             plans.map((p) => p.name).join(', '));
 
-        // NOT a working purchase, and recorded as such. `/payment/complete`
-        // activates a membership from an empty body — there is no gateway
-        // behind it and both clients mint their own transaction ids. This pins
-        // the current behaviour so that changing it is a deliberate act.
+        // An empty request is not payment evidence. The real gateway must
+        // refuse it rather than upgrading this fixture without verification.
         res = await call('POST', '/payment/complete', {}, token);
-        check('  /payment/complete activates without payment proof (MOCK GATEWAY)',
-            res.status === 200, `HTTP ${res.status} — no verification step exists`);
+        check('  /payment/complete refuses activation without payment proof',
+            res.status === 400 || res.status === 403, `HTTP ${res.status}`);
 
         // Its amount table (500/1000/2000/2500, keyed by starter/intermediate/
         // advanced/lifetime/aspirant) matches neither the seeded plans nor their
@@ -437,7 +435,8 @@ const testLive = async() => {
 
     testSchemaContract();
     testBooleanNormalisation();
-    await testLive();
+    if (process.argv.includes('--unit-only')) skip('Live round trip', 'Unit-only run; no database mutations');
+    else await testLive();
 
     console.log(`\n${'='.repeat(72)}`);
     if (failures.length) {

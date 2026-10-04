@@ -1,0 +1,46 @@
+const assert = require('assert');
+process.env.GOOGLE_CLIENT_ID = 'test-google-client';
+process.env.GOOGLE_CLIENT_SECRET = 'test-google-secret';
+process.env.OAUTH_REDIRECT_BASE = 'http://localhost:5057/api/v1/auth/oauth';
+process.env.FRONTEND_URL = 'http://localhost:8080';
+const oauth = require('../src/modules/auth/oauth.service');
+const MemberAuth = require('../src/modules/auth/auth.model');
+const auth = require('../src/modules/auth/auth.service');
+const admins = require('../src/modules/admin/admin.repository');
+let member = { _id: 'test-member', isActive: true };
+MemberAuth.findOne = () => ({ select: () => ({ lean: async () => member }) });
+admins.findRawByEmail = async () => null;
+auth.memberSession = async email => ({ token: 'test-session', role: 'member', user: { email }, memberDetails: { membershipStatus: 'active' } });
+const req = { query: {}, headers: {} };
+let nonce;
+const res = { cookie: (_, value) => { nonce = value; }, clearCookie: () => {} };
+async function login(client = '') {
+    const start = new URL(oauth.startUrl('google', { ...req, query: { client } }, res));
+    assert.equal(start.searchParams.get('redirect_uri'), 'http://localhost:5057/api/v1/auth/oauth/google/callback');
+    return oauth.handleCallback('google', { query: { code: 'test-code', state: start.searchParams.get('state') }, headers: { cookie: `activ_oauth=${nonce}` } }, res);
+}
+(async () => {
+    oauth.PROVIDERS.google.profile = async () => ({ email: 'MEMBER@example.com', verified: true, name: 'Member' });
+    const target = await login();
+    assert(target.startsWith('http://localhost:8080/auth/social#'));
+    const code = new URLSearchParams(new URL(target).hash.slice(1)).get('code');
+    const session = await oauth.exchange(code);
+    assert.equal(session.user.email, 'member@example.com');
+    assert.equal(session.memberDetails.membershipStatus, 'active');
+    await assert.rejects(oauth.exchange(code), /already been used/);
+    const next = await login();
+    const nextCode = new URLSearchParams(new URL(next).hash.slice(1)).get('code');
+    const concurrent = await Promise.allSettled([oauth.exchange(nextCode), oauth.exchange(nextCode)]);
+    assert.equal(concurrent.filter(result => result.status === 'fulfilled').length, 1);
+    const app = await login('app');
+    assert(app.startsWith('activ://auth/social?code='));
+    member = null;
+    assert((await login()).includes('error=no_account'));
+    member = { _id: 'test-member', isActive: false };
+    const blocked = await login();
+    await assert.rejects(oauth.exchange(new URLSearchParams(new URL(blocked).hash.slice(1)).get('code')), /blocked/);
+    oauth.PROVIDERS.google.profile = async () => { throw { response: { status: 401, data: { error: 'invalid_client', secret: 'never log response data' } } }; };
+    assert((await login()).includes('error=configuration'));
+    console.log('OAuth login passed: website/app returns, local callback, session, replay, concurrent exchange, registration, blocked account, configuration errors.');
+    process.exit(0);
+})().catch(error => { console.error(error.message); process.exit(1); });

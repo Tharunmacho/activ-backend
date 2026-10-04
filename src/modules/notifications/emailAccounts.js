@@ -4,7 +4,7 @@ const categoryForEvent = (event = '') => /^EVENT_/.test(event) ? 'events' : 'mem
 const accountFor = (category = 'membership') => {
     const base = config.email;
     if (category === 'events') return base;
-    const fromAddress = process.env.MEMBER_EMAIL_FROM || process.env.MEMBER_EMAIL_USER || 'member@activ.org.in';
+    const fromAddress = require('./membershipContact').email;
     // Like events@, the member address uses the existing authenticated relay.
     // A separately hosted mailbox can opt into its own SMTP transport.
     const separate = process.env.MEMBER_EMAIL_TRANSPORT === 'separate';

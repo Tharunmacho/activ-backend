@@ -27,12 +27,12 @@ const logger = require('../../config/logger');
  * moved by the time this runs, and a mail host that is down must not turn a
  * completed payment into a webhook failure Instamojo then retries.
  */
-const announceActivation = async (member, { amount, orderId, planName } = {}) => {
+const announceActivation = async (member, { amount, orderId, planName, paymentMode } = {}) => {
     if (!member) return;
     // Member ID and application reference exactly as the dashboard prints them.
     const ids = await require('../members/memberIds').idsFor(member).catch(() => ({ memberId: '', applicationRef: '' }));
 
-    const rupees = Number(amount || member.paymentAmount || 0);
+    const rupees = Number(amount ?? member.paymentAmount ?? 0);
 
     notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
         id: member._id,
@@ -54,6 +54,8 @@ const announceActivation = async (member, { amount, orderId, planName } = {}) =>
             : '',
         orderId: orderId || member.paymentId || '',
         planName: planName || '',
+        paymentMode: paymentMode || '',
+        receiptUrl: `${config.frontendUrl}/member/payment-success?view=receipt${orderId ? `&orderId=${encodeURIComponent(orderId)}` : ''}`,
         activatedLabel: membershipContext.dateLabel(new Date()),
         validUntilLabel: membershipContext.dateLabel(member.membershipExpiresAt),
         stage: 'active',
@@ -91,6 +93,9 @@ const announceActivation = async (member, { amount, orderId, planName } = {}) =>
  *     reusable after it has been paid, which is somebody paying twice.
  */
 class PaymentService {
+    announceMembershipActivation(member, payload) {
+        return announceActivation(member, payload);
+    }
     constructor() {
         this.apiKey = config.instamojo.apiKey;
         this.authToken = config.instamojo.authToken;
@@ -331,7 +336,12 @@ class PaymentService {
                 throw ApiError.unauthorized('Invalid webhook signature');
             }
 
-            const { payment_id, payment_status, buyer, amount, buyer_name, buyer_phone } = webhookData;
+            const { payment_id, buyer, amount } = webhookData;
+            // The webhook uses `status`; `payment_status` belongs to the redirect.
+            const payment_status = webhookData.status || webhookData.payment_status;
+            if (!payment_id || !webhookData.payment_request_id) {
+                throw ApiError.badRequest('Missing gateway payment identifiers');
+            }
 
             // Only process successful payments
             if (payment_status !== 'Credit') {
@@ -353,7 +363,11 @@ class PaymentService {
 
             // Look up the order we created before sending the user to Instamojo
             const PaymentOrder = require('./paymentorder.model');
-            const order = await PaymentOrder.findOne({ gatewayPaymentId: webhookData.payment_request_id });
+            const order = await PaymentOrder.findOne({ provider: 'instamojo', $or: [
+                { gatewayRequestId: webhookData.payment_request_id },
+                { gatewayPaymentId: webhookData.payment_request_id },
+                { gatewayPaymentId: payment_id, status: 'paid' }
+            ] });
 
             if (!order) {
                 logger.error('No matching order found for Instamojo payment', { payment_request_id: webhookData.payment_request_id });
@@ -394,77 +408,12 @@ class PaymentService {
                     message: 'Event booking paid successfully',
                     booking
                 };
-            } else {
-                // MEMBERSHIP LOGIC
-                if (!(paidAmount > 0)) {
-                    throw ApiError.badRequest('Invalid payment amount');
-                }
-
-                const paidPlan = await membershipPlanService.resolveByAmount(paidAmount)
-                    .catch(() => null);
-
-                const membershipType = paidPlan?.membershipType || 'annual';
-                let membershipExpiresAt = null;
-
-                if (membershipType !== 'lifetime') {
-                    membershipExpiresAt = new Date();
-                    membershipExpiresAt.setFullYear(membershipExpiresAt.getFullYear() + 1);
-                }
-
-                const member = await MemberDetails.findOneAndUpdate({ email: buyer.toLowerCase() }, {
-                    membershipStatus: 'active',
-                    membershipType: membershipType,
-                    membershipActivatedAt: new Date(),
-                    membershipExpiresAt: membershipExpiresAt,
-                    paymentId: payment_id,
-                    paymentAmount: paidAmount,
-                    lastPaymentDate: new Date()
-                }, { new: true });
-
-                invalidateMemberContext(member?._id);
-
-                if (!member) {
-                    logger.error('Member not found for payment', {
-                        email: buyer,
-                        paymentId: payment_id
-                    });
-                    throw ApiError.notFound('Member not found');
-                }
-
-                // ACTIV-2026-001: numbered on first activation, kept for life after.
-                const assignedNumber = await require('../members/memberNumber').assignMembershipNumber(member);
-                if (assignedNumber) member.membershipNumber = assignedNumber;
-
-                logger.info('Membership activated successfully', {
-                    memberId: member._id,
-                    email: buyer,
-                    membershipType,
-                    expiresAt: membershipExpiresAt
-                });
-
-                announceActivation(member, { amount: paidAmount, orderId: payment_id, planName: paidPlan?.name });
-
-                // Mark order as paid
-                order.status = 'paid';
-                order.gatewayPaymentId = payment_id; 
-                order.paidAt = new Date();
-                order.paymentMethod = 'instamojo';
-                await order.save();
-
-                return {
-                    success: true,
-                    message: 'Membership activated successfully',
-                    member: {
-                        id: member._id,
-                        fullName: member.fullName,
-                        email: member.email,
-                        membershipType,
-                        membershipStatus: 'active',
-                        activatedAt: member.membershipActivatedAt,
-                        expiresAt: membershipExpiresAt
-                    }
-                };
             }
+            if (!(paidAmount > 0 && paidAmount + 0.001 >= Number(order.amount))
+                || (webhookData.currency && webhookData.currency !== order.currency)) {
+                throw ApiError.badRequest('Payment amount or currency does not match the order');
+            }
+            return this.settleMembershipOrder(order, payment_id);
         } catch (error) {
             logger.error('Payment webhook processing failed', {
                 error: error.message,
@@ -503,6 +452,7 @@ class PaymentService {
 
         if (order.status !== 'paid') {
             order.status = 'paid';
+            order.gatewayRequestId = order.gatewayRequestId || order.gatewayPaymentId;
             order.gatewayPaymentId = paymentId || order.gatewayPaymentId;
             order.paidAt = new Date();
             order.paymentMethod = 'instamojo';
@@ -510,6 +460,63 @@ class PaymentService {
         }
 
         return booking;
+    }
+
+    /** Activate an order whose payment was checked by a trusted caller. */
+    async settleMembershipOrder(order, paymentId) {
+        if (!paymentId || order.orderType !== 'membership' || order.provider !== 'instamojo') {
+            throw ApiError.badRequest('Invalid verified membership payment');
+        }
+        const PaymentOrder = require('./paymentorder.model');
+        const token = crypto.randomBytes(16).toString('hex');
+        const claimed = await PaymentOrder.findOneAndUpdate({
+            _id: order._id, status: 'created',
+            $or: [{ settlementStartedAt: { $exists: false } }, { settlementStartedAt: null },
+                { settlementStartedAt: { $lt: new Date(Date.now() - 5 * 60 * 1000) } }]
+        }, { $set: { settlementToken: token, settlementStartedAt: new Date() } }, { new: true });
+        if (!claimed) {
+            const fresh = await PaymentOrder.findById(order._id);
+            if (fresh && fresh.status === 'paid') return { success: true, message: 'Already processed' };
+            throw ApiError.badRequest('This payment is already being confirmed. Please retry shortly.');
+        }
+        try {
+            let member = await MemberDetails.findById(claimed.memberId);
+            if (!member) throw ApiError.notFound('Member profile not found');
+            // A retry after a partial write must not add a second year.
+            if (member.paymentId !== paymentId) {
+                const { renewalFor, renewalBase } = require('../members/membershipState');
+                const renewing = ['active', 'expired'].includes(renewalFor(member).state);
+                const expiresAt = claimed.membershipType === 'lifetime' ? null
+                    : renewing && claimed.purchasePurpose !== 'upgrade' ? renewalBase(member) : new Date();
+                if (expiresAt) expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+                member = await MemberDetails.findByIdAndUpdate(claimed.memberId, { $set: {
+                    membershipStatus: 'active', membershipType: claimed.membershipType,
+                    ...(claimed.purchasePurpose === 'upgrade' ? { memberType: claimed.upgradeKind, registrationType: claimed.upgradeKind } : {}),
+                    membershipActivatedAt: renewing && member.membershipActivatedAt || new Date(),
+                    membershipExpiresAt: expiresAt, paymentId,
+                    // Gateway fees do not change the plan purchased or its price.
+                    paymentAmount: claimed.amount, lastPaymentDate: new Date()
+                } }, { new: true });
+                if (!member) throw ApiError.notFound('Member profile not found');
+            }
+            invalidateMemberContext(member._id);
+            const assigned = await require('../members/memberNumber').assignMembershipNumber(member);
+            if (assigned) member.membershipNumber = assigned;
+            await require('../members/membershipUpgrade').applyPaidProfile(claimed);
+            const settled = await PaymentOrder.findOneAndUpdate({
+                _id: claimed._id, status: 'created', settlementToken: token
+            }, { $set: {
+                status: 'paid', gatewayRequestId: claimed.gatewayRequestId || claimed.gatewayPaymentId,
+                gatewayPaymentId: paymentId, paymentMethod: 'instamojo', paidAt: new Date()
+            }, $unset: { settlementToken: '', settlementStartedAt: '' } }, { new: true });
+            if (!settled) throw ApiError.badRequest('Payment confirmation is being retried');
+            await announceActivation(member, { amount: claimed.amount, orderId: claimed.orderId, planName: claimed.planName });
+            return { success: true, message: 'Membership activated successfully', member };
+        } catch (error) {
+            await PaymentOrder.updateOne({ _id: claimed._id, status: 'created', settlementToken: token },
+                { $unset: { settlementToken: '', settlementStartedAt: '' } }).catch(() => null);
+            throw error;
+        }
     }
 
     /**
@@ -524,18 +531,22 @@ class PaymentService {
     async verifyPaymentWithGateway(paymentRequestId, paymentId = '', expectedAmount = 0) {
         if (!paymentRequestId || !this.isConfigured()) return { paid: false };
 
-        const amountOk = (value) => !(expectedAmount > 0) || parseFloat(value) + 0.001 >= Number(expectedAmount);
+        const amountOk = (value) => Number.isFinite(Number(value)) && Number(value) > 0
+            && Number(value) + 0.001 >= Number(expectedAmount);
 
         try {
             if (paymentId) {
-                const res = await axios.get(
-                    `${this.baseUrl}/payment-requests/${encodeURIComponent(paymentRequestId)}/${encodeURIComponent(paymentId)}/`,
-                    { headers: this.authHeaders(), timeout: 20000 }
-                );
-                const payment = res.data && res.data.payment_request && res.data.payment_request.payment;
-                if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
-                    return { paid: true, paymentId: payment.payment_id || paymentId };
-                }
+                // A stale browser payment ID must not prevent checking our request.
+                try {
+                    const res = await axios.get(
+                        `${this.baseUrl}/payment-requests/${encodeURIComponent(paymentRequestId)}/${encodeURIComponent(paymentId)}/`,
+                        { headers: this.authHeaders(), timeout: 20000 }
+                    );
+                    const payment = res.data && res.data.payment_request && res.data.payment_request.payment;
+                    if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
+                        return { paid: true, paymentId: payment.payment_id || paymentId };
+                    }
+                } catch { /* Still verify the stored request below. */ }
             }
 
             const res = await axios.get(
@@ -545,11 +556,18 @@ class PaymentService {
             const request = (res.data && res.data.payment_request) || {};
             const payments = Array.isArray(request.payments) ? request.payments : [];
             const credited = payments.find((p) => p && typeof p === 'object'
-                && String(p.status).toLowerCase() === 'credit' && amountOk(p.amount));
-            if (credited) return { paid: true, paymentId: credited.payment_id || paymentId };
-            if (String(request.status).toLowerCase() === 'completed' && amountOk(request.amount)) {
-                const first = payments[0];
-                return { paid: true, paymentId: (typeof first === 'string' ? first : first && first.payment_id) || paymentId };
+                && p.payment_id && String(p.status).toLowerCase() === 'credit' && amountOk(p.amount));
+            if (credited) return { paid: true, paymentId: credited.payment_id };
+            // Some API responses contain only IDs. Fetch the payment itself.
+            for (const id of payments.filter(p => typeof p === 'string')) {
+                const detail = await axios.get(
+                    `${this.baseUrl}/payment-requests/${encodeURIComponent(paymentRequestId)}/${encodeURIComponent(id)}/`,
+                    { headers: this.authHeaders(), timeout: 20000 }
+                );
+                const payment = detail.data && detail.data.payment_request && detail.data.payment_request.payment;
+                if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
+                    return { paid: true, paymentId: payment.payment_id || id };
+                }
             }
         } catch (error) {
             logger.warn('Instamojo payment verification failed', {
@@ -566,25 +584,26 @@ class PaymentService {
      * is the order's own state and booking reference, to whoever holds the
      * random 32-hex order id that was only ever in that buyer's return URL.
      *
-     * If the order is an unpaid event booking it asks Instamojo directly, and
+     * For an unpaid membership or event order it asks Instamojo directly, and
      * confirms the booking when Instamojo says the money is credited. So the
      * booking — and its email / WhatsApp — no longer waits on the webhook
      * reaching this server, which on a local or mis-configured deployment it
      * never did: the seats sat unpaid until an admin confirmed them by hand.
      */
-    async resolveReturn(orderId, { paymentId = '', gatewayStatus = '' } = {}) {
+    async resolveReturn(orderId, { paymentId = '' } = {}) {
         const PaymentOrder = require('./paymentorder.model');
         const order = await PaymentOrder.findOne({ orderId: String(orderId || '') }).catch(() => null);
         if (!order) throw ApiError.notFound('No such payment order');
 
-        if (order.orderType === 'event_booking' && order.status !== 'paid'
-            && String(gatewayStatus).toLowerCase() !== 'failed') {
-            const requestId = String(order.gatewayPaymentId || '');
+        if (['event_booking', 'membership'].includes(order.orderType) && order.status === 'created'
+            && order.provider === 'instamojo') {
+            const requestId = String(order.gatewayRequestId || order.gatewayPaymentId || '');
             if (requestId && !requestId.startsWith('ord_')) {
                 const verdict = await this.verifyPaymentWithGateway(requestId, paymentId, order.amount);
                 if (verdict.paid) {
-                    await this.settleEventBookingOrder(order, verdict.paymentId).catch((error) => {
-                        logger.error('Verified event payment could not be settled', {
+                    const settle = order.orderType === 'membership' ? this.settleMembershipOrder : this.settleEventBookingOrder;
+                    await settle.call(this, order, verdict.paymentId).catch((error) => {
+                        logger.error('Verified payment could not be settled', {
                             orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
                         });
                     });
@@ -621,6 +640,9 @@ class PaymentService {
             orderType: fresh.orderType || 'membership',
             status: fresh.status,
             amount: fresh.amount,
+            planName: fresh.planName || '',
+            paymentId: fresh.status === 'paid' ? fresh.gatewayPaymentId || '' : '',
+            paidAt: fresh.status === 'paid' ? fresh.paidAt || null : null,
             bookingRef: fresh.bookingRef || '',
             eventId,
             // The readable address to send the buyer to (events/eventSlug.js).
@@ -638,7 +660,7 @@ class PaymentService {
      * payer's browser returning to /payment-success. A payer who paid and shut
      * the tab had their money taken and heard nothing.
      *
-     * This asks Instamojo about each event-booking order still `created`,
+     * This asks Instamojo about membership and event orders still `created`,
      * ONE AT A TIME, and settles it through the same idempotent path the
      * webhook and the return page use — so the confirmation goes out exactly
      * once whichever of the three gets there first.
@@ -652,13 +674,13 @@ class PaymentService {
      * `completePayment` accepts a lapsed hold, because money that verifiably
      * moved wins over a timer.
      */
-    async reconcilePendingEventOrders({ limit = 20 } = {}) {
+    async reconcilePendingOrders({ limit = 20 } = {}) {
         if (!this.isConfigured()) return { checked: 0, settled: 0 };
 
         const PaymentOrder = require('./paymentorder.model');
         const hours = Math.max(1, parseInt(process.env.PAYMENT_RECONCILE_LOOKBACK_HOURS, 10) || 48);
         const orders = await PaymentOrder.find({
-            orderType: 'event_booking',
+            orderType: { $in: ['event_booking', 'membership'] },
             status: 'created',
             provider: 'instamojo',
             createdAt: { $gte: new Date(Date.now() - hours * 60 * 60 * 1000) },
@@ -670,21 +692,17 @@ class PaymentService {
             .catch(() => []);
 
         let settled = 0;
-        // An order that verified as paid but could not be settled (its booking
-        // was cancelled meanwhile) is reported once, not every five minutes.
-        this.reconcileGaveUp = this.reconcileGaveUp || new Set();
         for (const order of orders || []) {
-            if (this.reconcileGaveUp.has(order.orderId)) continue;
             try {
-                const verdict = await this.verifyPaymentWithGateway(String(order.gatewayPaymentId), '', order.amount);
+                const verdict = await this.verifyPaymentWithGateway(String(order.gatewayRequestId || order.gatewayPaymentId), '', order.amount);
                 if (!verdict.paid) continue;
-                await this.settleEventBookingOrder(order, verdict.paymentId);
+                if (order.orderType === 'membership') await this.settleMembershipOrder(order, verdict.paymentId);
+                else await this.settleEventBookingOrder(order, verdict.paymentId);
                 settled += 1;
-                logger.warn('Paid event booking confirmed by the reconcile (no webhook, no return visit)', {
+                logger.warn('Paid order confirmed by the reconcile (no webhook, no return visit)', {
                     orderId: order.orderId, bookingRef: order.bookingRef, paymentId: verdict.paymentId
                 });
             } catch (error) {
-                this.reconcileGaveUp.add(order.orderId);
                 logger.error('Reconcile could not settle a verified event payment — needs a person', {
                     orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
                 });
@@ -704,7 +722,7 @@ class PaymentService {
         const tick = () => {
             if (running) return; // a slow gateway never stacks passes
             running = true;
-            this.reconcilePendingEventOrders()
+            this.reconcilePendingOrders()
                 .catch((error) => logger.warn('Payment reconcile pass failed', { error: error && error.message }))
                 .finally(() => { running = false; });
         };

@@ -200,6 +200,42 @@ const fallback = (req, res, path) => {
     res.redirect(302, `${siteOrigin(req)}${path}${path.includes('?') ? '&' : '?'}ref=share`);
 };
 
+router.get('/site-images/:name/:version.jpg', (req, res) => {
+    const image = require('./sitePreviewImages').imageOf(req.params.name, req.params.version);
+    if (!image) return res.status(404).end();
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.type('image/jpeg').send(image.bytes);
+});
+
+// The website server and Apache crawlers use the same per-route CMS record.
+// Reading on every request means a saved replacement is effective immediately;
+// image uploads have their own unique filename for social image caches.
+router.get('/page', async(req, res, next) => {
+    try {
+        const card = await require('../cms/cms.sharePreviews.service').resolve(req.query.path || '/');
+        const image = shareImage(req, card.image.url);
+        const origin = str(config.frontendUrl).replace(/\/+$/, '') || siteOrigin(req);
+        const url = `${origin}${card.canonicalPath || card.path}`;
+        res.set('Cache-Control', 'no-store');
+        res.set('Content-Security-Policy', "default-src 'none'; img-src * data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'");
+        return res.type('html').send(page({ ...card, image, alt: card.image.alt, imageMeta: card.imageMeta || await imageInfo(image), url }));
+    } catch (err) { return next(err); }
+});
+
+router.get('/page-image/:version.jpg', async(req, res) => {
+    try {
+        // Recheck the route's visibility and its current source for every image
+        // request; a removed banner or unpublished page cannot keep being served.
+        const card = await require('../cms/cms.sharePreviews.service').resolve(req.query.path, { renderImage: false });
+        const source = { imageUrl: card.image.url };
+        if (!source.imageUrl || req.params.version !== eventPreviewImage.versionOf(source)) return res.status(404).end();
+        const bytes = await eventPreviewImage.previewBytes(source);
+        res.set('Cache-Control', 'public, max-age=300');
+        res.set('Content-Length', String(bytes.length));
+        return res.type('image/jpeg').send(bytes);
+    } catch { return res.status(404).end(); }
+});
+
 router.get('/events/:slug/preview/:version.jpg', async(req, res) => {
     try {
         const id = await resolveEventId(str(req.params.slug));
@@ -261,99 +297,18 @@ router.get(['/gallery/:slug', '/gallery/:slug/photo/:n'], async(req, res) => {
     }
 });
 
-/**
- * News: one article's own card — headline as the title, the date and place the
- * newsroom prints, then the summary; the article's picture, else its first
- * photo. `getArticle` throws for a draft exactly as the public page does, so a
- * preview never shows an article the page would not.
- */
-const newsCard = (article) => {
-    const title = oneLine(article.title) || 'ACTIV news';
-    const published = validDate(article.publishedAt);
-    const when = oneLine(article.displayDate) || (published ? longDate(published) : '');
-    const where = oneLine(article.location) || [oneLine(article.district), oneLine(article.state)].filter(Boolean).join(', ');
-    const details = [when ? `📅 ${when}` : '', where ? `📍 ${where}` : ''].filter(Boolean).join('  ');
-    const about = oneLine(article.summary) || oneLine(article.body);
-    const description = [details, about].filter(Boolean).join(' — ').slice(0, 300);
-    const photo = (article.photos || []).find((m) => m && m.url);
-    const image = (article.image && article.image.url) || (photo && photo.url) || '';
-    return { title, description, image, alt: oneLine(article.image && article.image.alt) || title };
-};
-
-router.get('/news/:slug', async(req, res) => {
-    const slug = str(req.params.slug);
-    const path = `/news/${encodeURIComponent(slug)}`;
+// Legacy crawler entry points resolve the same card as /share/page, including
+// section-specific titles, CMS overrides and the generated banner image.
+const newsCard = article => require('./pageShareContent').newsShareContent(article);
+router.get(['/news', '/news/:slug', '/states/:slug', '/states/:slug/:type', '/regions/:slug', '/regions/:slug/:type'], async(req, res) => {
+    const path = req.path;
     try {
-        const article = await require('../cms/cms.news.service').getArticle(slug, {});
-        if (!article) return fallback(req, res, path);
-        const card = newsCard(article);
-        const image = shareImage(req, card.image);
-        return send(res, page({
-            ...card,
-            image,
-            imageMeta: await imageInfo(image),
-            url: `${siteOrigin(req)}/news/${encodeURIComponent(article.slug || slug)}`,
-        }));
-    } catch {
-        return fallback(req, res, path);
-    }
+        const card = await require('../cms/cms.sharePreviews.service').resolve(path);
+        const image = shareImage(req, card.image.url);
+        return send(res, page({ ...card, image, alt: card.image.alt,
+            imageMeta: card.imageMeta || await imageInfo(image), url: `${siteOrigin(req)}${card.canonicalPath || card.path}` }));
+    } catch { return fallback(req, res, path); }
 });
-
-/** The newsroom itself: the heading, description and hero picture its editor set. */
-router.get('/news', async(req, res) => {
-    try {
-        const settings = await require('../cms/cms.news.service').getSettings();
-        const heading = [oneLine(settings.heading), oneLine(settings.headingHighlight)].filter(Boolean).join(' ');
-        const title = heading || 'ACTIV News';
-        const image = shareImage(req, settings.heroImage && settings.heroImage.url);
-        return send(res, page({
-            title,
-            description: (oneLine(settings.description) || 'News, chapters and announcements from ACTIV.').slice(0, 300),
-            image,
-            imageMeta: await imageInfo(image),
-            alt: title,
-            url: `${siteOrigin(req)}/news`,
-            type: 'website',
-        }));
-    } catch {
-        return fallback(req, res, '/news');
-    }
-});
-
-/**
- * State and region pages: the editor's "When the page is shared" fields
- * (`seo`), falling back to the page's own name, summary and hero picture —
- * the same choices StatePage / RegionPage make in the browser.
- */
-const areaPage = (kind) => async(req, res) => {
-    const slug = str(req.params.slug);
-    const path = `/${kind}/${encodeURIComponent(slug)}`;
-    try {
-        const regionPages = require('../cms/cms.regionPages.service');
-        const doc = kind === 'states'
-            ? await regionPages.getStatePage(slug, {})
-            : await regionPages.getRegionPage(slug, {});
-        if (!doc) return fallback(req, res, path);
-        const seo = doc.seo || {};
-        const name = oneLine(kind === 'states' ? doc.stateName : (doc.regionName || doc.label));
-        const title = oneLine(seo.metaTitle) || `ACTIV ${name}`.trim();
-        const hero = (doc.heroCarousel || [])[0];
-        const image = shareImage(req, seo.ogImageUrl || (hero && hero.media && hero.media.url) || (doc.explore && doc.explore.imageUrl) || '');
-        return send(res, page({
-            title,
-            description: (oneLine(seo.metaDescription) || oneLine(doc.shortDescription)).slice(0, 300),
-            image,
-            imageMeta: await imageInfo(image),
-            alt: title,
-            url: `${siteOrigin(req)}/${kind}/${encodeURIComponent(doc.slug || slug)}`,
-            type: 'website',
-        }));
-    } catch {
-        return fallback(req, res, path);
-    }
-};
-router.get(['/states/:slug', '/states/:slug/:type'], areaPage('states'));
-router.get(['/regions/:slug', '/regions/:slug/:type'], areaPage('regions'));
 
 module.exports = router;
 module.exports._test = { eventCard, newsCard, shareImage, page };

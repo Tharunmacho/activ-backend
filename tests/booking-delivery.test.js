@@ -255,10 +255,10 @@ const testExactlyOnce = async() => {
     stub(PaymentOrder, 'find', () => chain(pending));
     stub(paymentService, 'isConfigured', () => true);
     stub(paymentService, 'verifyPaymentWithGateway', async() => ({ paid: false }));
-    const none = await paymentService.reconcilePendingEventOrders();
+    const none = await paymentService.reconcilePendingOrders();
     check('reconcile: gateway says unpaid → nothing settled', none.settled === 0 && sent.length === 0);
     paymentService.verifyPaymentWithGateway = async() => ({ paid: true, paymentId: 'MOJO4' });
-    const one = await paymentService.reconcilePendingEventOrders();
+    const one = await paymentService.reconcilePendingOrders();
     await wait(50);
     check('reconcile: gateway says Credit → settled and confirmed once',
         one.settled === 1 && sent.filter((s) => s.eventName === 'EVENT_BOOKING_CONFIRMED').length === 1, JSON.stringify(one));

@@ -217,9 +217,8 @@ const resolveForRegion = async(region = {}) => {
     const nearest = CONTACT_TIERS
         .map((tier) => contacts[tier])
         .find((entry) => entry && entry.staffed)
-        // Nothing staffed at district or state: the derived district/state
-        // address, so the reply at least carries the region it came from.
-        || CONTACT_TIERS.map((tier) => contacts[tier]).find((entry) => entry && entry.email)
+        // Unstaffed regions use the existing office inbox below. A generated
+        // regional address is not evidence that a real mailbox exists.
         || null;
 
     /**
