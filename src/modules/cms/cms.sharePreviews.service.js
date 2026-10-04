@@ -81,7 +81,7 @@ const basePreview = async(path) => {
         const custom = detail?.startsWith('section-') ? (doc.customSections || []).find(section => !section.isHidden && section.key === detail.slice(8)) : null;
         if (detail?.startsWith('section-') && !custom) throw ApiError.notFound('Public section not found');
         const content = areaShareContent(doc, detail, custom);
-        card = { ...content, image: mediaOf(content.image, content.alt), canonicalPath: fullPath(kind, doc.slug || slug) + (detail ? `/${encodeURIComponent(detail)}` : ''), type: 'website', group: 'Zones and states' };
+        card = { ...content, label: detail ? content.title : plain(doc.stateName || doc.regionName || doc.label), image: mediaOf(content.image, content.alt), canonicalPath: fullPath(kind, doc.slug || slug) + (detail ? `/${encodeURIComponent(detail)}` : ''), type: 'website', group: kind === 'regions' ? 'Zones' : 'States' };
     } else if (kind === 'schemes' && slug === 'view') {
         const scheme = await schemes.getScheme(detail, {});
         if (!scheme) throw ApiError.notFound('Public scheme not found');
@@ -96,7 +96,7 @@ const basePreview = async(path) => {
         card = { title: plain(doc.title) || 'ACTIV Policy', description: plain(doc.summary || doc.description), canonicalPath: doc.path || (doc.slug ? `/${doc.slug}` : path), type: 'website', group: 'Legal' };
     }
     if (!card) throw ApiError.notFound('Public page not found');
-    return { ...card, path, label: card.title, description: plain(card.description).slice(0, 700), image: card.image?.url ? card.image : defaultImage(path) };
+    return { ...card, path, label: card.label || card.title, description: plain(card.description).slice(0, 700), image: card.image?.url ? card.image : defaultImage(path) };
 };
 
 const applyRecord = (base, row) => ({
@@ -135,11 +135,17 @@ const resolve = async(rawPath, { renderImage = true } = {}) => {
 
 const editorData = async() => {
     await ensureDefaults();
-    const [saved, bases] = await Promise.all([
+    const [saved, bases, map] = await Promise.all([
         SharePreview.find({}).lean(), Promise.all(EDITOR_PAGES.map(page => basePreview(page.path))),
+        regions.getMap(),
     ]);
     const rows = new Map(saved.map(row => [row.path, row]));
-    return { routes: bases.map(base => applyRecord(base, rows.get(base.path))) };
+    // The same published pages as the website's Zones menu. Fetch the full
+    // banner and content only when selected, rather than loading every board.
+    const zones = map.regions.filter(region => region.hasPage).map(region => ({
+        path: fullPath('regions', region.slug), label: plain(region.label), group: 'Zones',
+    }));
+    return { routes: [...bases.map(base => applyRecord(base, rows.get(base.path))), ...zones] };
 };
 
 const save = async(payload, actor = {}) => {

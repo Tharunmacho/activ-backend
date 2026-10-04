@@ -25,8 +25,8 @@ const STATIC_PAGES = [
 
 const plain = value => typeof value === 'string' ? value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
 const staticPage = path => STATIC_PAGES.find(page => page.path === path);
-// The CMS image editor covers the main navigation only. Content detail pages
-// derive their cards from their own event, article, gallery or chapter data.
+// Main navigation routes. The editor also lists published zone pages from the
+// region map; event, article, gallery and chapter sections keep automatic cards.
 const EDITOR_PAGES = STATIC_PAGES.slice(0, 10);
 const FEED_TYPES = ['about', 'leaders', 'keyAchievements', 'sectorUpdates', 'newsUpdates', 'speakInMedia', 'achievements', 'events', 'projects', 'policyAdvocacy', 'consultingServices', 'publications', 'mediaReleases', 'mediaCoverages', 'gallery'];
 const feedTypes = FEED_TYPES.join('|');

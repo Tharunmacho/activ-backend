@@ -50,10 +50,16 @@ news.getArticle = async slug => slug === 'article' ? article : null;
 news.getSettings = async() => ({ heading: 'ACTIV', headingHighlight: 'Newsroom', description: 'Published newsroom introduction', heroImage: { url: '/uploads/news-index.png' } });
 schemes.listSchemes = async() => [{ slug: 'opportunity', title: 'Business opportunity' }];
 schemes.getScheme = async() => ({ slug: 'opportunity', title: 'Business opportunity', summary: 'Published scheme' });
-regions.getMap = async() => ({ regions: [{ slug: 'south', label: 'South', hasPage: true, states: [{ slug: 'tamil-nadu', name: 'Tamil Nadu', hasPage: true }] }] });
+let northPublished = false;
+regions.getMap = async() => ({ regions: [
+    { slug: 'national', label: 'National', national: true, hasPage: true, states: [] },
+    { slug: 'south', label: 'South', hasPage: true, states: [{ slug: 'tamil-nadu', name: 'Tamil Nadu', hasPage: true }] },
+    { slug: 'north', label: 'North', hasPage: northPublished, states: [] },
+    { slug: 'east', label: 'East', hasPage: false, states: [] },
+] });
 const chapter = { seo: {}, shortDescription: 'Published chapter introduction', fullDescription: 'Full chapter history', hero: { backgroundUrl: '/uploads/chapter-banner.png', tagline: 'Supporting entrepreneurs' }, leaders: [{ name: 'Chapter President', designation: 'President', bio: 'Leadership biography', photoUrl: '/uploads/leader.png' }, { name: 'Hidden leader', isHidden: true }], stateRegions: [{ name: 'Chennai', leaders: [{ name: 'District Secretary', designation: 'Secretary' }] }], events: [{ title: 'Chapter trade meet', summary: 'Open registration', date: '12 October 2026', location: 'Chennai' }], customSections: [{ key: 'business-support', title: 'Business Support', intro: 'Local advisory team', items: [{ title: 'Enterprise desk', summary: 'Help with applications' }] }] };
 regions.getStatePage = async slug => slug === 'tamil-nadu' ? { ...chapter, slug, stateName: 'Tamil Nadu' } : null;
-regions.getRegionPage = async slug => slug === 'south' ? { ...chapter, slug, regionName: 'South' } : null;
+regions.getRegionPage = async slug => ['south', 'national', ...(northPublished ? ['north'] : [])].includes(slug) ? { ...chapter, slug, regionName: { south: 'South', national: 'National', north: 'North' }[slug] } : null;
 regions.listAllStates = () => [{ slug: 'tamil-nadu', name: 'Tamil Nadu' }];
 const service = require('../src/modules/cms/cms.sharePreviews.service');
 
@@ -67,12 +73,29 @@ const run = async() => {
     for (const key of ['path', 'title', 'description', 'image.url', 'image.alt', 'updatedBy.email']) assert.ok(SharePreview.schema.path(key), key);
 
     const editor = await service.editorData();
-    assert.deepEqual(editor.routes.map(row => row.path), EDITOR_PAGES.map(row => row.path));
-    assert.ok(!editor.routes.some(row => row.path === '/login' || row.path === '/events/public-event'), 'Only main navigation routes appear in the CMS selector');
+    assert.deepEqual(editor.routes.map(row => row.path), [...EDITOR_PAGES.map(row => row.path), '/regions/national', '/regions/south']);
+    assert.deepEqual(editor.routes.filter(row => row.group === 'Zones').map(row => row.label), ['National', 'South']);
+    assert.ok(!editor.routes.some(row => ['/login', '/events/public-event', '/regions/north', '/regions/east', '/states/tamil-nadu'].includes(row.path)), 'The selector adds published zone pages only');
     assert.equal(records.size, STATIC_PAGES.length);
     assert.equal(records.get('/about').title, 'Existing client title', 'Seeding preserves existing CMS values');
     assert.ok((await service.resolve('/')).image.url.includes('activ-conference'));
     assert.ok((await service.resolve('/membership')).image.url.includes('activ-conference'));
+    northPublished = true;
+    assert.ok((await service.editorData()).routes.some(row => row.path === '/regions/north'), 'Newly published zones appear without a code change');
+    northPublished = false;
+    assert.ok(!(await service.editorData()).routes.some(row => row.path === '/regions/north'), 'Unpublished zones leave the selector');
+    const south = await service.resolve('/regions/south');
+    assert.equal(south.group, 'Zones', 'Selecting or saving a zone keeps it in its original group');
+    assert.equal(south.label, 'South');
+    assert.equal(south.imageSource.url, '/uploads/chapter-banner.png');
+    const customZone = await service.save({ path: '/regions/south', title: 'South zone community', description: 'Meet the South zone council', image: { url: '/uploads/zone-custom.png', type: 'image' } });
+    assert.equal(customZone.imageSource.url, '/uploads/zone-custom.png');
+    assert.equal(customZone.title, 'South zone community');
+    assert.equal((await service.resolve('/regions/national')).imageSource.url, '/uploads/chapter-banner.png', 'A zone image does not replace another zone or the national preview');
+    assert.equal((await service.resolve('/regions/south/leaders')).imageSource.url, '/uploads/chapter-banner.png', 'Zone section cards keep their own automatic previews');
+    const newZoneImage = await service.save({ path: '/regions/south', image: { url: '/uploads/zone-replaced.png', type: 'image' } });
+    assert.notEqual(newZoneImage.image.url, customZone.image.url, 'Replacing a zone image produces a new crawler image URL');
+    assert.equal(newZoneImage.title, customZone.title, 'Image-only changes preserve the zone text');
     assert.equal((await service.resolve('/about')).imageSource.url, '/uploads/about.png');
     assert.equal((await service.resolve('/events')).imageSource.url, '/uploads/events-index.png');
     assert.equal((await service.resolve('/gallery')).imageSource.url, '/uploads/cover.png');
@@ -142,6 +165,8 @@ const run = async() => {
     app.use((error, req, res, next) => res.status(error.statusCode || 500).json({ message: error.message }));
     const token = role => jwt.sign({ email: 'cms@example.test', role }, config.jwt.secret);
     await request(app).get('/api/v1/cms/share-previews').expect(401);
+    const menu = await request(app).get('/api/v1/cms/share-previews').set('Authorization', `Bearer ${token('cms_admin')}`).expect(200);
+    assert.ok(menu.body.data.routes.some(row => row.path === '/regions/south' && row.group === 'Zones'));
     await request(app).put('/api/v1/cms/share-previews').set('Authorization', `Bearer ${token('member')}`).send({ path: '/about', title: 'No' }).expect(403);
     await request(app).put('/api/v1/cms/share-previews').set('Authorization', `Bearer ${token('cms_admin')}`).send({ path: '/about', title: 'CMS saved title' }).expect(200);
     const publicCard = await request(app).get('/api/v1/cms/share-previews/resolve').query({ path: '/about' }).expect(200);
@@ -157,17 +182,21 @@ const run = async() => {
     const sharp = require('sharp');
     const sourceImage = await sharp({ create: { width: 900, height: 1200, channels: 3, background: '#224480' } }).png().toBuffer();
     variants.readOriginal = async(dir, name) => {
-        assert.match(name, /^(?:news(?:-index|-replaced)?|chapter-banner|about|events-index|schemes-index|cover)\.png$/);
+        assert.match(name, /^(?:news(?:-index|-replaced)?|chapter-banner|zone-replaced|about|events-index|schemes-index|cover)\.png$/);
         return sourceImage;
     };
     try {
-        for (const path of ['/about', '/events', '/gallery', '/schemes', '/news', '/news/article', '/states/tamil-nadu', '/states/tamil-nadu/leaders', '/regions/south/leaders', '/regions/south/events']) {
+        for (const path of ['/about', '/events', '/gallery', '/schemes', '/news', '/news/article', '/states/tamil-nadu', '/states/tamil-nadu/leaders', '/regions/national', '/regions/south', '/regions/south/leaders', '/regions/south/events']) {
             const response = await fetch(`${process.env.PUBLIC_MEDIA_URL}/api/v1/share/page?path=${encodeURIComponent(path)}`);
             const html = await response.text();
             assert.equal(response.status, 200, path);
             assert.ok(html.includes('property="og:image:width" content="1200"'));
             assert.ok(html.includes('property="og:image:height" content="630"'));
             assert.ok(html.includes(`content="https://activ.org.in${path}"`));
+            if (path === '/regions/south') {
+                assert.ok(html.includes('content="South zone community"'));
+                assert.ok(html.includes('content="Meet the South zone council"'));
+            }
             const imageUrl = html.match(/property="og:image" content="([^"]+)"/)[1].replace(/&amp;/g, '&');
             const imageResponse = await fetch(imageUrl);
             assert.equal(imageResponse.status, 200, path);
@@ -206,6 +235,8 @@ const run = async() => {
         assert.ok((await imageResponse.arrayBuffer()).byteLength < 300000);
         await request(app).get('/api/v1/share/site-images/preview-placeholder/wrong.jpg').expect(404);
     } finally { variants.readOriginal = originalRead; await new Promise(resolve => server.close(resolve)); }
-    console.log('PASS: per-route CMS defaults, isolated saves, upload persistence, reset, public visibility, editor permissions, crawler tags and JPEG delivery');
+    await service.reset('/regions/south');
+    assert.equal((await service.resolve('/regions/south')).imageSource.url, '/uploads/chapter-banner.png', 'Reset restores the published zone banner');
+    console.log('PASS: main-page and published-zone selectors, isolated saves, upload persistence, reset, public visibility, editor permissions, crawler tags and JPEG delivery');
 };
 run().catch(error => { console.error(error); process.exitCode = 1; });
