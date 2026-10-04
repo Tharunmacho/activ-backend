@@ -73,6 +73,7 @@ const run = async() => {
     for (const key of ['path', 'title', 'description', 'image.url', 'image.alt', 'updatedBy.email']) assert.ok(SharePreview.schema.path(key), key);
 
     const editor = await service.editorData();
+    assert.deepEqual(editor.routes.filter(row => row.group === 'Main pages').map(row => row.path), ['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes']);
     assert.deepEqual(editor.routes.map(row => row.path), [...EDITOR_PAGES.map(row => row.path), '/regions/national', '/regions/south']);
     assert.deepEqual(editor.routes.filter(row => row.group === 'Zones').map(row => row.label), ['National', 'South']);
     assert.ok(!editor.routes.some(row => ['/login', '/events/public-event', '/regions/north', '/regions/east', '/states/tamil-nadu'].includes(row.path)), 'The selector adds published zone pages only');
@@ -80,6 +81,17 @@ const run = async() => {
     assert.equal(records.get('/about').title, 'Existing client title', 'Seeding preserves existing CMS values');
     assert.ok((await service.resolve('/')).image.url.includes('activ-conference'));
     assert.ok((await service.resolve('/membership')).image.url.includes('activ-conference'));
+    for (const [main, aliases] of [['/', ['/onboarding']], ['/schemes', ['/schemes/central', '/schemes/state']]]) {
+        await service.save({ path: main, title: 'Shared main page title', image: { url: '/uploads/shared-main.png', type: 'image' } });
+        for (const alias of aliases) {
+            const card = await service.resolve(alias);
+            assert.equal(card.path, main);
+            assert.equal(card.canonicalPath, main);
+            assert.equal(card.title, 'Shared main page title');
+            assert.equal(card.imageSource.url, '/uploads/shared-main.png', 'Old links use the image saved for the general page');
+        }
+        await service.reset(main);
+    }
     northPublished = true;
     assert.ok((await service.editorData()).routes.some(row => row.path === '/regions/north'), 'Newly published zones appear without a code change');
     northPublished = false;

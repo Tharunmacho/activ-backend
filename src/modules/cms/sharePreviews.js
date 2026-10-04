@@ -27,7 +27,11 @@ const plain = value => typeof value === 'string' ? value.replace(/<[^>]*>/g, '')
 const staticPage = path => STATIC_PAGES.find(page => page.path === path);
 // Main navigation routes. The editor also lists published zone pages from the
 // region map; event, article, gallery and chapter sections keep automatic cards.
-const EDITOR_PAGES = STATIC_PAGES.slice(0, 10);
+const EDITOR_PATHS = new Set(['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes']);
+const EDITOR_PAGES = STATIC_PAGES.filter(page => EDITOR_PATHS.has(page.path));
+// These existing website aliases share one editable card with their main page.
+// Keep accepting old links, without making the client maintain duplicate images.
+const PREVIEW_ALIASES = { '/onboarding': '/', '/schemes/central': '/schemes', '/schemes/state': '/schemes' };
 const FEED_TYPES = ['about', 'leaders', 'keyAchievements', 'sectorUpdates', 'newsUpdates', 'speakInMedia', 'achievements', 'events', 'projects', 'policyAdvocacy', 'consultingServices', 'publications', 'mediaReleases', 'mediaCoverages', 'gallery'];
 const feedTypes = FEED_TYPES.join('|');
 const dynamicPath = new RegExp(`^/(?:(?:events/[^/]+(?:/book)?)|(?:gallery/[^/]+(?:/photo/\\d+)?)|(?:news/[^/]+)|(?:schemes/(?:view|state)/[^/]+)|(?:(?:states|regions)/[^/]+(?:/(?:${feedTypes}|section-[^/]+))?)|(?:legal/[^/]+))$`);
@@ -40,6 +44,7 @@ const normalizePath = raw => {
     try { path = decodeURIComponent(raw.split(/[?#]/, 1)[0]); } catch { return null; }
     if (/[\\<>\x00-\x20]/.test(path) || path.includes('//') || path.split('/').some(part => ['.', '..', '__proto__', 'constructor', 'prototype'].includes(part))) return null;
     path = path.replace(/\/+$/, '') || '/';
+    path = PREVIEW_ALIASES[path] || path;
     return staticPage(path) || dynamicPath.test(path) ? path : null;
 };
 
