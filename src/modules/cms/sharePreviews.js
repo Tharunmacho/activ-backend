@@ -25,13 +25,12 @@ const STATIC_PAGES = [
 
 const plain = value => typeof value === 'string' ? value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
 const staticPage = path => STATIC_PAGES.find(page => page.path === path);
-// Main navigation routes. The editor also lists published zone pages from the
-// region map; event, article, gallery and chapter sections keep automatic cards.
-const EDITOR_PATHS = new Set(['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes']);
+// Main navigation routes. Published zone/state pages come from the region map;
+// event, article, gallery and chapter sections keep automatic cards.
+const EDITOR_PATHS = new Set(['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state']);
 const EDITOR_PAGES = STATIC_PAGES.filter(page => EDITOR_PATHS.has(page.path));
-// These existing website aliases share one editable card with their main page.
-// Keep accepting old links, without making the client maintain duplicate images.
-const PREVIEW_ALIASES = { '/onboarding': '/', '/schemes/central': '/schemes', '/schemes/state': '/schemes' };
+// Onboarding remains another entry point to Home. Scheme tiers are distinct pages.
+const PREVIEW_ALIASES = { '/onboarding': '/' };
 const FEED_TYPES = ['about', 'leaders', 'keyAchievements', 'sectorUpdates', 'newsUpdates', 'speakInMedia', 'achievements', 'events', 'projects', 'policyAdvocacy', 'consultingServices', 'publications', 'mediaReleases', 'mediaCoverages', 'gallery'];
 const feedTypes = FEED_TYPES.join('|');
 const dynamicPath = new RegExp(`^/(?:(?:events/[^/]+(?:/book)?)|(?:gallery/[^/]+(?:/photo/\\d+)?)|(?:news/[^/]+)|(?:schemes/(?:view|state)/[^/]+)|(?:(?:states|regions)/[^/]+(?:/(?:${feedTypes}|section-[^/]+))?)|(?:legal/[^/]+))$`);

@@ -13,12 +13,7 @@ const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, uploadDir);
     },
-    filename: function (req, file, cb) {
-        // Create unique filename: fieldname-timestamp.ext
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
-        cb(null, file.fieldname + '-' + uniqueSuffix + ext);
-    }
+    filename: require('../storage/mediaFilename').mediaFilename(uploadDir)
 });
 
 // File filter (optional but good for security)
@@ -41,7 +36,7 @@ const upload = multer({
 /**
  * MEMBER PHOTOS — one folder per member, kept for good.
  *
- *   uploads/members/<name-slug>-<memberId>/profile-<timestamp>.<ext>
+ *   uploads/members/<name-slug>-<memberId>/<version>/profile.<ext>
  *
  * Every upload is a new file; nothing earlier is overwritten or deleted, so a
  * photo a member once had can never vanish from under a page still showing it.
@@ -65,12 +60,16 @@ const memberPhotoStorage = multer.diskStorage({
             .then((member) => {
                 const folder = `${memberSlug(member && member.fullName)}-${id}`;
                 const dir = path.join(uploadDir, 'members', folder);
+                req.memberPhotoDirectory = dir;
                 fs.mkdir(dir, { recursive: true }, (err) => cb(err || null, dir));
             });
     },
     filename: function (req, file, cb) {
         const ext = IMAGE_EXT[String(file.mimetype || '').toLowerCase()] || '.jpg';
-        cb(null, `profile-${Date.now()}${ext}`);
+        const version = require('crypto').randomUUID();
+        fs.mkdir(path.join(req.memberPhotoDirectory, version), { recursive: true }, error => {
+            cb(error || null, `${version}/profile${ext}`);
+        });
     }
 });
 

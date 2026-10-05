@@ -17,6 +17,7 @@
     "test:messaging": "node tests/messaging.test.js",
     "test:cms": "node tests/cms-content.test.js && node tests/cms-field-survival.test.js",
     "test:share-previews": "node tests/share-previews.test.js",
+    "test:media-uploads": "node tests/media-uploads.test.js && node tests/upload-urls.test.js",
     "test:contact": "node tests/contact-offices.test.js && node tests/social-links.test.js && node tests/social-editor-sync.test.js",
     "lint": "eslint src/**/*.js",
     "lint:fix": "eslint src/**/*.js --fix",

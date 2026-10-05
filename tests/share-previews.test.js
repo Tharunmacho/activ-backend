@@ -73,15 +73,15 @@ const run = async() => {
     for (const key of ['path', 'title', 'description', 'image.url', 'image.alt', 'updatedBy.email']) assert.ok(SharePreview.schema.path(key), key);
 
     const editor = await service.editorData();
-    assert.deepEqual(editor.routes.filter(row => row.group === 'Main pages').map(row => row.path), ['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes']);
-    assert.deepEqual(editor.routes.map(row => row.path), [...EDITOR_PAGES.map(row => row.path), '/regions/national', '/regions/south']);
+    assert.deepEqual(editor.routes.filter(row => row.group === 'Main pages').map(row => row.path), ['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state']);
+    assert.deepEqual(editor.routes.map(row => row.path), [...EDITOR_PAGES.map(row => row.path), '/regions/national', '/regions/south', '/states/tamil-nadu']);
     assert.deepEqual(editor.routes.filter(row => row.group === 'Zones').map(row => row.label), ['National', 'South']);
-    assert.ok(!editor.routes.some(row => ['/login', '/events/public-event', '/regions/north', '/regions/east', '/states/tamil-nadu'].includes(row.path)), 'The selector adds published zone pages only');
+    assert.ok(!editor.routes.some(row => ['/login', '/events/public-event', '/regions/north', '/regions/east', '/states/hidden'].includes(row.path)), 'The selector adds only published zone and state pages');
     assert.equal(records.size, STATIC_PAGES.length);
     assert.equal(records.get('/about').title, 'Existing client title', 'Seeding preserves existing CMS values');
     assert.ok((await service.resolve('/')).image.url.includes('activ-conference'));
     assert.ok((await service.resolve('/membership')).image.url.includes('activ-conference'));
-    for (const [main, aliases] of [['/', ['/onboarding']], ['/schemes', ['/schemes/central', '/schemes/state']]]) {
+    for (const [main, aliases] of [['/', ['/onboarding']]]) {
         await service.save({ path: main, title: 'Shared main page title', image: { url: '/uploads/shared-main.png', type: 'image' } });
         for (const alias of aliases) {
             const card = await service.resolve(alias);
@@ -91,6 +91,15 @@ const run = async() => {
             assert.equal(card.imageSource.url, '/uploads/shared-main.png', 'Old links use the image saved for the general page');
         }
         await service.reset(main);
+    }
+    for (const path of ['/schemes/central', '/schemes/state', '/states/tamil-nadu']) {
+        const saved = await service.save({ path, title: `Unique ${path}`, image: { url: '/uploads/separate-preview.png', type: 'image' } });
+        assert.equal(saved.path, path);
+        assert.equal(saved.canonicalPath, path);
+        assert.equal((await service.resolve(path)).title, `Unique ${path}`);
+        assert.notEqual((await service.resolve('/schemes')).title, saved.title);
+        assert.notEqual((await service.resolve('/regions/south')).imageSource.url, saved.imageSource.url);
+        await service.reset(path);
     }
     northPublished = true;
     assert.ok((await service.editorData()).routes.some(row => row.path === '/regions/north'), 'Newly published zones appear without a code change');

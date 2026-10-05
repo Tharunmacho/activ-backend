@@ -24,10 +24,7 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const mediaUpload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => cb(null, uploadsDir),
-        filename: (req, file, cb) => {
-            const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-            cb(null, `cms-${unique}${path.extname(file.originalname) || ''}`);
-        },
+        filename: require('../../core/storage/mediaFilename').mediaFilename(uploadsDir),
     }),
     limits: { fileSize: 50 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
@@ -242,10 +239,7 @@ const DOCUMENT_TYPES = /^(application\/(pdf|msword|vnd\.openxmlformats-officedoc
 const attachmentUpload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => cb(null, uploadsDir),
-        filename: (req, file, cb) => {
-            const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-            cb(null, `doc-${unique}${path.extname(file.originalname) || ''}`);
-        },
+        filename: require('../../core/storage/mediaFilename').mediaFilename(uploadsDir, 'documents'),
     }),
     limits: { fileSize: 20 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {

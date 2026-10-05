@@ -48,7 +48,8 @@ const basePreview = async(path) => {
             content = { title: plain([settings.heading, settings.headingHighlight].filter(Boolean).join(' ')), description: plain(settings.description), image: albums.map(album => photoOf(album.media)).find(Boolean) || '' };
         } else if (path.startsWith('/schemes')) {
             const settings = await schemes.getSettings();
-            content = { title: path === '/schemes' ? plain([settings.heading, settings.headingHighlight].filter(Boolean).join(' ')) : '', description: plain(settings.description), image: photoOf(settings.heroImage) };
+            const tier = path === '/schemes/central' ? 'central' : path === '/schemes/state' ? 'state' : '';
+            content = { title: tier ? plain(settings[`${tier}Label`]) : plain([settings.heading, settings.headingHighlight].filter(Boolean).join(' ')), description: plain(tier ? settings[`${tier}Description`] || settings.description : settings.description), image: photoOf(settings.heroImage) };
         }
         return { ...fixed, title: content.title || fixed.title, description: content.description || fixed.description, image: content.image ? mediaOf(content.image, content.alt || content.title || fixed.title) : defaultImage(path), canonicalPath: path, type: 'website' };
     }
@@ -145,7 +146,11 @@ const editorData = async() => {
     const zones = map.regions.filter(region => region.hasPage).map(region => ({
         path: fullPath('regions', region.slug), label: plain(region.label), group: 'Zones',
     }));
-    return { routes: [...bases.map(base => applyRecord(base, rows.get(base.path))), ...zones] };
+    const states = [...new Map(map.regions.flatMap(region => (region.states || [])
+        .filter(state => state.hasPage).map(state => [state.slug, {
+            path: fullPath('states', state.slug), label: plain(state.name), group: 'States',
+        }]))).values()];
+    return { routes: [...bases.map(base => applyRecord(base, rows.get(base.path))), ...zones, ...states] };
 };
 
 const save = async(payload, actor = {}) => {
