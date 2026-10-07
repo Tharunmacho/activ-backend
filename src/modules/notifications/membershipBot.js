@@ -49,7 +49,7 @@ const reply = async (identity, command = 'STATUS') => {
         return `Hello ${name}, your membership is cancelled. Please contact member@activ.org.in before making another payment.`;
     }
     if (state.state === 'active' || state.state === 'expired') {
-        let planName = member.membershipTier === 'platinum' ? 'Platinum' : '';
+        let planName = member.membershipTier === 'platinum' ? 'Lifetime' : '';
         if (!planName && member._id) {
             const order = await require('../payment/paymentorder.model').findOne({ memberId: member._id, orderType: 'membership', status: 'paid' })
                 .sort({ paidAt: -1, createdAt: -1 }).lean();

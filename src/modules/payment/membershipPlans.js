@@ -61,7 +61,7 @@ const PLANS = Object.freeze({
      */
     platinum: {
         id: 'platinum',
-        name: 'Platinum Lifetime',
+        name: 'Lifetime membership',
         amount: 200000,
         membershipType: 'lifetime',
         forBusiness: true,

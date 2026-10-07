@@ -110,10 +110,10 @@ const SEED_FEATURES = {
     ],
     platinum: [
         'Lifetime membership — never renew',
-        'Platinum badge on your member dashboard',
+        'Lifetime badge on your member dashboard',
         'Every member benefit, for life',
         'Priority invitations to ACTIV conclaves',
-        'Recognition as a Platinum member of ACTIV'
+        'Recognition as a Lifetime member of ACTIV'
     ]
 };
 
@@ -196,7 +196,7 @@ const ensureSeeded = async() => {
 const toPlan = (doc = {}) => ({
     id: String(doc._id || ''),
     key: str(doc.key),
-    name: doc.name || '',
+    name: doc.audience === 'platinum' ? 'Lifetime membership' : doc.name || '',
     description: doc.tagline || '',
     price: rupees(doc.amountPaise),
     audience: audienceOf(doc.audience),
@@ -204,7 +204,7 @@ const toPlan = (doc = {}) => ({
     minYears: Number(doc.minYears || 0),
     maxYears: doc.maxYears === null || doc.maxYears === undefined ? null : Number(doc.maxYears),
     experience: bandLabel(doc),
-    features: Array.isArray(doc.entitlements) ? doc.entitlements.filter(Boolean) : [],
+    features: Array.isArray(doc.entitlements) ? doc.entitlements.filter(Boolean).map(text => doc.audience === 'platinum' ? String(text).replace(/Platinum/g, 'Lifetime') : text) : [],
     popular: doc.popular === true,
     active: doc.isActive !== false,
     order: Number(doc.displayOrder || 0)

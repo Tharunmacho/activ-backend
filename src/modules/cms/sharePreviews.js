@@ -27,7 +27,7 @@ const plain = value => typeof value === 'string' ? value.replace(/<[^>]*>/g, '')
 const staticPage = path => STATIC_PAGES.find(page => page.path === path);
 // Main navigation routes. Published zone/state pages come from the region map;
 // event, article, gallery and chapter sections keep automatic cards.
-const EDITOR_PATHS = new Set(['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state']);
+const EDITOR_PATHS = new Set(['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state', '/login', '/register']);
 const EDITOR_PAGES = STATIC_PAGES.filter(page => EDITOR_PATHS.has(page.path));
 // Onboarding remains another entry point to Home. Scheme tiers are distinct pages.
 const PREVIEW_ALIASES = { '/onboarding': '/' };

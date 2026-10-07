@@ -654,25 +654,25 @@ module.exports = (h) => {
             const when = ctx.preferredTime ? ` (${ctx.preferredTime})` : '';
             return {
                 inApp: {
-                    title: 'Platinum request received',
-                    message: `The ACTIV office will contact you by ${how.toLowerCase()}${when} about Platinum lifetime membership.`,
+                    title: 'Lifetime request received',
+                    message: `The ACTIV office will contact you by ${how.toLowerCase()}${when} about Lifetime membership.`,
                     type: 'success'
                 },
                 email: {
-                    subject: 'Your Platinum lifetime membership request',
-                    title: 'We have your Platinum request',
-                    badge: 'Platinum · request received',
+                    subject: 'Your Lifetime membership request',
+                    title: 'We have your Lifetime request',
+                    badge: 'Lifetime · request received',
                     tone: 'info',
                     preheader: 'The ACTIV office will contact you within two working days.',
                     highlight: ctx.priceLabel ? {
-                        label: `${ctx.planName || 'Platinum Lifetime'} · one payment`,
+                        label: `${ctx.planName || 'Lifetime membership'} · one payment`,
                         value: ctx.priceLabel,
                         note: 'Member for life — never renew. Paid at the ACTIV office and activated for you.'
                     } : null,
-                    bodyHtml: `<p style="margin:0 0 12px 0;">Thank you for your interest in <strong>Platinum lifetime
+                    bodyHtml: `<p style="margin:0 0 12px 0;">Thank you for your interest in <strong>Lifetime membership
                         membership</strong>.</p>
                         <p style="margin:0;">The ACTIV office will contact you by <strong>${esc(how)}</strong>${esc(when)}
-                        within two working days to explain the next steps. Nothing is charged online — Platinum is paid at
+                        within two working days to explain the next steps. Nothing is charged online — Lifetime is paid at
                         the office and your membership is upgraded for you.</p>`,
                     facts: [
                         { label: 'Contact by', value: how },
@@ -683,9 +683,9 @@ module.exports = (h) => {
                 whatsapp: {
                     template: TPL.status,
                     params: [ctx.firstName || 'Member', 'received',
-                        'the ACTIV office will contact you about Platinum lifetime membership within two working days'],
-                    text: '👑 *Platinum request received*\n\n'
-                        + `Dear ${greet(ctx)},\nThank you for your interest in Platinum lifetime membership`
+                        'the ACTIV office will contact you about Lifetime membership within two working days'],
+                    text: '👑 *Lifetime request received*\n\n'
+                        + `Dear ${greet(ctx)},\nThank you for your interest in Lifetime membership`
                         + `${ctx.priceLabel ? ` (${ctx.priceLabel}, one payment, never renew)` : ''}.\n\n`
                         + `📞 The ACTIV office will contact you by ${how.toLowerCase()}${when} within two working days.\n\n`
                         + `— ${ORG_SIGNATURE}`
@@ -698,18 +698,18 @@ module.exports = (h) => {
             const review = appUrl(ctx.reviewPath || '/super-admin/membership');
             return {
                 email: {
-                    subject: `Platinum request — ${ctx.applicantName || 'a member'}${ctx.applicantPhone ? ` (${ctx.applicantPhone})` : ''}`,
-                    title: 'A member wants Platinum',
-                    badge: 'Platinum request',
+                    subject: `Lifetime request — ${ctx.applicantName || 'a member'}${ctx.applicantPhone ? ` (${ctx.applicantPhone})` : ''}`,
+                    title: 'A member wants Lifetime',
+                    badge: 'Lifetime request',
                     tone: 'info',
                     preheader: `${ctx.applicantName || 'A member'} · ${ctx.preferredContactLabel || 'Call'}${ctx.preferredTime ? ` · ${ctx.preferredTime}` : ''}`,
-                    highlight: ctx.priceLabel ? { label: 'Platinum lifetime', value: ctx.priceLabel, note: 'Collect at the office, then grant it in Super Admin → Membership.' } : null,
+                    highlight: ctx.priceLabel ? { label: 'Lifetime membership', value: ctx.priceLabel, note: 'Collect at the office, then grant it in Super Admin → Membership.' } : null,
                     bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${esc(ctx.applicantName || 'A member')}</strong> has asked to
-                        become a Platinum lifetime member. Please contact them${ctx.preferredContactLabel
+                        become a Lifetime membership member. Please contact them${ctx.preferredContactLabel
         ? ` by <strong>${esc(ctx.preferredContactLabel)}</strong>` : ''}${ctx.preferredTime ? ` (${esc(ctx.preferredTime)})` : ''}.</p>
                         ${ctx.message ? `<p style="margin:0 0 12px 0; padding:12px 14px; background-color:#eff6ff; border-left:3px solid #2563eb;
                                   border-radius:0 8px 8px 0;">${esc(ctx.message)}</p>` : ''}
-                        <p style="margin:0;">Once the payment is received, grant Platinum from Super Admin → Membership; the
+                        <p style="margin:0;">Once the payment is received, grant Lifetime from Super Admin → Membership; the
                         request closes itself.</p>`,
                     facts: [
                         { label: 'Member', value: ctx.applicantName },
@@ -720,7 +720,7 @@ module.exports = (h) => {
                         { label: 'Contact by', value: ctx.preferredContactLabel },
                         { label: 'Best time', value: ctx.preferredTime }
                     ],
-                    actionButton: { label: 'Open Platinum requests', url: review }
+                    actionButton: { label: 'Open Lifetime requests', url: review }
                 }
             };
         },

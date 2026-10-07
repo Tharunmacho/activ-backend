@@ -73,10 +73,12 @@ const run = async() => {
     for (const key of ['path', 'title', 'description', 'image.url', 'image.alt', 'updatedBy.email']) assert.ok(SharePreview.schema.path(key), key);
 
     const editor = await service.editorData();
-    assert.deepEqual(editor.routes.filter(row => row.group === 'Main pages').map(row => row.path), ['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state']);
+    assert.deepEqual(editor.routes.filter(row => row.group === 'Main pages').map(row => row.path), ['/', '/about', '/membership', '/events', '/gallery', '/news', '/schemes', '/schemes/central', '/schemes/state', '/login', '/register']);
     assert.deepEqual(editor.routes.map(row => row.path), [...EDITOR_PAGES.map(row => row.path), '/regions/national', '/regions/south', '/states/tamil-nadu']);
     assert.deepEqual(editor.routes.filter(row => row.group === 'Zones').map(row => row.label), ['National', 'South']);
-    assert.ok(!editor.routes.some(row => ['/login', '/events/public-event', '/regions/north', '/regions/east', '/states/hidden'].includes(row.path)), 'The selector adds only published zone and state pages');
+    assert.ok(editor.routes.some(row => row.path === '/login'));
+    assert.ok(editor.routes.some(row => row.path === '/register'));
+    assert.ok(!editor.routes.some(row => ['/events/public-event', '/regions/north', '/regions/east', '/states/hidden'].includes(row.path)), 'The selector adds only published zone and state pages');
     assert.equal(records.size, STATIC_PAGES.length);
     assert.equal(records.get('/about').title, 'Existing client title', 'Seeding preserves existing CMS values');
     assert.ok((await service.resolve('/')).image.url.includes('activ-conference'));

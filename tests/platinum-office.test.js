@@ -44,7 +44,7 @@ async function main() {
     assert.equal(notices[0][0], 'MEMBERSHIP_ACTIVATED');
     assert.equal(notices[0][2].membershipType, 'lifetime');
     assert.equal(apps.length, 0, 'office admission does not invent an approved application');
-    await assert.rejects(service.grant(member._id, body, actor), /already a Platinum/);
+    await assert.rejects(service.grant(member._id, body, actor), /already a Lifetime/);
     const simultaneous = fixture();
     const results = await Promise.allSettled([service.grant(simultaneous._id, body, actor), service.grant(simultaneous._id, body, actor)]);
     assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
@@ -61,7 +61,8 @@ async function main() {
     assert.equal(business.memberType, 'business'); assert.equal(business.membershipTier, 'platinum');
     assert.equal(business.membershipType, 'lifetime'); assert.equal(business.membershipExpiresAt, null);
     assert.equal(String(orders.at(-1).memberId), originalId);
-    const reused = await service.createAccount({ email: business.email, phoneNumber: business.phoneNumber, password: 'unchanged-secret' }, actor);
+    await assert.rejects(service.createAccount({ email: business.email, phoneNumber: business.phoneNumber, password: 'unchanged-secret' }, actor), /already exists/);
+    const reused = await service.createAccount({ email: business.email, phoneNumber: business.phoneNumber }, actor);
     assert.equal(reused.id, originalId); assert.equal(reused.existingAccount, true);
     const phoneOnly = await service.createAccount({ phoneNumber: business.phoneNumber }, actor);
     assert.equal(phoneOnly.id, originalId);

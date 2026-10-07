@@ -60,6 +60,7 @@ const shape = (m, outcome = '') => ({
     fullName: m.fullName || '',
     email: m.email || '',
     phoneNumber: m.phoneNumber || '',
+    whatsappNumber: m.whatsappNumber || '',
     block: m.block || '',
     district: m.district || '',
     state: m.state || '',
@@ -71,7 +72,7 @@ const shape = (m, outcome = '') => ({
     canAdmitManually: m.isActive !== false && m.membershipTier !== 'platinum' && outcome !== STATUS.REJECTED && (!m.role || m.role === 'member' || ['business', 'student', 'aspirant'].includes(m.role)),
     /** Why a grant would be refused, or '' when it can go ahead. */
     blockedReason: m.isActive === false ? 'Unblock this account before admission' : m.membershipTier === 'platinum'
-        ? 'Already a Platinum member'
+        ? 'Already a Lifetime member'
         : (outcome === STATUS.APPROVED || isPaidStatus(m.membershipStatus))
             ? ''
             : outcome === STATUS.REJECTED
@@ -135,14 +136,23 @@ const requestWatchers = async () => {
             }
         }
     } catch (error) {
-        logger.warn('Platinum request: super admin roster unavailable', { error: error && error.message });
+        logger.warn('Lifetime request: super admin roster unavailable', { error: error && error.message });
     }
     return [...out.values()];
 };
 
 class PlatinumService {
+    async updateAccount(id, body, actor = {}) {
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can edit member accounts.');
+        if (!require('mongoose').isValidObjectId(id)) throw ApiError.badRequest('Invalid member ID.');
+        const member = await MemberDetails.findById(id);
+        if (!member || member.deletedAt || (member.role && !['member', 'business', 'student', 'aspirant'].includes(member.role))) throw ApiError.notFound('Member not found.');
+        await require('./accountDetails.service').update(member, body, { admin: true });
+        const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
+        return shape(member, outcome);
+    }
     async createAccount(body, actor = {}) {
-        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can create a Platinum member account.');
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can create a Lifetime member account.');
         const email = String(body.email || '').trim().toLowerCase();
         const phone = String(body.phoneNumber || '').replace(/\D/g, '').slice(-10);
         if (!email && phone.length !== 10) throw ApiError.badRequest('Enter the member email or mobile number.');
@@ -152,6 +162,8 @@ class PlatinumService {
         if (!existing && phone.length === 10) existing = await MemberDetails.findOne({ phoneNumber: new RegExp(`${phone}$`) }).lean();
         if (existing) {
             if (email && existing.email?.toLowerCase() !== email) throw ApiError.conflict('This mobile belongs to a different account. Select that member before recording payment.');
+            // A new-account form must never silently discard the entered password.
+            if (body.password) throw ApiError.conflict('This account already exists. Select Use existing account, then Edit login and contact details to change its password.');
             const outcome = (await outcomesFor([existing._id])).get(String(existing._id)) || '';
             return { ...shape(existing, outcome), existingAccount: true };
         }
@@ -172,7 +184,7 @@ class PlatinumService {
     async createRequest(memberId, body = {}) {
         const member = await MemberDetails.findById(memberId);
         if (!member) throw ApiError.notFound('Member not found');
-        if (member.membershipTier === 'platinum') throw ApiError.badRequest('You are already a Platinum member.');
+        if (member.membershipTier === 'platinum') throw ApiError.badRequest('You are already a Lifetime member.');
 
         const open = await PlatinumRequest.findOne({ memberId: String(member._id), status: { $in: OPEN } }).sort({ createdAt: -1 });
         if (open) return { request: shapeRequest(open.toObject()), existing: true };
@@ -199,7 +211,7 @@ class PlatinumService {
             message: String(body.message || '').trim().slice(0, 1000)
         });
         const request = shapeRequest(doc.toObject());
-        const plan = await this.plan().catch(() => ({ price: 200000, name: 'Platinum Lifetime' }));
+        const plan = await this.plan().catch(() => ({ price: 200000, name: 'Lifetime membership' }));
         const priceLabel = `₹${Number(plan.price || 200000).toLocaleString('en-IN')}`;
 
         // The member: a confirmation on every channel they have.
@@ -234,7 +246,7 @@ class PlatinumService {
             });
         }
 
-        logger.info('Platinum requested', { memberId: request.memberId, id: request.id });
+        logger.info('Lifetime requested', { memberId: request.memberId, id: request.id });
         return { request, existing: false };
     }
 
@@ -366,7 +378,7 @@ class PlatinumService {
         const list = Array.isArray(rows) ? rows : (rows && rows.plans) || [];
         const row = list.find((p) => p && (p.key === 'platinum' || p.id === 'platinum' || p.audience === 'platinum'));
         return {
-            name: (row && row.name) || 'Platinum Lifetime',
+            name: (row && row.name) || 'Lifetime membership',
             price: Number((row && row.price) || 200000),
             active: row ? row.active !== false : true
         };
@@ -394,26 +406,26 @@ class PlatinumService {
     }
 
     async grant(memberId, body = {}, actor = {}) {
-        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can admit a Platinum member.');
+        if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can admit a Lifetime member.');
         let member = await MemberDetails.findById(memberId);
         if (!member) throw ApiError.notFound('Member not found');
         if (member.isActive === false || (member.role && !['member', 'business', 'student', 'aspirant'].includes(member.role))) throw ApiError.badRequest('Choose an active member account.');
-        if (member.membershipTier === 'platinum') throw ApiError.badRequest('This member is already a Platinum member.');
+        if (member.membershipTier === 'platinum') throw ApiError.badRequest('This member is already a Lifetime member.');
 
         const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
         const manualAdmission = body.manualAdmission === true && outcome !== STATUS.REJECTED && String(body.note || '').trim();
         if (outcome !== STATUS.APPROVED && !isPaidStatus(member.membershipStatus) && !manualAdmission) {
             throw ApiError.badRequest(shape(member.toObject(), outcome).blockedReason
-                + ' — Platinum is granted to an approved applicant or an existing member.');
+                + ' — Lifetime is granted to an approved applicant or an existing member.');
         }
 
         const plan = await this.plan();
         const amount = Number(body.amount);
-        if (!plan.active) throw ApiError.badRequest('The Platinum plan is not active.');
+        if (!plan.active) throw ApiError.badRequest('The Lifetime plan is not active.');
         if (!Number.isFinite(amount) || amount <= 0) throw ApiError.badRequest('Enter the actual positive amount received.');
         if (!MODES.includes(body.paymentMode)) throw ApiError.badRequest('Choose a valid payment mode.');
         const paymentMode = body.paymentMode;
-        if (amount !== plan.price && !String(body.note || '').trim()) throw ApiError.badRequest('Explain why the amount received differs from the Platinum fee.');
+        if (amount !== plan.price && !String(body.note || '').trim()) throw ApiError.badRequest('Explain why the amount received differs from the Lifetime fee.');
         const receivedOn = body.receivedOn ? new Date(body.receivedOn) : new Date();
         if (Number.isNaN(receivedOn.getTime()) || receivedOn.getTime() > Date.now()) throw ApiError.badRequest('Enter a valid payment date that is not in the future.');
 
@@ -473,7 +485,7 @@ class PlatinumService {
                 membershipType: 'lifetime', membershipExpiresAt: null, membershipActivatedAt: member.membershipActivatedAt,
                 paymentId: orderId, paymentAmount: amount, lastPaymentDate: receivedOn
             } }, { new: true });
-            if (!saved) throw ApiError.conflict('Member details changed or Platinum was already granted. Refresh before trying again.');
+            if (!saved) throw ApiError.conflict('Member details changed or Lifetime was already granted. Refresh before trying again.');
             member = saved;
         } catch (error) {
             await PaymentOrder.updateOne({ _id: receipt._id }, { $set: { status: 'cancelled' } });
@@ -488,7 +500,7 @@ class PlatinumService {
         try {
             const { recordActivity } = require('./memberExtras.controller');
             await recordActivity(member._id, 'membership_activated', 'Payment', member._id,
-                'Platinum lifetime membership granted');
+                'Lifetime membership granted');
         } catch { /* a feed entry is never worth failing a grant over */ }
 
         const ids = await require('./memberIds').idsFor(member).catch(() => ({ applicationRef: '' }));
@@ -514,7 +526,7 @@ class PlatinumService {
             { $set: { status: 'converted', handledBy: String(actor.email || 'Super Admin'), handledAt: now } }
         ).catch(() => null);
 
-        logger.info('Platinum membership granted', { memberId: String(member._id), amount, paymentMode, by: actor.email });
+        logger.info('Lifetime membership granted', { memberId: String(member._id), amount, paymentMode, by: actor.email });
         return shape(member.toObject(), outcome);
     }
 
@@ -522,7 +534,7 @@ class PlatinumService {
     async revoke(memberId, actor = {}) {
         const member = await MemberDetails.findById(memberId);
         if (!member) throw ApiError.notFound('Member not found');
-        if (member.membershipTier !== 'platinum') throw ApiError.badRequest('This member is not a Platinum member.');
+        if (member.membershipTier !== 'platinum') throw ApiError.badRequest('This member is not a Lifetime member.');
 
         const grant = member.platinumGrant || {};
         const prev = grant.previous || {};
@@ -539,7 +551,7 @@ class PlatinumService {
         await member.save();
         invalidateMemberContext(member._id);
 
-        logger.warn('Platinum membership revoked', { memberId: String(member._id), by: actor.email });
+        logger.warn('Lifetime membership revoked', { memberId: String(member._id), by: actor.email });
         const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
         return shape(member.toObject(), outcome);
     }

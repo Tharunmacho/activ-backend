@@ -96,7 +96,7 @@ class MembershipDashboardService {
         const note = String(body.note || '').trim().slice(0, 500);
         if (!note) throw ApiError.badRequest('Enter the reason or payment receipt details for this confirmation.');
         const plan = await plans.getPlanForPayment(body.planId);
-        if (!plan) throw ApiError.badRequest('Choose an active membership plan. Use the Platinum page for Platinum grants.');
+        if (!plan) throw ApiError.badRequest('Choose an active membership plan. Use the Lifetime page for Lifetime grants.');
         const amount = mode === 'waived' ? 0 : Number(body.amount);
         if (!Number.isFinite(amount) || (mode !== 'waived' && amount <= 0)) throw ApiError.badRequest('Enter the actual amount received. Use fee waiver when no payment was received.');
         let detail = await this.detail(id, actor);

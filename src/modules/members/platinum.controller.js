@@ -15,15 +15,18 @@ const createAccount = asyncHandler(async (req, res) => {
 const search = asyncHandler(async (req, res) => {
     res.json(ApiResponse.success(await platinumService.search(req.query.q)));
 });
+const updateAccount = asyncHandler(async (req, res) => {
+    res.json(ApiResponse.success(await platinumService.updateAccount(req.params.memberId, req.body, req.user), 'Login and contact details saved.'));
+});
 
 const grant = asyncHandler(async (req, res) => {
     const member = await platinumService.grant(req.params.memberId, req.body || {}, req.user || {});
-    res.json(ApiResponse.success(member, 'Platinum lifetime membership granted'));
+    res.json(ApiResponse.success(member, 'Lifetime membership granted'));
 });
 
 const revoke = asyncHandler(async (req, res) => {
     const member = await platinumService.revoke(req.params.memberId, req.user || {});
-    res.json(ApiResponse.success(member, 'Platinum membership removed'));
+    res.json(ApiResponse.success(member, 'Lifetime membership removed'));
 });
 
 /* ---------------------------------------------- requests (the apply flow) */
@@ -53,4 +56,4 @@ const createRequest = asyncHandler(async (req, res) => {
         result.existing ? 'We already have your request' : 'Request received — the ACTIV office will contact you'));
 });
 
-module.exports = { overview, createAccount, search, grant, revoke, listRequests, requestDetail, updateRequest, myRequest, createRequest };
+module.exports = { overview, createAccount, updateAccount, search, grant, revoke, listRequests, requestDetail, updateRequest, myRequest, createRequest };

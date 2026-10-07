@@ -54,6 +54,7 @@ const platinum = require('../members/platinum.controller');
 router.post('/super/membership/platinum/accounts', requireRole('super_admin'), require('../auth/auth.validators').registerValidator, platinum.createAccount);
 router.get('/super/membership/platinum', requireRole('super_admin'), platinum.overview);
 router.get('/super/membership/platinum/search', requireRole('super_admin'), platinum.search);
+router.patch('/super/membership/platinum/:memberId/account', requireRole('super_admin'), platinum.updateAccount);
 router.get('/super/membership/platinum/requests', requireRole('super_admin'), platinum.listRequests);
 router.get('/super/membership/platinum/requests/:id', requireRole('super_admin'), platinum.requestDetail);
 router.patch('/super/membership/platinum/requests/:id', requireRole('super_admin'), platinum.updateRequest);

@@ -933,7 +933,11 @@ class AuthService {
     }
 
     async changePassword(userId, oldPassword, newPassword) {
-        const memberAuth = await MemberAuth.findById(userId).select('+password').catch(() => null);
+        // Tokens carry the profile ID; the credential document has its own ID.
+        const member = await MemberDetails.findById(userId).select('email');
+        const memberAuth = member
+            ? await MemberAuth.findOne({ email: member.email }).select('+password')
+            : null;
 
         /*
          * AN ADMIN CHANGING THEIR OWN PASSWORD.

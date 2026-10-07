@@ -146,67 +146,17 @@ const updateMember = asyncHandler(async(req, res) => {
     // Store original email before any updates (needed for finding auth record)
     const originalEmail = member.email;
     
-    // Handle password update if new password is provided
-    if (password && password.trim() && confirmPassword && confirmPassword.trim()) {
-        // Get member auth record from "web auth" collection using ORIGINAL email
-        const memberAuth = await MemberAuth.findOne({ email: originalEmail }).select('+password');
-        
-        if (!memberAuth) {
-            return res.status(404).json(ApiResponse.error('Authentication record not found', 404));
-        }
-        
-        // Verify current password ONLY if user already has a password set
-        if (memberAuth.password) {
-            // User already has a password, so current password is required
-            if (!currentPassword || !currentPassword.trim()) {
-                return res.status(400).json(ApiResponse.error('Current password is required to change password', 400));
-            }
-            
-            const isPasswordValid = await memberAuth.comparePassword(currentPassword);
-            if (!isPasswordValid) {
-                return res.status(400).json(ApiResponse.error('Current password is incorrect', 400));
-            }
-        }
-        
-        if (password !== confirmPassword) {
-            return res.status(400).json(ApiResponse.error('Passwords do not match', 400));
-        }
-        
-        if (password.length < 6) {
-            return res.status(400).json(ApiResponse.error('Password must be at least 6 characters', 400));
-        }
-        
-        // Update password in "web auth" collection (used for login)
-        memberAuth.password = password; // The model will hash it automatically
-        await memberAuth.save();
-    }
-    
-    // Handle email update if provided and different
-    if (email && email.trim() && email.toLowerCase() !== originalEmail.toLowerCase()) {
-        const normalizedEmail = email.toLowerCase();
-        
-        // Check if new email is already taken by another user
-        const existingMember = await MemberDetails.findOne({ 
-            email: normalizedEmail,
-            _id: { $ne: req.user.userId }
+    // Keep the profile and login email/password together, validate both contact
+    // numbers before any profile writes, and reject incomplete password edits.
+    if (email !== undefined || password || profileData.phoneNumber !== undefined || profileData.whatsappNumber !== undefined) {
+        await require('./accountDetails.service').update(member, {
+            email, password, confirmPassword, currentPassword,
+            ...(profileData.phoneNumber !== undefined ? { phoneNumber: profileData.phoneNumber } : {}),
+            ...(profileData.whatsappNumber !== undefined ? { whatsappNumber: profileData.whatsappNumber } : {}),
         });
-        
-        if (existingMember) {
-            return res.status(400).json(ApiResponse.error('Email already in use', 400));
-        }
-        
-        // Update email in "web users" collection
-        member.email = normalizedEmail;
-        await member.save();
-        
-        // Update email in "web auth" collection using ORIGINAL email to find it
-        const memberAuth = await MemberAuth.findOne({ email: originalEmail });
-        if (memberAuth) {
-            memberAuth.email = normalizedEmail;
-            await memberAuth.save();
-        }
+        if (profileData.phoneNumber !== undefined) profileData.phoneNumber = member.phoneNumber;
+        if (profileData.whatsappNumber !== undefined) profileData.whatsappNumber = member.whatsappNumber;
     }
-    
     /*
      * The two enum-constrained demographic fields, checked before anything is
      * written.
