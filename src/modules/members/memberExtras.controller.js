@@ -223,11 +223,12 @@ const listPlans = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success({
         plans: plans.map(p => ({
             ...p,
+            name: p.audience === 'platinum' ? 'Lifetime membership' : p.name,
             // Both units, because the payment call needs paise and the screen
             // needs rupees, and every client converting it itself is every
             // client getting a chance to divide by the wrong number.
             amount: (p.amountPaise || 0) / 100,
-            entitlements: p.entitlements || [],
+            entitlements: (p.entitlements || []).map(text => p.audience === 'platinum' ? String(text).replace(/Platinum/g, 'Lifetime') : text),
         })),
         total: plans.length,
     }));
