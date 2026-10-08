@@ -95,8 +95,19 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
     /** The event the booking is for — from the BOOKING, never from the client. */
     let bookingEventId = null;
     let upgradeFields = {};
+    let companyQuote = null;
+    if (!['membership', 'event_booking', 'company_listing'].includes(orderType)) {
+        return res.status(400).json(ApiResponse.error('Invalid payment type'));
+    }
 
-    if (orderType === 'event_booking') {
+    if (orderType === 'company_listing') {
+        companyQuote = await require('../members/companyPublishing').quote(user.userId, req.body.companyId);
+        if (!companyQuote.paymentRequired) return res.status(400).json(ApiResponse.error('This company can already be published without another payment. Refresh your company settings.'));
+        planId = companyQuote.planId;
+        membershipPlan = await membershipPlanService.getPlanForPayment(planId);
+        calculatedAmount = Number(companyQuote.amount);
+        finalPurpose = `ACTIV additional company - ${companyQuote.companyName}`.slice(0, 100);
+    } else if (orderType === 'event_booking') {
         if (!bookingRef) {
             return res.status(400).json(ApiResponse.error('bookingRef is required for event booking'));
         }
@@ -250,16 +261,17 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         orderId,
         memberId: profile ? profile._id : null,
         email: buyerEmail,
-        planId: orderType === 'membership' ? planId : undefined,
-        planName: orderType === 'membership' ? ((membershipPlan && membershipPlan.name) || planId) : undefined,
-        planAudience: orderType === 'membership' ? membershipPlan.audience : undefined,
+        planId: membershipPlan ? planId : undefined,
+        planName: membershipPlan ? membershipPlan.name : undefined,
+        planAudience: membershipPlan ? membershipPlan.audience : undefined,
+        companyId: companyQuote ? companyQuote.companyId : undefined,
         amount: calculatedAmount,
         /*
          * HOW LONG IT RUNS — 'annual' or 'lifetime' — from the plan. This wrote
          * the plan KEY ('aspirant', 'basic'…), which the enum does not list, so
          * every hosted membership order failed validation on create.
          */
-        membershipType: orderType === 'membership'
+        membershipType: membershipPlan
             ? (membershipPlan && membershipPlan.membershipType === 'lifetime' ? 'lifetime' : 'annual')
             : undefined,
         orderType: orderType,
@@ -386,7 +398,8 @@ router.post('/order', verifyToken, asyncHandler(async(req, res) => {
         planId: req.body && req.body.planId,
         applicationId: req.body && req.body.applicationId,
         upgrade: req.body && req.body.upgrade === true,
-        commencementYear: req.body && req.body.commencementYear
+        commencementYear: req.body && req.body.commencementYear,
+        companyId: req.body && req.body.companyId
     });
 
     /*
@@ -457,6 +470,9 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
         signature: body.signature,
         paymentMethod: body.paymentMethod
     });
+    if (order.orderType === 'company_listing') {
+        return res.json(ApiResponse.success({ orderId: order.orderId, companyId: order.companyId, status: 'paid' }, 'Company publishing payment confirmed'));
+    }
 
     /*
      * Bell, email and WhatsApp — one call, and it cannot fail this request.
@@ -517,7 +533,7 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
         orderId: order.orderId,
         // The plan they paid for, the day it started and the day it runs to —
         // the three facts a member keeps from this message.
-        planName: order.planName || '',
+        planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
         activatedLabel: membershipContext.dateLabel(order.paidAt || new Date()),
         validUntilLabel: membershipContext.dateLabel(member.membershipExpiresAt),
         stage: 'active',

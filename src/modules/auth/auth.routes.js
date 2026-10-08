@@ -107,7 +107,7 @@ router.get('/oauth/:provider/callback', authLimiter, async(req, res) => {
             const client = oauthService.clientFromState(req.query && req.query.state);
             return oauthService.toClient(client, { error: 'failed', provider: String(req.params.provider || '').toLowerCase() });
         });
-    res.redirect(target);
+    return require('./oauthReturnPage')(req, res, target);
 });
 
 router.post('/oauth/exchange', authLimiter, async(req, res, next) => {

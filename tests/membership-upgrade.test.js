@@ -68,7 +68,7 @@ async function main() {
         assert.equal(created[0].memberId, before._id);
         assert.deepEqual(member, before, 'opening checkout must not activate or change the account');
         assert.deepEqual(history, oldReceipt, 'previous receipts stay intact');
-        await assert.rejects(upgrades.validate(member._id, 'platinum'), /Platinum/);
+        await assert.rejects(upgrades.validate(member._id, 'platinum'), /Lifetime Membership/);
         await assert.rejects(orderService.createOrder(user(), { planId: expected }), /active/);
     }
     fixture('basic', 'business', 2);

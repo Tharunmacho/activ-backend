@@ -107,12 +107,12 @@ const listCompanies = asyncHandler(async(req, res) => {
     const owner = callerId(req);
     if (!owner) throw ApiError.unauthorized('No member on this token');
 
-    const companies = await Company.find({ userId: owner, isActive: { $ne: false } })
+    const companies = await Company.find({ userId: owner })
         .sort({ createdAt: -1 })
         .lean()
         .catch(() => []);
 
-    res.json(ApiResponse.success({ companies, total: companies.length }));
+    res.json(ApiResponse.success({ companies: await require('./companyPublishing').decorateOwned(owner, companies), total: companies.length }));
 });
 
 const getCompany = asyncHandler(async(req, res) => {
@@ -125,7 +125,7 @@ const getCompany = asyncHandler(async(req, res) => {
     // caller learns nothing about whether the id exists.
     if (String(company.userId) !== callerId(req)) throw ApiError.notFound('Company not found');
 
-    res.json(ApiResponse.success(company));
+    res.json(ApiResponse.success(await require('./companyPublishing').decorateOwned(callerId(req), company)));
 });
 
 const createCompany = asyncHandler(async(req, res) => {
@@ -135,6 +135,7 @@ const createCompany = asyncHandler(async(req, res) => {
     const businessName = String(req.body.businessName || '').trim();
     if (!businessName) throw ApiError.badRequest('A company needs a business name');
 
+    const state = await require('./companyPublishing').ownerContext(owner);
     const company = await Company.create({
         userId: owner,
         businessName,
@@ -147,11 +148,11 @@ const createCompany = asyncHandler(async(req, res) => {
         // An uploaded file wins over a pasted URL: it is the more deliberate act.
         logo: req.file ? `/uploads/${req.file.filename}` : String(req.body.logo || '').trim(),
         status: 'active',
-        isActive: true,
+        isActive: require('./companyPublishing').decorate({ _id: '' }, state).publication.canPublish,
     });
 
     await recordActivity(owner, 'profile_update', 'Profile', company._id, `Added company ${businessName}`);
-    res.status(201).json(ApiResponse.created(company, 'Company created'));
+    res.status(201).json(ApiResponse.created(await require('./companyPublishing').decorateOwned(owner, company), 'Company created'));
 });
 
 const updateCompany = asyncHandler(async(req, res) => {
@@ -161,7 +162,7 @@ const updateCompany = asyncHandler(async(req, res) => {
     if (!existing || String(existing.userId) !== callerId(req)) throw ApiError.notFound('Company not found');
 
     const update = {};
-    ['businessName', 'email', 'description', 'businessType', 'mobileNumber', 'area', 'location', 'status']
+    ['businessName', 'email', 'description', 'businessType', 'mobileNumber', 'area', 'location']
         .forEach((field) => {
             if (req.body[field] !== undefined) update[field] = String(req.body[field]).trim();
         });
@@ -169,10 +170,14 @@ const updateCompany = asyncHandler(async(req, res) => {
     if (req.file) update.logo = `/uploads/${req.file.filename}`;
     else if (req.body.logo !== undefined) update.logo = String(req.body.logo).trim();
 
+    if (req.body.isActive !== undefined) {
+        update.isActive = req.body.isActive === true || req.body.isActive === 'true';
+        if (update.isActive) await require('./companyPublishing').assertCanPublish(callerId(req), existing._id);
+    }
     const company = await Company.findByIdAndUpdate(req.params.id, { $set: update }, { new: true }).lean();
     await recordActivity(callerId(req), 'profile_update', 'Profile', company._id, `Updated company ${company.businessName}`);
 
-    res.json(ApiResponse.success(company, 'Company updated'));
+    res.json(ApiResponse.success(await require('./companyPublishing').decorateOwned(callerId(req), company), 'Company updated'));
 });
 
 /**
@@ -223,12 +228,15 @@ const listPlans = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success({
         plans: plans.map(p => ({
             ...p,
-            name: p.audience === 'platinum' ? 'Lifetime membership' : p.name,
+            name: p.audience === 'platinum' ? 'Lifetime Membership' : p.name,
             // Both units, because the payment call needs paise and the screen
             // needs rupees, and every client converting it itself is every
             // client getting a chance to divide by the wrong number.
             amount: (p.amountPaise || 0) / 100,
-            entitlements: (p.entitlements || []).map(text => p.audience === 'platinum' ? String(text).replace(/Platinum/g, 'Lifetime') : text),
+            price: p.amountPaise == null ? null : Number(p.amountPaise) / 100,
+            membershipType: p.memberType,
+            features: (p.entitlements || []).map(text => p.audience === 'platinum' ? String(text).replace(/platinum/gi, 'Lifetime') : text),
+            entitlements: (p.entitlements || []).map(text => p.audience === 'platinum' ? String(text).replace(/platinum/gi, 'Lifetime') : text),
         })),
         total: plans.length,
     }));

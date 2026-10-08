@@ -109,7 +109,7 @@ const toRow = (m, app, plan, now) => {
         kindLabel: KIND_LABEL[kind] || 'Member',
         platinum,
         lifetime: s.lifetime,
-        planName: platinum ? 'Lifetime membership' : (plan && plan.planName) || '',
+        planName: platinum ? 'Lifetime Membership' : (plan && plan.planName) || '',
         activatedAt: m.membershipActivatedAt || null,
         expiresAt: s.expiresAt,
         daysLeft: s.daysLeft,

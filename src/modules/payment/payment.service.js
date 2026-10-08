@@ -464,7 +464,7 @@ class PaymentService {
 
     /** Activate an order whose payment was checked by a trusted caller. */
     async settleMembershipOrder(order, paymentId) {
-        if (!paymentId || order.orderType !== 'membership' || order.provider !== 'instamojo') {
+        if (!paymentId || !['membership', 'company_listing'].includes(order.orderType) || order.provider !== 'instamojo') {
             throw ApiError.badRequest('Invalid verified membership payment');
         }
         const PaymentOrder = require('./paymentorder.model');
@@ -480,6 +480,18 @@ class PaymentService {
             throw ApiError.badRequest('This payment is already being confirmed. Please retry shortly.');
         }
         try {
+            if (claimed.orderType === 'company_listing') {
+                const company = await require('../members/company.model').findOneAndUpdate(
+                    { _id: claimed.companyId, userId: claimed.memberId }, { $set: { isActive: true, status: 'active' } }, { new: true });
+                if (!company) throw ApiError.notFound('The paid company could not be found. Please contact ACTIV with your payment reference.');
+                const settled = await PaymentOrder.findOneAndUpdate({ _id: claimed._id, status: 'created', settlementToken: token }, {
+                    $set: { status: 'paid', gatewayRequestId: claimed.gatewayRequestId || claimed.gatewayPaymentId,
+                        gatewayPaymentId: paymentId, paymentMethod: 'instamojo', paidAt: new Date() },
+                    $unset: { settlementToken: '', settlementStartedAt: '' }
+                }, { new: true });
+                if (!settled) throw ApiError.badRequest('Payment confirmation is being retried');
+                return { success: true, message: 'Company publishing payment confirmed' };
+            }
             let member = await MemberDetails.findById(claimed.memberId);
             if (!member) throw ApiError.notFound('Member profile not found');
             // A retry after a partial write must not add a second year.
@@ -595,13 +607,13 @@ class PaymentService {
         const order = await PaymentOrder.findOne({ orderId: String(orderId || '') }).catch(() => null);
         if (!order) throw ApiError.notFound('No such payment order');
 
-        if (['event_booking', 'membership'].includes(order.orderType) && order.status === 'created'
+        if (['event_booking', 'membership', 'company_listing'].includes(order.orderType) && order.status === 'created'
             && order.provider === 'instamojo') {
             const requestId = String(order.gatewayRequestId || order.gatewayPaymentId || '');
             if (requestId && !requestId.startsWith('ord_')) {
                 const verdict = await this.verifyPaymentWithGateway(requestId, paymentId, order.amount);
                 if (verdict.paid) {
-                    const settle = order.orderType === 'membership' ? this.settleMembershipOrder : this.settleEventBookingOrder;
+                    const settle = order.orderType === 'event_booking' ? this.settleEventBookingOrder : this.settleMembershipOrder;
                     await settle.call(this, order, verdict.paymentId).catch((error) => {
                         logger.error('Verified payment could not be settled', {
                             orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
@@ -638,9 +650,10 @@ class PaymentService {
         return {
             orderId: fresh.orderId,
             orderType: fresh.orderType || 'membership',
+            companyId: fresh.companyId ? String(fresh.companyId) : '',
             status: fresh.status,
             amount: fresh.amount,
-            planName: fresh.planName || '',
+            planName: require('../members/membershipLabels').displayPlanName(fresh.planName, fresh.planId, fresh.planAudience),
             paymentId: fresh.status === 'paid' ? fresh.gatewayPaymentId || '' : '',
             paidAt: fresh.status === 'paid' ? fresh.paidAt || null : null,
             bookingRef: fresh.bookingRef || '',
@@ -680,7 +693,7 @@ class PaymentService {
         const PaymentOrder = require('./paymentorder.model');
         const hours = Math.max(1, parseInt(process.env.PAYMENT_RECONCILE_LOOKBACK_HOURS, 10) || 48);
         const orders = await PaymentOrder.find({
-            orderType: { $in: ['event_booking', 'membership'] },
+            orderType: { $in: ['event_booking', 'membership', 'company_listing'] },
             status: 'created',
             provider: 'instamojo',
             createdAt: { $gte: new Date(Date.now() - hours * 60 * 60 * 1000) },
@@ -696,7 +709,7 @@ class PaymentService {
             try {
                 const verdict = await this.verifyPaymentWithGateway(String(order.gatewayRequestId || order.gatewayPaymentId), '', order.amount);
                 if (!verdict.paid) continue;
-                if (order.orderType === 'membership') await this.settleMembershipOrder(order, verdict.paymentId);
+                if (order.orderType !== 'event_booking') await this.settleMembershipOrder(order, verdict.paymentId);
                 else await this.settleEventBookingOrder(order, verdict.paymentId);
                 settled += 1;
                 logger.warn('Paid order confirmed by the reconcile (no webhook, no return visit)', {

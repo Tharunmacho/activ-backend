@@ -21,12 +21,12 @@ const updateAccount = asyncHandler(async (req, res) => {
 
 const grant = asyncHandler(async (req, res) => {
     const member = await platinumService.grant(req.params.memberId, req.body || {}, req.user || {});
-    res.json(ApiResponse.success(member, 'Lifetime membership granted'));
+    res.json(ApiResponse.success(member, 'Lifetime Membership granted'));
 });
 
 const revoke = asyncHandler(async (req, res) => {
     const member = await platinumService.revoke(req.params.memberId, req.user || {});
-    res.json(ApiResponse.success(member, 'Lifetime membership removed'));
+    res.json(ApiResponse.success(member, 'Lifetime Membership removed'));
 });
 
 /* ---------------------------------------------- requests (the apply flow) */

@@ -84,7 +84,7 @@ const paymentOrderSchema = new mongoose.Schema({
     /** 'membership' or 'event_booking' */
     orderType: {
         type: String,
-        enum: ['membership', 'event_booking', 'donation'],
+        enum: ['membership', 'event_booking', 'donation', 'company_listing'],
         default: 'membership',
         required: true
     },
@@ -94,6 +94,7 @@ const paymentOrderSchema = new mongoose.Schema({
         type: String,
         trim: true
     },
+    companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', index: true },
 
     /** The `donations` row if orderType is 'donation'. */
     donationId: {

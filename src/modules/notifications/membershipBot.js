@@ -49,11 +49,11 @@ const reply = async (identity, command = 'STATUS') => {
         return `Hello ${name}, your membership is cancelled. Please contact member@activ.org.in before making another payment.`;
     }
     if (state.state === 'active' || state.state === 'expired') {
-        let planName = member.membershipTier === 'platinum' ? 'Lifetime' : '';
+        let planName = member.membershipTier === 'platinum' ? 'Lifetime Membership' : '';
         if (!planName && member._id) {
             const order = await require('../payment/paymentorder.model').findOne({ memberId: member._id, orderType: 'membership', status: 'paid' })
                 .sort({ paidAt: -1, createdAt: -1 }).lean();
-            planName = order && order.planName || '';
+            planName = require('../members/membershipLabels').displayPlanName(order?.planName, order?.planId, order?.planAudience);
         }
         let result = `Hello ${name}, your ACTIV membership is ${state.state.toUpperCase()}.\n\n`
             + `*Membership ID:* ${ref}\n*Type:* ${state.lifetime ? 'Lifetime' : 'Annual'}`

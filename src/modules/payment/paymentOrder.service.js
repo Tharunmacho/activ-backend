@@ -112,7 +112,7 @@ class PaymentOrderService {
      * The caller names a plan; the price comes from the server's table. Nothing
      * in the request influences what is charged.
      */
-    async createOrder(user = {}, { planId, applicationId, upgrade = false, commencementYear } = {}) {
+    async createOrder(user = {}, { planId, applicationId, upgrade = false, commencementYear, companyId } = {}) {
         upgrade = upgrade === true;
         const userId = user.userId || user.id || user._id;
         if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -135,6 +135,12 @@ class PaymentOrderService {
          * The service falls back to the built-in table when the collection has
          * no such key, so an unseeded database cannot take checkout down.
          */
+        if (companyId) {
+            const quote = await require('../members/companyPublishing').quote(userId, companyId);
+            if (!quote.paymentRequired) throw ApiError.badRequest('This company can already be published. Refresh your company settings.');
+            planId = quote.planId;
+            upgrade = false;
+        }
         const plan = await membershipPlanService.getPlanForPayment(planId);
         if (!plan) {
             throw ApiError.badRequest(`Unknown plan '${planId}'`);
@@ -164,7 +170,7 @@ class PaymentOrderService {
          * button so the button is never offered where this would refuse it.
          */
         const renewal = renewalFor(member.toObject ? member.toObject() : member);
-        if (!upgrade && isPaidStatus(member.membershipStatus) && !renewal.canRenew) {
+        if (!companyId && !upgrade && isPaidStatus(member.membershipStatus) && !renewal.canRenew) {
             // Not merely wasteful: a second activation would overwrite the
             // first payment's record on the member.
             throw ApiError.badRequest(renewal.lifetime
@@ -175,6 +181,8 @@ class PaymentOrderService {
         }
 
         const order = await PaymentOrder.create({
+            orderType: companyId ? 'company_listing' : 'membership',
+            companyId: companyId || undefined,
             ...upgradeFields,
             orderId: 'ord_' + crypto.randomBytes(16).toString('hex'),
             memberId: member._id,
@@ -205,7 +213,7 @@ class PaymentOrderService {
                 amount: order.amount,
                 currency: order.currency,
                 planId: order.planId,
-                planName: order.planName,
+                planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
                 membershipType: order.membershipType,
                 provider: order.provider,
                 expiresAt: order.expiresAt,
@@ -284,7 +292,7 @@ class PaymentOrderService {
                  * nothing is pending, with nothing reporting an error.
                  */
                 amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
-                planName: order.planName || '',
+                planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
                 data: { orderId: order.orderId, planId: order.planId }
             });
         } catch (error) {
@@ -414,6 +422,10 @@ class PaymentOrderService {
         );
 
         if (!claimed) throw ApiError.badRequest('This order has already been paid');
+        if (claimed.orderType === 'company_listing') {
+            await require('../members/company.model').updateOne({ _id: claimed.companyId, userId: claimed.memberId }, { $set: { isActive: true, status: 'active' } });
+            return { order: claimed };
+        }
 
         /*
          * A RENEWAL CONTINUES THE MEMBERSHIP; A FIRST PAYMENT STARTS IT.
@@ -501,13 +513,14 @@ class PaymentOrderService {
             orderId: order.orderId,
             status: order.status,
             orderType: order.orderType || 'membership',
+            companyId: order.companyId ? String(order.companyId) : '',
             provider: order.provider,
             paymentMethod: order.paymentMethod || order.provider,
             gatewayPaymentId: order.gatewayPaymentId || '',
             amount: order.amount,
             currency: order.currency,
             planId: order.planId,
-            planName: order.planName,
+            planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
             membershipType: order.membershipType,
             planAudience: order.planAudience,
             receiptNumber: order.manualConfirmation?.receiptNumber || '',

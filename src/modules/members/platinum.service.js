@@ -211,7 +211,7 @@ class PlatinumService {
             message: String(body.message || '').trim().slice(0, 1000)
         });
         const request = shapeRequest(doc.toObject());
-        const plan = await this.plan().catch(() => ({ price: 200000, name: 'Lifetime membership' }));
+        const plan = await this.plan().catch(() => ({ price: 200000, name: 'Lifetime Membership' }));
         const priceLabel = `₹${Number(plan.price || 200000).toLocaleString('en-IN')}`;
 
         // The member: a confirmation on every channel they have.
@@ -378,7 +378,7 @@ class PlatinumService {
         const list = Array.isArray(rows) ? rows : (rows && rows.plans) || [];
         const row = list.find((p) => p && (p.key === 'platinum' || p.id === 'platinum' || p.audience === 'platinum'));
         return {
-            name: (row && row.name) || 'Lifetime membership',
+            name: 'Lifetime Membership',
             price: Number((row && row.price) || 200000),
             active: row ? row.active !== false : true
         };
@@ -500,7 +500,7 @@ class PlatinumService {
         try {
             const { recordActivity } = require('./memberExtras.controller');
             await recordActivity(member._id, 'membership_activated', 'Payment', member._id,
-                'Lifetime membership granted');
+                'Lifetime Membership granted');
         } catch { /* a feed entry is never worth failing a grant over */ }
 
         const ids = await require('./memberIds').idsFor(member).catch(() => ({ applicationRef: '' }));
@@ -526,7 +526,7 @@ class PlatinumService {
             { $set: { status: 'converted', handledBy: String(actor.email || 'Super Admin'), handledAt: now } }
         ).catch(() => null);
 
-        logger.info('Lifetime membership granted', { memberId: String(member._id), amount, paymentMode, by: actor.email });
+        logger.info('Lifetime Membership granted', { memberId: String(member._id), amount, paymentMode, by: actor.email });
         return shape(member.toObject(), outcome);
     }
 
@@ -551,7 +551,7 @@ class PlatinumService {
         await member.save();
         invalidateMemberContext(member._id);
 
-        logger.warn('Lifetime membership revoked', { memberId: String(member._id), by: actor.email });
+        logger.warn('Lifetime Membership revoked', { memberId: String(member._id), by: actor.email });
         const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
         return shape(member.toObject(), outcome);
     }

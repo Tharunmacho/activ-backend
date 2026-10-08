@@ -202,6 +202,8 @@ const discoverProducts = asyncHandler(async (req, res) => {
       return res.json({ success: true, data: [], count: 0 });
     }
     filter.userId = { $in: owners };
+    const allowedCompanies = await require('./companyPublishing').publishedIds(owners);
+    filter.companyId = { $in: companyId ? allowedCompanies.filter(value => String(value) === String(companyId)) : allowedCompanies };
   }
 
   if (term) {
@@ -216,7 +218,7 @@ const discoverProducts = asyncHandler(async (req, res) => {
   }
 
   const products = await Product.find(filter)
-    .populate('companyId', 'businessName businessType location area mobileNumber email logo description')
+    .populate('companyId', 'businessName businessType location area mobileNumber email logo banner description')
     .sort({ isFeatured: -1, createdAt: -1 })
     .limit(limit)
     .lean();

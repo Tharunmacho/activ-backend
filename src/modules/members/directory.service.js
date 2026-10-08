@@ -292,15 +292,16 @@ class DirectoryService {
 
         const rows = members || [];
         const ids = rows.map((row) => row._id);
+        const publishedCompanyIds = await require('./companyPublishing').publishedIds(ids);
 
         // The companies, product counts and a few product previews for this
         // PAGE only. Loading them for every match would mean a directory of ten
         // thousand members reading ten thousand company records to render
         // twenty rows.
         const [companies, productCounts, previewProducts] = await Promise.all([
-            Company.find({ userId: { $in: ids }, isActive: { $ne: false } }).lean().catch(() => []),
+            Company.find({ _id: { $in: publishedCompanyIds } }).lean().catch(() => []),
             Product.aggregate([
-                { $match: { userId: { $in: ids.map(String) }, isActive: true } },
+                { $match: { companyId: { $in: publishedCompanyIds }, isActive: true } },
                 { $group: { _id: '$userId', count: { $sum: 1 } } }
             ]).catch(() => []),
             /*
@@ -311,7 +312,7 @@ class DirectoryService {
              * query — twenty members would otherwise be twenty round trips to a
              * remote cluster to render one screen.
              */
-            Product.find({ userId: { $in: ids.map(String) }, isActive: true })
+            Product.find({ companyId: { $in: publishedCompanyIds }, isActive: true })
                 .select('userId name imageUrl isFeatured createdAt')
                 .sort({ isFeatured: -1, createdAt: -1 })
                 .limit(ids.length * PRODUCT_PREVIEW)
@@ -394,9 +395,10 @@ class DirectoryService {
 
         if (!member) return null;
 
+        const publishedCompanyIds = await require('./companyPublishing').publishedIds([member._id]);
         const [companies, products] = await Promise.all([
-            Company.find({ userId: member._id, isActive: { $ne: false } }).lean().catch(() => []),
-            Product.find({ userId: String(member._id), isActive: true })
+            Company.find({ _id: { $in: publishedCompanyIds } }).lean().catch(() => []),
+            Product.find({ companyId: { $in: publishedCompanyIds }, isActive: true })
                 .select('name category price priceUnit imageUrl')
                 .limit(24)
                 .lean()

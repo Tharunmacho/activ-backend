@@ -4,7 +4,9 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const businessController = require('./business.controller');
-const { verifyToken } = require('../../core/middleware/auth');
+const { verifyToken, optionalAuth } = require('../../core/middleware/auth');
+const asyncHandler = require('../../core/utils/asyncHandler');
+const ApiResponse = require('../../core/utils/ApiResponse');
 
 // Ensure uploads folder exists in root
 const uploadsDir = path.join(__dirname, '../../../uploads');
@@ -27,8 +29,15 @@ const upload = multer({
     }
 });
 
-// All routes require authentication
+// Published business cards can be opened by buyers and social crawlers. The
+// controller applies the same listing eligibility and public field whitelist.
+router.get('/network/companies/:id', optionalAuth, businessController.getPublicCompany);
+
+// Owner management requires authentication.
 router.use(verifyToken);
+router.get('/business-profiles/:id/publishing', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./companyPublishing').quote(req.user.userId, req.params.id)));
+}));
 
 // Business profile routes
 router.post('/business-profiles', upload.fields([{ name: 'logo', maxCount: 1 }, { name: 'banner', maxCount: 1 }]), businessController.createBusinessProfile);

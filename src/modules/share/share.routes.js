@@ -27,6 +27,7 @@ const { websiteShell, mergePreview } = require('./websitePage');
 const eventPreviewImage = require('./eventPreviewImage');
 
 const router = express.Router();
+const companyPreview = require('./companyPreview');
 
 const SITE_NAME = 'ACTIV - Adidravidar Confederation of Trade & Industrial Vision';
 const TZ = 'Asia/Kolkata';
@@ -199,6 +200,34 @@ const send = (res, html) => {
 const fallback = (req, res, path) => {
     res.redirect(302, `${siteOrigin(req)}${path}${path.includes('?') ? '&' : '?'}ref=share`);
 };
+
+router.get('/companies/:id/preview/:version.jpg', async(req, res, next) => {
+    try {
+        const company = await companyPreview.companyForShare(req.params.id);
+        res.set('Cache-Control', 'no-cache').type('jpg').send(await companyPreview.previewBytes(company));
+    } catch (err) { next(err); }
+});
+router.get('/companies/:id', async(req, res, next) => {
+    try {
+        const company = await companyPreview.companyForShare(req.params.id);
+        const origin = require('../../core/storage/publicMedia').publicMediaOrigin();
+        const image = `${origin}/api/v1/share/companies/${company._id}/preview/${companyPreview.versionOf(company)}.jpg`;
+        const html = page({ title: `${company.businessName} | ACTIV Network`,
+            description: [company.businessType, [company.area, company.location].filter(Boolean).join(', '), company.description || company.businessActivities, company.mobileNumber, company.email].filter(Boolean).join(' · ').slice(0, 700),
+            image, url: `${siteOrigin(req)}/network/company/${company._id}`,
+            imageMeta: { width: 1200, height: 630, type: 'image/jpeg' } });
+        if (req.query.view === 'page') {
+            const shell = await websiteShell();
+            if (shell) {
+                res.removeHeader('Content-Security-Policy');
+                res.removeHeader('Cross-Origin-Embedder-Policy');
+                res.removeHeader('Cross-Origin-Opener-Policy');
+                return res.set('Cache-Control', 'no-cache').type('html').send(mergePreview(shell, html));
+            }
+        }
+        return send(res, html);
+    } catch (err) { next(err); }
+});
 
 router.get('/site-images/:name/:version.jpg', (req, res) => {
     const image = require('./sitePreviewImages').imageOf(req.params.name, req.params.version);

@@ -1,4 +1,5 @@
 const Company = require('../members/company.model');
+const publishing = require('./companyPublishing');
 const TrustedCompany = require('../members/trustedcompany.model');
 const MemberDetails = require('../members/memberdetails.model');
 /* Which membership statuses count as PAID, from the one place that decides
@@ -303,17 +304,21 @@ const createBusinessProfile = asyncHandler(async (req, res) => {
         location: loc,
         logo: logoUrl,
         banner: pickUpload(req, 'banner') || '',
-        status: 'pending'
+        status: 'active',
+        isActive: false
     });
 
     // Constitution, affiliations, turnover, registrations — everything the
     // Business Creation Account asks for beyond identity and contact.
     applyCompanyDetails(businessProfile, req.body);
 
+    const publishState = await publishing.ownerContext(userId);
+    businessProfile.isActive = publishing.decorate(businessProfile, publishState).publication.canPublish;
+
     await businessProfile.save();
 
     res.status(201).json(
-        ApiResponse.created(businessProfile, 'Business profile created successfully')
+        ApiResponse.created(await publishing.decorateOwned(userId, businessProfile), 'Business profile created successfully')
     );
 });
 
@@ -345,7 +350,7 @@ const getBusinessProfile = asyncHandler(async (req, res) => {
     }
 
     res.json(
-        ApiResponse.success(businessProfile, 'Business profile fetched successfully')
+        ApiResponse.success(await publishing.decorateOwned(userId, businessProfile), 'Business profile fetched successfully')
     );
 });
 
@@ -361,7 +366,7 @@ const getAllBusinessProfiles = asyncHandler(async (req, res) => {
         .lean();
 
     res.json(
-        ApiResponse.success(businessProfiles, 'Business profiles fetched successfully')
+        ApiResponse.success(await publishing.decorateOwned(userId, businessProfiles), 'Business profiles fetched successfully')
     );
 });
 
@@ -404,7 +409,7 @@ const getBusinessProfileById = asyncHandler(async (req, res) => {
     }
 
     res.json(
-        ApiResponse.success(businessProfile, 'Business profile fetched successfully')
+        ApiResponse.success(await publishing.decorateOwned(userId, businessProfile), 'Business profile fetched successfully')
     );
 });
 
@@ -482,13 +487,14 @@ const updateBusinessProfile = asyncHandler(async (req, res) => {
 
     // Listing visibility in the Discover directory.
     if (req.body.isActive !== undefined) {
+        if (asBool(req.body.isActive) === true) await publishing.assertCanPublish(userId, businessProfile._id);
         businessProfile.isActive = req.body.isActive === true || req.body.isActive === 'true';
     }
 
     await businessProfile.save();
 
     res.json(
-        ApiResponse.success(businessProfile, 'Business profile updated successfully')
+        ApiResponse.success(await publishing.decorateOwned(userId, businessProfile), 'Business profile updated successfully')
     );
 });
 
@@ -571,13 +577,14 @@ const updateBusinessProfileById = asyncHandler(async (req, res) => {
 
     // Listing visibility in the Discover directory.
     if (req.body.isActive !== undefined) {
+        if (asBool(req.body.isActive) === true) await publishing.assertCanPublish(userId, businessProfile._id);
         businessProfile.isActive = req.body.isActive === true || req.body.isActive === 'true';
     }
 
     await businessProfile.save();
 
     res.json(
-        ApiResponse.success(businessProfile, 'Business profile updated successfully')
+        ApiResponse.success(await publishing.decorateOwned(userId, businessProfile), 'Business profile updated successfully')
     );
 });
 
@@ -693,6 +700,7 @@ const discoverCompanies = asyncHandler(async (req, res) => {
         return res.json(ApiResponse.success([], 'Companies fetched successfully'));
     }
     baseFilter.userId = { $in: listedOwners };
+    baseFilter._id = { $in: await publishing.publishedIds(listedOwners) };
 
     /*
      * An explicit projection, and it stays explicit.
@@ -711,7 +719,7 @@ const discoverCompanies = asyncHandler(async (req, res) => {
      * turns it into a boolean rather than passing the id along.
      */
     const COMPANY_FIELDS =
-        'userId businessName email description businessType productCategories mobileNumber area location logo isActive status createdAt';
+        'userId businessName email description businessType productCategories mobileNumber area location logo banner isActive status createdAt';
 
     let companies;
     let searchRegex = null;
@@ -770,7 +778,7 @@ const discoverCompanies = asyncHandler(async (req, res) => {
         )];
 
         const extraCompanies = extraIds.length
-            ? await Company.find({ ...baseFilter, _id: { $in: extraIds } })
+            ? await Company.find({ ...baseFilter, _id: { $in: extraIds.filter(id => baseFilter._id.$in.some(allowed => String(allowed) === id)) } })
                 .select(COMPANY_FIELDS)
                 .sort({ createdAt: -1 })
                 .limit(limit)
@@ -855,6 +863,7 @@ const discoverCompanies = asyncHandler(async (req, res) => {
         const catalog = productsByCompany.get(String(company._id)) || [];
         return {
             ...company,
+            status: 'active',
             products: catalog,
             matchedProducts: searchRegex ? catalog.filter(matchesTerm) : [],
             /* The star. `false` where the owner is unknown or unpaid — never
@@ -944,7 +953,7 @@ const pickUpload = (req, field) => {
 
 const getPublicCompany = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const userId = req.user.userId;
+    const userId = req.user?.userId;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
         throw ApiError.notFound('Company not found');
@@ -965,11 +974,8 @@ const getPublicCompany = asyncHandler(async (req, res) => {
      * copied link would still open it. The owner always sees their own page.
      */
     if (!isOwner) {
-        const owner = await MemberDetails.findById(company.userId)
-            .select('membershipStatus isActive')
-            .lean()
-            .catch(() => null);
-        if (!owner || owner.isActive === false || !isPaidStatus(owner.membershipStatus)) {
+        const allowed = await publishing.publishedIds([company.userId]);
+        if (!allowed.some(value => String(value) === String(company._id))) {
             throw ApiError.notFound('Company not found');
         }
     }
@@ -980,11 +986,12 @@ const getPublicCompany = asyncHandler(async (req, res) => {
             .sort({ isFeatured: -1, createdAt: -1 })
             .lean(),
         TrustedCompany.countDocuments({ companyId: company._id }),
-        TrustedCompany.exists({ companyId: company._id, userId })
+        userId ? TrustedCompany.exists({ companyId: company._id, userId }) : Promise.resolve(false)
     ]);
 
     res.json(ApiResponse.success({
         ...stripOwner(company),
+        status: isOwner ? (await publishing.decorateOwned(userId, company)).status : 'active',
         products: products || [],
         /* Both numbers, because the page asks two different questions: how many
            members keep this company, and whether YOU are one of them. */
@@ -1016,8 +1023,9 @@ const getTrustList = asyncHandler(async (req, res) => {
         .populate({ path: 'companyId', select: PUBLIC_FIELDS })
         .lean();
 
+    const allowed = new Set((await publishing.publishedIds(rows.filter(row => row.companyId).map(row => row.companyId.userId))).map(String));
     const data = (rows || [])
-        .filter((row) => row.companyId)
+        .filter((row) => row.companyId && allowed.has(String(row.companyId._id)))
         .map((row) => ({
             ...stripOwner(row.companyId),
             trustedAt: row.createdAt,
@@ -1063,6 +1071,7 @@ const addToTrustList = asyncHandler(async (req, res) => {
     if (String(company.userId) === String(userId)) {
         throw ApiError.badRequest('This is your own company');
     }
+    if (!(await publishing.publishedIds([company.userId])).some(id => String(id) === String(company._id))) throw ApiError.notFound('Company not found');
 
     const note = String((req.body && req.body.note) || '').trim().slice(0, 500);
 

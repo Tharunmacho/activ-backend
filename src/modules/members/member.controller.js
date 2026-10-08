@@ -855,7 +855,7 @@ const getMyProfile = asyncHandler(async(req, res) => {
         memberId: member._id, orderType: 'membership', status: 'paid'
     }).sort({ paidAt: -1, createdAt: -1 }).select('planId planName planAudience upgradeKind orderId gatewayPaymentId amount paymentMethod provider paidAt').lean();
     profileData.paidMembership = paidOrder ? {
-        planId: paidOrder.planId, planName: paidOrder.planName,
+        planId: paidOrder.planId, planName: require('./membershipLabels').displayPlanName(paidOrder.planName, paidOrder.planId, paidOrder.planAudience),
         kind: paidOrder.upgradeKind || paidOrder.planAudience || '',
         orderId: paidOrder.orderId, paymentId: paidOrder.gatewayPaymentId,
         amount: paidOrder.amount, paymentMethod: paidOrder.paymentMethod || paidOrder.provider, paidAt: paidOrder.paidAt

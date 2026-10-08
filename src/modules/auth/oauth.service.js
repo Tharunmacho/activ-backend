@@ -128,7 +128,8 @@ const PROVIDERS = {
 
 const COOKIE = 'activ_oauth';
 const STATE_TTL_S = 10 * 60;
-const HANDOFF_TTL_S = 60;
+// Allow for browser-to-app confirmation and a cold start; still single-use.
+const HANDOFF_TTL_S = 5 * 60;
 
 const providerFor = (key) => Object.prototype.hasOwnProperty.call(PROVIDERS, key) ? PROVIDERS[key] : null;
 const isConfigured = (p) => !!(providerFor(p) && providerFor(p).clientId() && providerFor(p).clientSecret());
@@ -186,7 +187,9 @@ const clientFrom = (value) => {
 const clientFromState = (state) => {
     if (!state) return '';
     try {
-        const claims = jwt.verify(String(state), config.jwt.secret);
+        // An expired but correctly signed state may choose only where an error
+        // is displayed. handleCallback still checks expiry before any login.
+        const claims = jwt.verify(String(state), config.jwt.secret, { ignoreExpiration: true });
         return claims && claims.t === 'oauth-state' ? clientFrom(claims.c) : '';
     } catch (e) {
         return '';

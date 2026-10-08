@@ -39,6 +39,7 @@ async function main() {
     assert.equal(granted.membershipTier, 'platinum'); assert.equal(granted.membershipStatus, 'active');
     assert.equal(granted.membershipType, 'lifetime'); assert.equal(member.membershipExpiresAt, null);
     assert.equal(orders[0].amount, 200000); assert.equal(orders[0].provider, 'offline');
+    assert.equal(orders[0].planName, 'Lifetime Membership');
     assert.equal(orders[0].manualConfirmation.by, actor.userId);
     assert.match(orders[0].manualConfirmation.note, /office admission/);
     assert.equal(notices[0][0], 'MEMBERSHIP_ACTIVATED');

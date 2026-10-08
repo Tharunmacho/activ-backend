@@ -9,6 +9,7 @@ const { normalizeStatus } = require('../common/applicationStatus');
 const { membershipState, renewalFor, renewalBase } = require('../members/membershipState');
 const { invalidateMemberContext } = require('../common/memberContext');
 const { membershipNumberFor } = require('../members/memberNumber');
+const { displayPlanName } = require('../members/membershipLabels');
 
 const MEMBER_FILTER = { deletedAt: null, role: { $nin: ['super_admin', 'state_admin', 'district_admin', 'block_admin', 'cms_admin', 'events_admin', 'admin'] } };
 const MEMBER_FIELDS = 'fullName email phoneNumber whatsappNumber role memberType registrationType state district block membershipNumber membershipStatus membershipType membershipTier membershipActivatedAt membershipExpiresAt paymentId paymentAmount lastPaymentDate isActive createdAt updatedAt';
@@ -21,7 +22,7 @@ const appFor = (member, apps) => {
 };
 const paymentRow = (o, member) => ({
     id: String(o._id), memberId: String(o.memberId || ''), name: member?.fullName || 'Deleted account', email: o.email, registrationDeleted: !member,
-    orderId: o.orderId, planId: o.planId, planName: o.planName, amount: Number(o.amount || 0),
+    orderId: o.orderId, planId: o.planId, planName: displayPlanName(o.planName, o.planId, o.planAudience), amount: Number(o.amount || 0),
     status: o.status, provider: o.provider, mode: o.paymentMethod || o.provider,
     paymentId: o.gatewayPaymentId || '', createdAt: o.createdAt, paidAt: o.paidAt || null,
     expiresAt: o.expiresAt, manual: o.manualConfirmation || null
@@ -40,7 +41,7 @@ const memberRow = (m, app, orders = []) => {
         registeredAt: m.createdAt, memberNumber: membershipNumberFor(m), applicationId: app ? String(app._id) : '',
         applicationStatus: outcome, submittedAt: app?.submittedAt || app?.createdAt || null,
         status: blocked ? 'blocked' : state.state === 'none' ? (outcome === 'Not submitted' ? 'registered' : outcome.toLowerCase()) : state.state,
-        membershipType: m.membershipType || 'none', planName: latest?.planName || '',
+        membershipType: m.membershipType || 'none', planName: displayPlanName(latest?.planName, m.membershipTier, latest?.planId, latest?.planAudience),
         activatedAt: m.membershipActivatedAt || null, expiresAt: state.expiresAt, lifetime: state.lifetime,
         collected: paid.reduce((n, o) => n + Number(o.amount || 0), 0),
         confirmation: latest?.paymentMethod === 'waived' ? 'Fee waived' : latest?.provider === 'offline' ? 'Office payment' : latest ? 'Online payment' : '',

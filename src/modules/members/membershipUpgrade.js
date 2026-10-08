@@ -28,7 +28,7 @@ async function eligibility(memberId) {
 async function validate(memberId, planId, commencementYear) {
     const result = await eligibility(memberId);
     const selected = result.plans.find(p => p.key === planId);
-    if (!selected) throw ApiError.badRequest('Choose a different active plan. Lifetime membership is confirmed by the office.');
+    if (!selected) throw ApiError.badRequest('Choose a different active plan. Lifetime Membership is confirmed by the office.');
     const kind = selected.audience;
     if (!['student', 'aspirant', 'business'].includes(kind)) throw ApiError.badRequest('This plan is unavailable for an online upgrade.');
     let year = '';

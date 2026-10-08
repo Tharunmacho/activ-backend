@@ -1639,6 +1639,7 @@ const passesHtml = (passes = []) => `<table role="presentation" width="100%" cel
 
 const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER'];
 const render = (eventName, ctx = {}) => {
+    ctx = { ...ctx, planName: require('../members/membershipLabels').displayPlanName(ctx.planName, ctx.planId, ctx.membershipTier) };
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
     const out = builder(ctx);
