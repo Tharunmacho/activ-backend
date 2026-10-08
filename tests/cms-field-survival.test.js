@@ -314,6 +314,36 @@ const stat = { icon: 'users', value: '10', label: 'Members' };
     await verify('event (create)', Event, () => cms.createEvent(event, { email: 'probe@x.in' }), eventFields);
     await verify('event (edit)', Event, () => cms.updateEvent('0123456789abcdef01234567', event), eventFields);
 
+    // Reordering moves the whole guest record. Links copied without a scheme
+    // are stored as usable HTTPS invites, with the invite token/query intact.
+    const orderedGuests = [
+        { name: 'Guest B', role: 'Chief guest', organization: 'Org B', bio: 'Bio B', photoUrl: '/uploads/b.jpg' },
+        { name: 'Guest A', role: 'Speaker', organization: 'Org A', bio: 'Bio A', photoUrl: '/uploads/a.jpg' },
+    ];
+    const groupLink = 'https://chat.whatsapp.com/ExampleInviteCode123?mode=ems_copy_c';
+    for (const create of [true, false]) {
+        const payload = { ...event, speakers: JSON.stringify(orderedGuests),
+            whatsappChannelUrl: '  chat.whatsapp.com/ExampleInviteCode123?mode=ems_copy_c  ' };
+        if (create) await cms.createEvent(payload, { email: 'probe@x.in' });
+        else await cms.updateEvent('0123456789abcdef01234567', payload);
+        const stored = writesByModel.get(Event);
+        const label = create ? 'create' : 'edit';
+        check(`event (${label}): complete guests stay in their selected order`,
+            JSON.stringify(stored.speakers) === JSON.stringify(orderedGuests));
+        check(`event (${label}): pasted group invite is stored intact`, stored.whatsappChannelUrl === groupLink);
+        const [editor] = cms.mapEvents([stored], { privileged: true });
+        const [publicEvent] = cms.mapEvents([stored]);
+        check(`event (${label}): reopening the editor returns the group invite`, editor.whatsappChannelUrl === groupLink);
+        check(`event (${label}): public guest order matches the editor`, publicEvent.speakers.map(row => row.name).join(',') === 'Guest B,Guest A');
+        check(`event (${label}): group invite stays private`, !Object.hasOwn(publicEvent, 'whatsappChannelUrl'));
+    }
+    await cms.updateEvent('0123456789abcdef01234567', { whatsappChannelUrl: '' });
+    check('event (edit): the group invite can be cleared', writesByModel.get(Event).whatsappChannelUrl === '');
+    let invalidLinkRejected = false;
+    try { await cms.updateEvent('0123456789abcdef01234567', { whatsappChannelUrl: 'https://chat.whatsapp.com.evil.test/invite' }); }
+    catch (error) { invalidLinkRejected = error.statusCode === 400; }
+    check('event (edit): unrelated sites are rejected as invites', invalidLinkRejected);
+
     // A date the editor clears must be cleared, not kept — see updateEvent.
     written = null;
     await cms.updateEvent('0123456789abcdef01234567', { startAt: '' });

@@ -186,9 +186,10 @@ const eventDetailUpdates = (payload = {}) => {
         update.videoUrl = /^https?:\/\//i.test(v) ? v.slice(0, 500) : '';
     }
     if (payload.whatsappChannelUrl !== undefined) {
-        const url = String(payload.whatsappChannelUrl || '').trim();
-        if (!require('../events/whatsappLink').isWhatsAppEventLink(url)) {
-            throw new ApiError(400, 'Enter a valid WhatsApp group link (https://chat.whatsapp.com/...)');
+        const { normalizeWhatsAppEventLink, isWhatsAppEventLink } = require('../events/whatsappLink');
+        const url = normalizeWhatsAppEventLink(payload.whatsappChannelUrl);
+        if (!isWhatsAppEventLink(url)) {
+            throw new ApiError(400, 'Enter a valid WhatsApp group invite (https://chat.whatsapp.com/...) or channel link');
         }
         update.whatsappChannelUrl = url;
     }

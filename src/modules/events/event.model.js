@@ -466,6 +466,7 @@ const eventSchema = new mongoose.Schema({
     videoUrl: { type: String, trim: true, default: '' },
     whatsappChannelUrl: {
         type: String, trim: true, default: '',
+        set: require('./whatsappLink').normalizeWhatsAppEventLink,
         validate: { validator: require('./whatsappLink').isWhatsAppEventLink, message: 'Enter a valid WhatsApp group invite or channel link' }
     },
 

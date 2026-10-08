@@ -53,9 +53,29 @@ async function main() {
     assert.equal(link.searchParams.get('pa'), 'mab.037244012240037@axisbank');
     assert.equal(link.searchParams.get('tn'), 'Membership ACTIV 123 Test & Name');
     assert.equal(membership.upiLink({amount:0}), '');
-    const { isWhatsAppEventLink } = require('../src/modules/events/whatsappLink');
+    const { isWhatsAppEventLink, normalizeWhatsAppEventLink } = require('../src/modules/events/whatsappLink');
     assert.ok(isWhatsAppEventLink('https://chat.whatsapp.com/DdQbFhsqkp7izglTv2MqF?mode=ems_copy_c'));
     assert.ok(!isWhatsAppEventLink('https://chat.whatsapp.com.evil.test/abc'));
+    for (const value of [
+        '  chat.whatsapp.com/AbC123?mode=ems_copy_c  ',
+        'https://CHAT.WHATSAPP.COM/AbC123?mode=ems_copy_c',
+        'https://www.whatsapp.com/channel/0029AbC123',
+        'https://chat.whatsapp.com/AbC123/#invite',
+        '',
+    ]) assert.ok(isWhatsAppEventLink(value), value);
+    assert.equal(normalizeWhatsAppEventLink('  CHAT.WHATSAPP.COM/AbC123?mode=ems_copy_c  '),
+        'https://chat.whatsapp.com/AbC123?mode=ems_copy_c');
+    for (const value of [
+        'https://chat.whatsapp.com/', 'https://chat.whatsapp.com/abc/extra',
+        'https://chat.whatsapp.com@evil.test/abc', 'https://user@chat.whatsapp.com/abc',
+        'javascript:alert(1)', 'http://chat.whatsapp.com/abc', 'https://chat.whatsapp.com:8080/abc',
+        'https://chat.whatsapp.com/ab c', 'https://whatsapp.com/not-a-channel/abc',
+    ]) assert.ok(!isWhatsAppEventLink(value), value);
+    const Event = require('../src/modules/events/event.model');
+    const inviteDoc = new Event({ whatsappChannelUrl: ' chat.whatsapp.com/AbC123?mode=ems_copy_c ' });
+    assert.equal(inviteDoc.whatsappChannelUrl, 'https://chat.whatsapp.com/AbC123?mode=ems_copy_c');
+    assert.equal(inviteDoc.validateSync()?.errors?.whatsappChannelUrl, undefined);
+    assert.ok(new Event({ whatsappChannelUrl: 'https://example.test/invite' }).validateSync()?.errors?.whatsappChannelUrl);
     const flex = require('../src/modules/notifications/whatsappFlex');
     const result = flex.readableParams('confirmed', {eventTitle:'Event',bookingRef:'REF',viewUrl:'https://activ.org.in/events/test',whatsappChannelUrl:'https://chat.whatsapp.com/abc123',videoUrl:'https://youtu.be/abc',seats:1});
     assert.match(result.rendered, /\*WhatsApp group:\*\nhttps:\/\/chat.whatsapp.com\/abc123/);
