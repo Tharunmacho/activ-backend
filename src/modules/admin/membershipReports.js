@@ -55,7 +55,7 @@ async function membershipWorkbook(data, query = {}) {
         columns, rows: rows.map((row, index) => ({
             ...row, serial: index + 1, statusLabel: label(row.status),
             modeLabel: row.mode === 'waived' ? 'Fee waived' : label(row.mode),
-            validity: row.lifetime ? 'Lifetime' : formatDateIST(row.expiresAt, false),
+            validity: row.lifetime ? 'Lifetime' : formatDateIST(require('../members/membershipDates').lastValidDay(row.expiresAt), false),
             received: row.status === 'paid' ? number(row.amount) : 0,
             confirmedBy: row.manual?.byName, confirmedAt: row.manual?.at, note: row.manual?.note
         }))

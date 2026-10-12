@@ -31,6 +31,7 @@ const paymentOrderSchema = new mongoose.Schema({
     purchasePurpose: { type: String, enum: ['membership', 'upgrade'], default: 'membership' },
     upgradeKind: { type: String, enum: ['business', 'student', 'aspirant', ''], default: '' },
     upgradeCommencementYear: { type: String, default: '' },
+    membershipCommencementYear: { type: String, default: '' },
     previousPlanId: { type: String, default: '' },
     /** Server-generated. The only handle a client ever gets. */
     orderId: {
@@ -167,7 +168,7 @@ const paymentOrderSchema = new mongoose.Schema({
     /** Audited office confirmation. Waivers have amount 0, never fake revenue. */
     manualConfirmation: {
         by: String, byName: String, at: Date, note: String,
-        expectedAmount: Number, waivedAmount: Number, receiptNumber: String, admission: Boolean
+        expectedAmount: Number, waivedAmount: Number, receiptNumber: String, membershipNumber: String, admission: Boolean
     },
 
     /**

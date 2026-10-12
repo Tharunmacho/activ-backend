@@ -250,11 +250,12 @@ const inBand = (plan, years) => {
 
 class MembershipPlanService {
     async getSettings() {
-        const doc = await MembershipSettings.findById(SETTINGS_ID).lean().catch(() => null);
-        return { showAllPlans: doc ? doc.showAllPlans === true : false };
+        // Individual eligibility always follows category and commencement year.
+        return { showAllPlans: false };
     }
 
     async updateSettings(payload = {}) {
+        if (payload.showAllPlans === true || payload.showAllPlans === 'true') throw ApiError.badRequest('Member plans always follow category and business commencement year.');
         const update = {};
         if (payload.showAllPlans !== undefined) {
             update.showAllPlans = payload.showAllPlans === true || payload.showAllPlans === 'true';
@@ -689,37 +690,12 @@ class MembershipPlanService {
  * the three sellable audiences, never the lifetime tier.
  */
 function resolvePlans(plans = [], settings = {}, { commencementYear, kind = 'business' } = {}) {
-    const years = yearsTrading(commencementYear);
-    const sellable = (plans || []).filter((plan) => plan.audience !== 'platinum');
-
-    if (settings.showAllPlans) {
-        return { plans: sellable, matched: null, years, reason: 'all', showAllPlans: true };
-    }
-
-    if (kind === 'student' || kind === 'aspirant') {
-        let forAudience = sellable.filter((plan) => plan.audience === kind);
-        if (kind === 'student' && !forAudience.length) {
-            forAudience = sellable.filter((plan) => plan.audience === 'aspirant');
-        }
-        return { plans: forAudience, matched: forAudience[0] || null, years: null, reason: kind, showAllPlans: false };
-    }
-
-    const forAudience = sellable.filter((plan) => plan.audience === 'business');
-    const matched = forAudience.find((plan) => inBand(plan, years)) || null;
-
-    if (!matched) {
-        return {
-            plans: forAudience,
-            matched: null,
-            years,
-            // Named so the screen can say WHY it is showing a choice rather
-            // than one price: the year is missing, or no band covers it.
-            reason: years === null ? 'no-year' : 'no-band',
-            showAllPlans: false
-        };
-    }
-
-    return { plans: [matched], matched, years, reason: 'band', showAllPlans: false };
+    const rules = require('./membershipPlanRules');
+    const years = rules.validYear(commencementYear) ? rules.currentYear() - Number(commencementYear) : null;
+    const sellable = plans.filter(p => p.active !== false && p.audience === kind && p.audience !== 'platinum');
+    const matched = kind === 'business' ? sellable.find(p => rules.matchesYear(p, commencementYear)) : sellable[0];
+    return { plans: matched ? [matched] : [], matched: matched || null, years: kind === 'business' ? years : null,
+        reason: kind === 'business' ? matched ? 'band' : years === null ? 'no-year' : 'no-band' : kind, showAllPlans: false };
 }
 
 module.exports = new MembershipPlanService();

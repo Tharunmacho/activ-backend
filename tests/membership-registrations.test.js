@@ -39,9 +39,13 @@ Order.find = f => query(orders.filter(o => matches(o, f)).sort((a, b) => +b.crea
 Order.create = async o => { const receipt = { ...clone(o), _id: new mongoose.Types.ObjectId().toString(), createdAt: new Date() }; orders.push(receipt); return receipt; };
 Order.updateOne = async (f, p) => Object.assign(orders.find(o => matches(o, f)), p.$set);
 plans.listActive = async () => [{ key: 'student', id: 'db-id', name: 'Student', price: 1000, audience: 'student', membershipType: 'annual' }, { key: 'platinum', audience: 'platinum' }];
+plans.listAll = () => plans.listActive();
+require('../src/modules/members/businessinfo.model').findOne = () => query(null);
+require('../src/modules/members/businessinfo.model').find = () => query([]);
 plans.getPlanForPayment = async id => id === 'student' ? { id, name: 'Student', amount: 1000, membershipType: 'annual' } : null;
 appsService.reviewApplication = async (id, action, user) => { const a = apps.find(a => a._id === id); assert.equal(action, 'approve'); assert.equal(user.role, 'super_admin'); a.status = 'Approved'; reviews.push(id); };
-require('../src/modules/members/memberNumber').assignMembershipNumber = async () => 'ACTIV-2026-TEST';
+require('../src/modules/members/memberNumber').prepareMembershipNumber = async (m, requested) => m.membershipNumber || requested || 'ACTIV-20261012-001';
+require('../src/modules/members/memberNumber').assignMembershipNumber = async m => m.membershipNumber;
 paymentService.announceMembershipActivation = async (m, payload) => notices.push({ member: m, payload });
 const fixture = (status = 'Approved', overrides = {}) => {
     const _id = new mongoose.Types.ObjectId().toString();
@@ -98,7 +102,7 @@ async function main() {
     const end = new Date(Date.now() + 10 * 86400000);
     const renew = fixture('Approved', { membershipStatus: 'active', membershipType: 'annual', membershipExpiresAt: end });
     await service.confirm(renew._id, body, actor);
-    const extended = new Date(end); extended.setFullYear(extended.getFullYear() + 1);
+    const extended = require('../src/modules/members/membershipDates').annualExpiry(end);
     assert.equal(+renew.membershipExpiresAt, +extended);
     fixture(null, { role: 'super_admin' });
     orders.push({ _id: 'event', orderType: 'event_booking', status: 'paid', amount: 9000, createdAt: new Date() });

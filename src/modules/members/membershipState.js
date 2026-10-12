@@ -16,6 +16,7 @@
  */
 
 const DAY = 24 * 60 * 60 * 1000;
+const { expiryBoundary, annualExpiry } = require('./membershipDates');
 const PAID = ['active', 'completed'];
 const EXPIRING_SOON_DAYS = 30;
 
@@ -28,14 +29,10 @@ const isLifetime = (member = {}) =>
 const periodEnd = (member = {}) => {
     if (isLifetime(member)) return null;
     if (member.membershipExpiresAt) {
-        const d = new Date(member.membershipExpiresAt);
-        return Number.isNaN(d.getTime()) ? null : d;
+        return expiryBoundary(member.membershipExpiresAt);
     }
     if (lower(member.membershipType) === 'annual' && member.membershipActivatedAt) {
-        const d = new Date(member.membershipActivatedAt);
-        if (Number.isNaN(d.getTime())) return null;
-        d.setFullYear(d.getFullYear() + 1);
-        return d;
+        return annualExpiry(member.membershipActivatedAt);
     }
     return null;
 };

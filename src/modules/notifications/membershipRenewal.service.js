@@ -56,7 +56,7 @@ const dispatchRenewal = (member, now = new Date(), data = {}) => {
         membershipContext.recipientFromMember(member), {
             membershipNumber: membershipContext.membershipNumberOf(member),
             membershipType: member.membershipType,
-            validUntilLabel: expiresAt ? membershipContext.dateLabel(expiresAt) : '',
+            validUntilLabel: expiresAt ? membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(expiresAt)) : '',
             daysLeft,
             expiresInLabel: inWords(daysLeft),
             data: { ...data, expiresAt: expiresAt ? expiresAt.toISOString() : '' }
@@ -169,7 +169,7 @@ class MembershipRenewalService {
                 membershipContext.recipientFromMember(member), {
                     membershipNumber: membershipContext.membershipNumberOf(member),
                     membershipType: member.membershipType,
-                    validUntilLabel: membershipContext.dateLabel(expiresAt),
+                    validUntilLabel: membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(expiresAt)),
                     daysLeft,
                     expiresInLabel: inWords(daysLeft),
                     data: { window, expiresAt: expiresAt.toISOString() }

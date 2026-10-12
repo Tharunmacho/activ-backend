@@ -25,9 +25,25 @@ const bookingColumns = [
     { key: 'recordState', header: 'Record state', width: 18 }
 ];
 
-async function bookingsWorkbook(event, bookings) {
-    const title = event?.title || bookings[0]?.eventTitle || 'Event bookings';
+async function bookingsWorkbook(event, bookings, { events = [], filters = {} } = {}) {
+    const title = event?.title || (events.length ? 'Filtered booking details' : bookings[0]?.eventTitle) || 'Event bookings';
+    const byId = new Map(events.map(row => [String(row._id), row]));
+    const questions = [...new Map(bookings.flatMap(row => (row.responses || []).map(answer => [answer.key, answer.label || answer.key]))).entries()];
+    const contextColumns = [
+        { key: 'eventTitle', header: 'Event', width: 38 }, { key: 'eventDate', header: 'Event date (IST)', type: 'date', width: 26 },
+        { key: 'history', header: 'Booking history', width: 16 }, { key: 'category', header: 'Category', width: 22 },
+        { key: 'eventMode', header: 'Online / offline', width: 18 }, { key: 'language', header: 'Event language', width: 20 },
+        { key: 'state', header: 'Event state', width: 24 }, { key: 'venue', header: 'Venue', width: 32 },
+    ];
+    const eventValues = row => {
+        const source = event || byId.get(String(row.eventId)) || { bookingHistoryOnly: true };
+        return { eventTitle: source.title || row.eventTitle, eventDate: source.startAt || row.eventStartAt,
+            history: label(require('./eventLifecycle').bookingHistoryCategory(source)), category: source.category,
+            eventMode: label(source.mode), language: source.language, state: source.state, venue: source.venue || row.eventVenue };
+    };
     const rows = bookings.map((row, index) => ({
+        ...eventValues(row),
+        ...Object.fromEntries(questions.map(([key], i) => ['answer' + i, (row.responses || []).find(answer => answer.key === key)?.value || ''])),
         serial: index + 1, reference: row.bookingRef, bookedAt: row.createdAt,
         name: row.bookedBy?.name, phone: row.bookedBy?.phone, email: row.bookedBy?.email,
         member: row.isGuest ? 'Guest' : 'Member', seats: row.noOfPersons,
@@ -44,6 +60,7 @@ async function bookingsWorkbook(event, bookings) {
         for (let index = 0; index < count; index += 1) {
             const person = row.participants?.[index] || {};
             people.push({
+                ...eventValues(row),
                 serial: people.length + 1, reference: row.bookingRef, seat: index + 1,
                 name: person.name, phone: person.phone, email: person.email, bookedBy: row.bookedBy?.name,
                 status: label(row.status), recordState: row.deletedAt ? 'Archived' : 'Current', payment: label(row.payment?.status)
@@ -60,11 +77,12 @@ async function bookingsWorkbook(event, bookings) {
             { item: 'Participant records', value: people.length },
             { item: 'Paid bookings', value: paid.length },
             { item: 'Amount received', value: money(rows.reduce((sum, row) => sum + row.received, 0)) },
-            { item: 'Scope', value: 'All bookings, including failed, expired, cancelled and archived records.' },
+            { item: 'Filters', value: Object.entries(filters).map(([key, value]) => key + ': ' + value).join(' · ') || 'All records for this event, including archived booking records.' },
             { item: 'Using this workbook', value: 'Bookings: one financial row per booking. Participants: one row per person; no duplicated booking amounts.' },
             { item: 'Payment totals', value: 'Amount received includes paid bookings even if later cancelled. Cancellation does not indicate a refund.' }
         ] },
-        { name: 'Bookings', title: 'Event bookings', subtitle: title + ' · One row per booking. Amount received counts paid records only.', columns: bookingColumns, rows },
+        { name: 'Bookings', title: 'Event bookings', subtitle: title + ' · One row per booking. Amount received counts paid records only.',
+            columns: [...bookingColumns, ...contextColumns, ...questions.map(([, label], i) => ({ key: 'answer' + i, header: 'Registration: ' + label, width: 28 }))], rows },
         { name: 'Participants', title: 'Event participants', subtitle: title + ' · All participant records linked by booking reference.', columns: [
             { key: 'serial', header: 'S. No.', type: 'number', width: 9 },
             { key: 'reference', header: 'Booking reference', width: 29 },
@@ -75,7 +93,7 @@ async function bookingsWorkbook(event, bookings) {
             { key: 'bookedBy', header: 'Booked by', width: 28 },
             { key: 'status', header: 'Booking status', width: 18 },
             { key: 'payment', header: 'Payment status', width: 18 },
-            { key: 'recordState', header: 'Record state', width: 18 }
+            { key: 'recordState', header: 'Record state', width: 18 }, ...contextColumns
         ], rows: people }
     ] });
 }

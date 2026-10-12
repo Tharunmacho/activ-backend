@@ -31,7 +31,7 @@ section('membershipState');
     check("stray 'expired' on a lifetime row reads active", membershipState({ membershipStatus: 'expired', membershipType: 'lifetime' }, { now: NOW }).state === 'active');
     const legacy = { membershipStatus: 'active', membershipType: 'annual', membershipActivatedAt: d('2025-09-01') };
     const ls = membershipState(legacy, { now: NOW });
-    check('no stored expiry: activation + 1 year (lapsed)', ls.state === 'expired' && ls.expiresAt.toISOString().slice(0, 10) === '2026-09-01', ls.expiresAt && ls.expiresAt.toISOString());
+    check('no stored expiry: next anniversary starts at midnight IST (lapsed)', ls.state === 'expired' && ls.expiresAt.toISOString() === '2026-08-31T18:30:00.000Z', ls.expiresAt && ls.expiresAt.toISOString());
     check('no stored expiry, recent activation: active', membershipState({ ...legacy, membershipActivatedAt: d('2026-06-01') }, { now: NOW }).state === 'active');
     check('approved application, not paid -> awaiting payment', membershipState({ membershipStatus: 'pending' }, { outcome: 'Approved', now: NOW }).state === 'awaiting_payment');
     check('pending application -> none', membershipState({ membershipStatus: 'pending' }, { outcome: 'Pending', now: NOW }).state === 'none');
@@ -77,11 +77,11 @@ section('renewal — who may renew, and from when');
     check('active, 20 days left -> can renew early', renewalFor(annual('2026-10-30'), { now: NOW }).canRenew === true);
     const far = renewalFor(annual('2027-06-10'), { now: NOW });
     check('active, months left -> not yet', far.canRenew === false);
-    check('...and says when it opens (30 days before the end)', far.opensAt && far.opensAt.toISOString().slice(0, 10) === '2027-05-11', far.opensAt && far.opensAt.toISOString());
+    check('...and says when it opens (30 days before midnight IST)', far.opensAt && far.opensAt.toISOString() === '2027-05-10T18:30:00.000Z', far.opensAt && far.opensAt.toISOString());
     check('lifetime -> never', renewalFor({ membershipStatus: 'active', membershipType: 'lifetime' }, { now: NOW }).canRenew === false);
     check('platinum -> never', renewalFor({ membershipStatus: 'active', membershipType: 'annual', membershipTier: 'platinum', membershipExpiresAt: d('2020-01-01') }, { now: NOW }).canRenew === false);
     check('never paid -> never', renewalFor({ membershipStatus: 'pending' }, { now: NOW }).canRenew === false);
-    check('early renewal continues from the current end date', renewalBase(annual('2026-10-30'), { now: NOW }).toISOString() === d('2026-10-30').toISOString());
+    check('early renewal continues from the current end date', renewalBase(annual('2026-10-30'), { now: NOW }).toISOString() === '2026-10-29T18:30:00.000Z');
     check('late renewal starts from today', renewalBase(annual('2026-09-01', 'expired'), { now: NOW }).toISOString() === NOW.toISOString());
 }
 

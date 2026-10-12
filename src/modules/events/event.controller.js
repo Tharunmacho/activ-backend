@@ -187,6 +187,11 @@ const bookingOverview = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data));
 });
 
+const exportFilteredBookings = asyncHandler(async(req, res) => {
+    const { sendWorkbook } = require('../../core/utils/spreadsheet');
+    return sendWorkbook(req, res, await bookingService.exportFilteredBookings(req.query || {}));
+});
+
 /** One row per PERSON in the room, rather than per booking. */
 const listAttendees = asyncHandler(async(req, res) => {
     const data = await bookingService.listAttendees(req.params.id, req.query || {});
@@ -204,7 +209,7 @@ const listAttendees = asyncHandler(async(req, res) => {
 const exportBookings = asyncHandler(async(req, res) => {
     if (req.query.format === 'xlsx') {
         const { sendWorkbook } = require('../../core/utils/spreadsheet');
-        return sendWorkbook(req, res, await bookingService.exportBookingsXlsx(req.params.id));
+        return sendWorkbook(req, res, await bookingService.exportBookingsXlsx(req.params.id, req.query || {}));
     }
     const { filename, csv } = await bookingService.exportBookingsCsv(req.params.id);
     res.setHeader('Cache-Control', 'private, no-store');
@@ -237,7 +242,7 @@ const listBookingPeople = asyncHandler(async(req, res) => {
  * client and read once here.
  */
 const getBookingPerson = asyncHandler(async(req, res) => {
-    const data = await bookingService.getBookingPerson((req.query || {}).email);
+    const data = await bookingService.getBookingPerson((req.query || {}).email, req.query || {});
     res.json(ApiResponse.success(data));
 });
 
@@ -306,6 +311,7 @@ module.exports = {
     cancelBooking,
     deleteBooking,
     bookingOverview,
+    exportFilteredBookings,
     listBookingPeople,
     getBookingPerson,
     listAttendees,

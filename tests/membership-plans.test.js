@@ -48,17 +48,17 @@ section('the kind decides the plan');
 }
 {
     const r = resolvePlans(PLANS, OFF, { kind: 'business', commencementYear: '' });
-    check('business, no year -> every company plan, never platinum', keys(r) === 'basic,intermediate,ideal', keys(r));
+    check('business needs a commencement year before a payment plan is offered', keys(r) === '' && r.reason === 'no-year', keys(r));
 }
 {
     const r = resolvePlans(PLANS.filter((p) => p.key !== 'student'), OFF, { kind: 'student' });
-    check('no student plan active -> falls back to aspirant', keys(r) === 'aspirant', keys(r));
+    check('retired student plan never becomes an unrelated category', keys(r) === '', keys(r));
 }
 
 section('platinum is granted, never offered');
 {
     const r = resolvePlans(PLANS, { showAllPlans: true }, { kind: 'business' });
-    check('show-all lists the sellable plans only', !keys(r).includes('platinum') && keys(r).includes('student'), keys(r));
+    check('legacy show-all setting cannot bypass individual eligibility', keys(r) === '' && r.showAllPlans === false, keys(r));
 }
 check('the payment picker list leaves platinum out', !frozen.listPlans().some((p) => p.id === 'platinum'));
 check('the frozen table prices the student plan at 500', frozen.getPlan('student') && frozen.getPlan('student').amount === 500);

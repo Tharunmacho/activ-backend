@@ -10,6 +10,7 @@ const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 const { formatDateIST, csvCell: reportCsvCell } = require('../../core/utils/spreadsheet');
 const { bookingsWorkbook } = require('./eventReports');
+const bookingFilters = require('./bookingFilters');
 
 /**
  * Public event bookings — "Book Now", guest checkout, several participants.
@@ -2277,25 +2278,7 @@ class EventBookingService {
         const limit = Math.min(Math.max(parseInt(filters.limit, 10) || 10, 1), 200);
         const page = Math.max(parseInt(filters.page, 10) || 1, 1);
 
-        const query = { eventId: id };
-        if (filters.status) query.status = str(filters.status);
-        if (filters.paymentStatus) query['payment.status'] = str(filters.paymentStatus);
-
-        if (filters.search) {
-            /*
-             * Escaped. A '+' in a mobile number is a quantifier, and an
-             * unescaped one throws rather than matching nothing — the search box
-             * would 500 on the most natural thing to paste into it.
-             */
-            const escaped = str(filters.search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const rx = new RegExp(escaped, 'i');
-            query.$or = [
-                { bookingRef: rx },
-                { 'bookedBy.name': rx },
-                { 'bookedBy.email': rx },
-                { 'bookedBy.phone': rx }
-            ];
-        }
+        const query = { ...bookingFilters.bookingMatch(filters), eventId: id };
 
         /*
          * SEATS AND TAKINGS COUNT ONLY THE BOOKINGS THAT HOLD A SEAT.
@@ -2404,6 +2387,9 @@ class EventBookingService {
      * organiser taking bookings they can perfectly well take.
      */
     async bookingOverview(filters = {}) {
+        const criteria = bookingFilters.normalizeFilters(filters);
+        const recordMatch = bookingFilters.bookingMatch(criteria);
+        const filteringRecords = Object.keys(recordMatch).length > 0;
         // Once, for every event at once. A lapsed hold still counted as a taken
         // seat would under-report what is available on every row of the table.
         await this.sweepExpiredHolds(null);
@@ -2421,17 +2407,21 @@ class EventBookingService {
 
         const [currentEvents, deletedHistory] = await Promise.all([Event.find(query)
             .select('title startAt endAt days venue capacity registrationFee memberFee '
-                + 'registrationEnabled status archivedAt category bannerUrl')
+                + 'registrationEnabled status archivedAt category bannerUrl language mode state district targets')
             .sort({ startAt: -1, createdAt: -1 })
             .lean(), require('./bookingHistory').deletedEventBookingHeaders()]);
 
-        const events = [...currentEvents, ...deletedHistory].sort((a, b) =>
+        const allEvents = [...currentEvents, ...deletedHistory];
+        const filterOptions = await bookingFilters.filterOptions(allEvents);
+        const matchingIds = filteringRecords ? new Set((await EventBooking.distinct('eventId', { ...recordMatch, deletedAt: null })).map(String)) : null;
+        const events = allEvents.filter(event => bookingFilters.matchesEvent(event, criteria, new Date(), true)
+            && (!matchingIds || matchingIds.has(String(event._id)))).sort((a, b) =>
             new Date(b.startAt || 0).getTime() - new Date(a.startAt || 0).getTime());
 
         const historyTotals = {
             current: EMPTY_OVERVIEW_TOTALS(), past: EMPTY_OVERVIEW_TOTALS(), deleted: EMPTY_OVERVIEW_TOTALS(),
         };
-        if (!events.length) return { events: [], totals: EMPTY_OVERVIEW_TOTALS(), historyTotals };
+        if (!events.length) return { events: [], totals: EMPTY_OVERVIEW_TOTALS(), historyTotals, filterOptions };
 
         const ids = events.map((e) => e._id);
         const now = new Date();
@@ -2548,6 +2538,8 @@ class EventBookingService {
                 historyCategory,
                 venue: event.venue || '',
                 category: event.category || '',
+                language: event.language || '', mode: event.mode || (event.bookingHistoryOnly ? '' : 'offline'),
+                state: event.state || '', district: event.district || '', targets: event.targets || [],
                 status: event.status || 'draft',
                 bannerUrl: event.bannerUrl || '',
                 registrationEnabled: !!event.registrationEnabled,
@@ -2576,7 +2568,8 @@ class EventBookingService {
             };
         });
 
-        return { events: rows, totals, historyTotals };
+        return { events: criteria.history ? rows.filter(row => row.historyCategory === criteria.history) : rows,
+            totals: criteria.history ? historyTotals[criteria.history] : totals, historyTotals, filterOptions };
     }
 
     // ==================================================================
@@ -2703,7 +2696,7 @@ class EventBookingService {
     // ==================================================================
 
     /** One financial row per booking; participants have their own workbook sheet. */
-    async exportBookingsXlsx(eventId) {
+    async exportBookingsXlsx(eventId, filters = {}) {
         if (!/^[0-9a-fA-F]{24}$/.test(String(eventId || ''))) {
             throw ApiError.badRequest('A valid event id is required');
         }
@@ -2711,16 +2704,26 @@ class EventBookingService {
         // Administrative evidence includes archived records. Explicit projections
         // never load guest edit tokens, password material or operational metadata.
         const [event, bookings] = await Promise.all([
-            Event.collection.findOne({ _id: id }, { projection: { title: 1, startAt: 1, venue: 1 } }),
-            EventBooking.collection.find({ eventId: id }, { projection: {
+            Event.collection.findOne({ _id: id }, { projection: { title: 1, startAt: 1, venue: 1, category: 1, mode: 1, language: 1, state: 1 } }),
+            EventBooking.collection.find({ ...bookingFilters.bookingMatch(filters), eventId: id }, { projection: {
                 bookingRef: 1, createdAt: 1, bookedBy: 1, isGuest: 1, noOfPersons: 1,
                 participants: 1, unitAmount: 1, totalAmount: 1, memberRateApplied: 1,
                 payment: 1, status: 1, cancelledAt: 1, note: 1, deletedAt: 1,
-                eventTitle: 1, eventStartAt: 1, eventVenue: 1
+                eventTitle: 1, eventStartAt: 1, eventVenue: 1, responses: 1
             } }).sort({ createdAt: 1 }).toArray()
         ]);
         if (!event && !bookings.length) throw ApiError.notFound('Event report not found.');
-        return bookingsWorkbook(event, bookings);
+        return bookingsWorkbook(event, bookings, { filters: bookingFilters.normalizeFilters(filters) });
+    }
+
+    /** The same scope as the booking/people filters, across matching events. */
+    async exportFilteredBookings(filters = {}) {
+        const criteria = bookingFilters.normalizeFilters(filters);
+        const events = await bookingFilters.matchingEvents(criteria);
+        const rows = await EventBooking.find({ ...bookingFilters.bookingMatch(criteria), eventId: { $in: events.map(e => e._id) } })
+            .select('eventId bookingRef createdAt bookedBy isGuest noOfPersons participants unitAmount totalAmount memberRateApplied payment status cancelledAt note eventTitle eventStartAt eventVenue responses')
+            .sort({ createdAt: -1 }).lean();
+        return bookingsWorkbook(null, rows, { events, filters: criteria });
     }
 
     /** Legacy CSV clients remain supported; current clients request XLSX. */
@@ -2837,7 +2840,10 @@ class EventBookingService {
      * nothing.
      */
     async listBookingPeople(filters = {}) {
+        const events = await bookingFilters.matchingEvents(filters);
         const match = {
+            ...bookingFilters.bookingMatch(filters),
+            eventId: { $in: events.map(event => event._id) },
             // Cancelled and lapsed bookings are excluded from the SPEND but the
             // person still belongs in the contact book, so the filter is on the
             // amounts below rather than on the rows.
@@ -2927,12 +2933,6 @@ class EventBookingService {
             lastBookedAt: row.lastBookedAt || null
         }));
 
-        if (filters.search) {
-            const needle = str(filters.search).toLowerCase();
-            const hit = (row) => [row.name, row.email, row.phone]
-                .some((field) => String(field || '').toLowerCase().includes(needle));
-            return { people: people.filter(hit), total: people.length };
-        }
 
         // Newest booker first — the list is read as "who booked recently", and
         // an alphabetical default buries this morning's booking under the As.
@@ -2947,11 +2947,13 @@ class EventBookingService {
      * What the View button opens. Addressed by EMAIL for the reason the list is
      * grouped by it: most of these people have no account and no id.
      */
-    async getBookingPerson(email) {
+    async getBookingPerson(email, filters = {}) {
         const address = str(email).toLowerCase();
         if (!address) throw ApiError.badRequest('An email address is required');
 
-        const rows = await EventBooking.find({ 'bookedBy.email': address })
+        const events = await bookingFilters.matchingEvents(filters);
+        const rows = await EventBooking.find({ ...bookingFilters.bookingMatch(filters), 'bookedBy.email': address,
+            eventId: { $in: events.map(event => event._id) } })
             .sort({ createdAt: -1 }).lean().catch(() => []);
 
         if (!rows.length) throw ApiError.notFound('Nobody has booked under that address');

@@ -1,54 +1,7 @@
-/**
- * ============================================================================
- * THE MEMBERSHIP NUMBER, AND THE YEAR IN IT
- * ============================================================================
- *
- * The association's ask: a number that says which year the member joined in.
- * Somebody registering in 2026 gets a 2026 number; the next intake gets 2027.
- * The same for an application's reference.
- *
- *     ACTIV-2026-001             a member — the 1st to join in 2026
- *     ACTIV-2026-1000            the 1,000th (the count simply grows a digit)
- *     ACTIV-APP-2026-3F9A21      their application
- *
- * ------------------------------------------------------------ year-wise count
- *
- * The number is ASSIGNED, once, the moment a membership first becomes active
- * (`assignMembershipNumber`, called by every activation path: both payment
- * paths and the Platinum grant). Each year has its own counter in
- * `membership_counters` (`_id: 'membership:2026'`), bumped atomically, so two
- * payments landing together cannot get the same number, and 2027 starts again
- * at 001. Three digits minimum because that is what the association reads at a
- * glance; `padStart` never truncates, so the thousandth member is `ACTIV-2026-1000`.
- *
- * A member who already holds a standard number keeps it for life — renewals,
- * a payment reset and re-payment, a Platinum upgrade all leave it alone.
- *
- * ---------------------------------------------------------------- stability
- *
- * A membership number is written down, quoted in an email and printed on a
- * certificate, so it must never change for a given member. Every part of it is
- * therefore derived from things that do not move:
- *
- *   the year   `membershipActivatedAt`, else `createdAt`, else the timestamp
- *              inside the ObjectId itself — which every Mongo id carries in
- *              its first four bytes, so a record with no date field still
- *              yields the year it was created in;
- *   the tail   six hex characters of the id, which is already what the old
- *              fallback used.
- *
- * A number that was ASSIGNED always wins. This is the fallback for a member who
- * has none, which is most of them.
- *
- * ------------------------------------------------------------- one expression
- *
- * It lives here because it was four copies of
- * `member.membershipNumber || String(member._id).slice(-8).toUpperCase()`
- * scattered across two controllers — and the model's own comment promised the
- * dashboard and the certificate "cannot differ" because of it. They did, for a
- * reason that had nothing to do with the expression and everything to do with
- * there being four of them. One function, imported by all four callers, is what
- * that promise actually requires.
+/** Membership IDs: ACTIV-TYPE-YYYYMMDD-001, using the activation date in IST.
+ * Mongo allocates a separate atomic counter per date and reserves each number.
+ * Assigned IDs, including legacy and office-entered numbers, survive renewals.
+ * Application references keep their existing format.
  */
 
 /** The four-digit year a record belongs to, from whatever it carries. */
@@ -89,15 +42,18 @@ const yearOf = (record = {}) => {
 const tailOf = (record = {}) =>
     String(record._id || record.id || '').slice(-6).toUpperCase() || '000000';
 
-/** `ACTIV-2026-001` — the shape an assigned, year-wise number has. */
-const STANDARD_NUMBER = /^ACTIV-\d{4}-\d{3,}$/;
+/** New numbers count activations per Indian calendar day; existing IDs stay stable. */
+const { indiaDayKey } = require('./membershipDates');
+const ApiError = require('../../core/utils/ApiError');
+const STANDARD_NUMBER = /^ACTIV-(?:[A-Z][A-Z0-9]{2,7}-)?(?:\d{4}|\d{8})-\d{3,9}$/;
+const DAILY_NUMBER = /^ACTIV-([A-Z][A-Z0-9]{2,7})-(\d{8})-(\d{3,9})$/;
 
-const formatNumber = (year, seq) => `ACTIV-${year}-${String(seq).padStart(3, '0')}`;
+const formatNumber = (day, seq, category = 'MEM') => `ACTIV-${category}-${day}-${String(seq).padStart(3, '0')}`;
 
-/** Next value of this year's counter. Atomic: `$inc` on one document. */
-const nextSequence = async (year) => {
+/** Next value of this Indian calendar day's counter. Atomic on one document. */
+const nextSequence = async (day, category = 'MEM') => {
     const res = await require('../../config/dataLayout').collection('membershipCounters').findOneAndUpdate(
-        { _id: `membership:${year}` },
+        { _id: `membership:${category}:${day}` },
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }
     );
@@ -106,30 +62,77 @@ const nextSequence = async (year) => {
     return Number((doc && doc.seq) || 0);
 };
 
-/**
- * Give this member their year-wise number if they do not have one yet, and
- * return the number they hold. Never throws: a numbering hiccup must not fail
- * a payment that has already been taken — the member keeps the derived number
- * until the next activation (or the backfill script) assigns one.
- *
- * `year` defaults to the year the membership was activated.
- */
-const assignMembershipNumber = async (memberOrId, { year } = {}) => {
+/** Accept a real calendar date and a canonical, positive daily sequence. */
+const validateMembershipNumber = value => {
+    if (typeof value !== 'string' || value.length > 40) throw ApiError.badRequest('Enter a membership ID in ACTIV-TYPE-YYYYMMDD-001 format.');
+    const number = value.trim().toUpperCase();
+    if (!number) return '';
+    const match = DAILY_NUMBER.exec(number);
+    const day = match?.[2] || '';
+    const date = `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}T12:00:00+05:30`;
+    if (!match || Number(match[3]) < 1 || String(Number(match[3])).padStart(3, '0') !== match[3] || indiaDayKey(date) !== day) throw ApiError.badRequest('Enter a valid membership ID, for example ACTIV-BEG-20261012-001.');
+    return number;
+};
+
+// The counter collection also reserves IDs using Mongo's unique _id index.
+// This protects manual entries and automatic numbering across concurrent requests.
+const reserveNumber = async (member, number) => {
+    const Member = require('./memberdetails.model');
+    const existing = await Member.collection.findOne({ $or: [{ membershipNumber: number }, { legacyMembershipNumbers: number }], _id: { $ne: member._id } }, { projection: { _id: 1 } });
+    if (existing) throw ApiError.conflict('Membership ID already exists. Choose a different ID.');
+    const counters = require('../../config/dataLayout').collection('membershipCounters');
+    try { await counters.insertOne({ _id: `number:${number}`, memberId: String(member._id), reservedAt: new Date() }); }
+    catch (error) {
+        if (error.code !== 11000) throw error;
+        const reserved = await counters.findOne({ _id: `number:${number}` });
+        if (reserved?.memberId !== String(member._id)) throw ApiError.conflict('Membership ID already exists. Choose a different ID.');
+    }
+    return number;
+};
+
+const advanceMembershipCounter = async number => {
+    const [, category, day, sequence] = DAILY_NUMBER.exec(validateMembershipNumber(number));
+    await require('../../config/dataLayout').collection('membershipCounters').updateOne(
+        { _id: `membership:${category}:${day}` }, { $max: { seq: Number(sequence) } }, { upsert: true });
+};
+
+const prepareMembershipNumber = async (member, requested = '', category) => {
+    const current = String(member.membershipNumber || '').trim();
+    const supplied = String(requested || '').trim().toUpperCase();
+    if (current) {
+        if (supplied && supplied !== current.toUpperCase()) throw ApiError.conflict('This member already has a membership ID. Keep their existing ID when renewing.');
+        return current;
+    }
+    if (supplied) {
+        const number = validateMembershipNumber(requested);
+        await reserveNumber(member, number);
+        await advanceMembershipCounter(number);
+        return number;
+    }
+    category = category || await require('./membershipIdCategory').resolveMembershipIdCategory(member);
+    const day = indiaDayKey(member.membershipActivatedAt || new Date());
+    for (let attempt = 0; attempt < 100; attempt++) {
+        const number = formatNumber(day, await nextSequence(day, category), category);
+        try { return await reserveNumber(member, number); }
+        catch (error) { if (error.statusCode !== 409 && error.status !== 409) throw error; }
+    }
+    throw ApiError.conflict('Unable to allocate a membership ID. Please retry.');
+};
+
+const assignMembershipNumber = async (memberOrId) => {
     try {
         const MemberDetails = require('./memberdetails.model');
         const id = memberOrId && (memberOrId._id || memberOrId.id) ? (memberOrId._id || memberOrId.id) : memberOrId;
         const member = await MemberDetails.findById(id)
-            .select('membershipNumber membershipActivatedAt createdAt').lean();
+            .select('membershipNumber membershipActivatedAt createdAt membershipType membershipTier memberType registrationType').lean();
         if (!member) return '';
         const current = String(member.membershipNumber || '').trim();
-        if (STANDARD_NUMBER.test(current)) return current;
-
-        const y = year || yearOf({ membershipActivatedAt: member.membershipActivatedAt || new Date() });
-        const number = formatNumber(y, await nextSequence(y));
+        if (current) return current;
+        const number = await prepareMembershipNumber(member);
 
         // Conditional: if another request numbered this member first, keep theirs.
         const res = await MemberDetails.updateOne(
-            { _id: member._id, membershipNumber: { $not: STANDARD_NUMBER } },
+            { _id: member._id, $or: [{ membershipNumber: { $exists: false } }, { membershipNumber: '' }, { membershipNumber: null }] },
             { $set: { membershipNumber: number } }
         );
         if (res && res.modifiedCount) {
@@ -149,9 +152,8 @@ const assignMembershipNumber = async (memberOrId, { year } = {}) => {
 /**
  * The number to show for this member.
  *
- * An assigned `membershipNumber` is returned untouched — including one that
- * predates this format. Renaming somebody's existing number would be worse than
- * having two formats in the field.
+ * Reads preserve assigned IDs. The explicit migration converts legacy IDs and
+ * retains their old references without changing them during a profile read.
  */
 const membershipNumberFor = (member = {}) => {
     const assigned = String(member.membershipNumber || '').trim();
@@ -174,5 +176,5 @@ const applicationRefFor = (application = {}) => {
 
 module.exports = {
     membershipNumberFor, applicationRefFor, yearOf,
-    assignMembershipNumber, nextSequence, formatNumber, STANDARD_NUMBER
+    assignMembershipNumber, prepareMembershipNumber, validateMembershipNumber, reserveMembershipNumber: reserveNumber, advanceMembershipCounter, nextSequence, formatNumber, STANDARD_NUMBER
 };

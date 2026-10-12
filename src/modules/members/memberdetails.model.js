@@ -203,6 +203,10 @@ const memberDetailsSchema = new mongoose.Schema({
         trim: true,
         index: true
     },
+    legacyMembershipNumbers: { type: [String], default: undefined },
+    membershipEdits: { type: [new mongoose.Schema({
+        at: Date, by: String, note: String, changes: mongoose.Schema.Types.Mixed
+    }, { _id: false })], default: undefined, select: false },
     /*
      * What paid for the membership.
      *

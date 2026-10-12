@@ -4,6 +4,8 @@ const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
 const Order = require('../payment/paymentorder.model');
 const plans = require('../members/membershipplan.service');
+const Business = require('../members/businessinfo.model');
+const planRules = require('../members/membershipPlanRules');
 const ApiError = require('../../core/utils/ApiError');
 const { normalizeStatus } = require('../common/applicationStatus');
 const { membershipState, renewalFor, renewalBase } = require('../members/membershipState');
@@ -38,7 +40,7 @@ const memberRow = (m, app, orders = []) => {
     return {
         id: String(m._id), name: m.fullName || '', email: m.email || '', phone: m.phoneNumber || m.whatsappNumber || '',
         kind: m.memberType || m.registrationType || 'member', region: [m.block, m.district, m.state].filter(Boolean).join(', '),
-        registeredAt: m.createdAt, memberNumber: membershipNumberFor(m), applicationId: app ? String(app._id) : '',
+        registeredAt: m.createdAt, memberNumber: membershipNumberFor(m), assignedMemberNumber: String(m.membershipNumber || ''), applicationId: app ? String(app._id) : '',
         applicationStatus: outcome, submittedAt: app?.submittedAt || app?.createdAt || null,
         status: blocked ? 'blocked' : state.state === 'none' ? (outcome === 'Not submitted' ? 'registered' : outcome.toLowerCase()) : state.state,
         membershipType: m.membershipType || 'none', planName: displayPlanName(latest?.planName, m.membershipTier, latest?.planId, latest?.planAudience),
@@ -49,23 +51,33 @@ const memberRow = (m, app, orders = []) => {
         blockedReason: canConfirm ? '' : blocked ? 'Unblock this account before confirming membership.' : !app ? 'The member must submit their application first.' : !['Pending', 'Approved'].includes(outcome) ? 'Review the application before confirming membership.' : 'This membership is already active. Renewal opens during its final 30 days.'
     };
 };
+const currentMemberRow = (member, application, orders, business, catalogue) => {
+    const row = memberRow(member, application, orders);
+    if (row.lifetime) return row;
+    const paid = orders.find(o => o.status === 'paid');
+    const progression = planRules.progression(member, business, paid, catalogue);
+    const options = planRules.officeOptions(member, business, paid, catalogue);
+    return { ...row, kind: progression.kind, planName: progression.effective?.name || (options.plans.length === 1 ? options.plans[0].name : row.planName) };
+};
 
 class MembershipDashboardService {
     async overview(actor) {
         superOnly(actor);
-        const [members, apps, orders, activePlans] = await Promise.all([
+        const [members, apps, orders, activePlans, businesses] = await Promise.all([
             Member.find(MEMBER_FILTER).select(MEMBER_FIELDS).sort({ createdAt: -1 }).lean(),
             Application.find({}).select('userId email status submittedAt createdAt updatedAt').sort({ updatedAt: -1 }).lean(),
-            Order.find({ orderType: 'membership' }).sort({ createdAt: -1 }).lean(), plans.listActive()
+            Order.find({ orderType: 'membership' }).sort({ createdAt: -1 }).lean(), plans.listAll(),
+            Business.find({}).select('userId doingBusiness registrationType businessCommencementYear').lean()
         ]);
         const byMember = new Map();
         for (const o of orders) { const id = String(o.memberId); if (!byMember.has(id)) byMember.set(id, []); byMember.get(id).push(o); }
-        const rows = members.map(m => memberRow(m, appFor(m, apps), byMember.get(String(m._id)) || []));
+        const byBusiness = new Map(businesses.map(b => [String(b.userId), b]));
+        const rows = members.map(m => currentMemberRow(m, appFor(m, apps), byMember.get(String(m._id)) || [], byBusiness.get(String(m._id)), activePlans));
         const lookup = new Map(members.map(m => [String(m._id), m]));
         const now = Date.now();
         return {
             rows, payments: orders.map(o => paymentRow(o, lookup.get(String(o.memberId)))),
-            plans: activePlans.filter(p => p.audience !== 'platinum').map(p => ({ id: p.key, name: p.name, price: p.price, membershipType: p.membershipType })),
+            plans: activePlans.filter(p => p.active !== false && p.audience !== 'platinum').map(p => ({ id: p.key, name: p.name, price: p.price, membershipType: p.membershipType })),
             summary: {
                 registered: rows.length, submitted: rows.filter(r => r.applicationId).length,
                 active: rows.filter(r => r.status === 'active').length,
@@ -87,7 +99,9 @@ class MembershipDashboardService {
             Application.find({ $or: [{ userId: id }, { email: m.email }] }).select('userId email status submittedAt createdAt updatedAt').sort({ updatedAt: -1 }).lean(),
             Order.find({ memberId: id, orderType: 'membership' }).sort({ createdAt: -1 }).lean()
         ]);
-        return { member: memberRow(m, appFor(m, apps), orders), payments: orders.map(o => paymentRow(o, m)) };
+        const [business, catalogue] = await Promise.all([Business.findOne({ userId: m._id }).lean(), plans.listAll()]);
+        const confirmation = planRules.officeOptions(m, business, orders.find(o => o.status === 'paid'), catalogue);
+        return { member: currentMemberRow(m, appFor(m, apps), orders, business, catalogue), payments: orders.map(o => paymentRow(o, m)), confirmation };
     }
 
     async confirm(id, body, actor) {
@@ -102,35 +116,50 @@ class MembershipDashboardService {
         if (!Number.isFinite(amount) || (mode !== 'waived' && amount <= 0)) throw ApiError.badRequest('Enter the actual amount received. Use fee waiver when no payment was received.');
         let detail = await this.detail(id, actor);
         if (!detail.member.canConfirm) throw ApiError.badRequest(detail.member.blockedReason);
+        const selected = detail.confirmation.plans.find(p => p.key === body.planId);
+        if (!selected) throw ApiError.badRequest('Choose the eligible plan for this member’s category and business commencement year.');
+        const commencementYear = String(body.commencementYear ?? detail.confirmation.commencementYear).trim();
+        if (selected.audience === 'business' && !planRules.matchesYear(selected, commencementYear)) {
+            throw ApiError.badRequest('Choose a business commencement year from the selected plan’s year range.');
+        }
         if (detail.member.requiresManualAdmission && body.manualAdmission !== true) {
             throw ApiError.badRequest('The member must submit their application, or the Super Admin must explicitly confirm office admission after checking their details.');
+        }
+        let member = await Member.findById(id).select(MEMBER_FIELDS).lean();
+        if (!member || member.isActive === false) throw ApiError.badRequest('This account is unavailable.');
+        const current = membershipState(member);
+        if (current.state === 'active' && !renewalFor(member).canRenew) throw ApiError.conflict('Membership is already active.');
+        if (body.membershipNumber != null && typeof body.membershipNumber !== 'string') throw ApiError.badRequest('Enter a valid membership ID.');
+        let membershipNumber = await require('../members/memberNumber').prepareMembershipNumber(member, body.membershipNumber || '', require('../members/membershipIdCategory').membershipIdCategory(member, selected));
+        if (selected.audience === 'business') {
+            await Business.updateOne({ userId: member._id }, { $set: { doingBusiness: true, registrationType: 'business', businessCommencementYear: commencementYear },
+                $setOnInsert: { userId: member._id } }, { upsert: true, runValidators: true });
         }
         // Use the same reviewed approval workflow as the application queue.
         if (detail.member.applicationStatus === 'Pending') {
             await require('../applications/application.service').reviewApplication(detail.member.applicationId, 'approve', actor);
+            member = await Member.findById(id).select(MEMBER_FIELDS).lean();
+            if (!member || member.isActive === false) throw ApiError.badRequest('This account is unavailable.');
+            if (member.membershipNumber) membershipNumber = await require('../members/memberNumber').prepareMembershipNumber(member, body.membershipNumber || '');
         }
-        const member = await Member.findById(id).select(MEMBER_FIELDS).lean();
-        if (!member || member.isActive === false) throw ApiError.badRequest('This account is unavailable.');
-        const current = membershipState(member);
-        if (current.state === 'active' && !renewalFor(member).canRenew) throw ApiError.conflict('Membership is already active.');
         const now = new Date();
-        const expiry = plan.membershipType === 'lifetime' ? null : renewalBase(member, { now });
-        if (expiry) expiry.setFullYear(expiry.getFullYear() + 1);
+        const expiry = plan.membershipType === 'lifetime' ? null : require('../members/membershipDates').annualExpiry(renewalBase(member, { now }));
         const orderId = `OFF-${now.getFullYear()}-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
         // Keep the receipt before granting access, so paymentReconcile can find it.
         const receipt = await Order.create({
             orderId, memberId: member._id, email: member.email, planId: plan.id, planName: plan.name, planAudience: plan.audience,
             amount, currency: 'INR', orderType: 'membership', membershipType: plan.membershipType,
+            membershipCommencementYear: selected.audience === 'business' ? commencementYear : '',
             provider: 'offline', status: 'paid', paymentMethod: mode, paidAt: now, expiresAt: now,
             applicationId: detail.member.applicationId, gatewayPaymentId: String(body.receiptNumber || '').trim().slice(0, 120) || orderId,
             manualConfirmation: { by: String(actor.userId || actor.id || actor._id || ''), byName: actor.email || 'Super Admin', at: now, note, admission: detail.member.requiresManualAdmission,
-                expectedAmount: plan.amount, waivedAmount: Math.max(0, plan.amount - amount), receiptNumber: String(body.receiptNumber || '').trim().slice(0, 120) }
+                expectedAmount: plan.amount, waivedAmount: Math.max(0, plan.amount - amount), membershipNumber, receiptNumber: String(body.receiptNumber || '').trim().slice(0, 120) }
         });
         let activated;
         try {
             // Optimistic compare prevents simultaneous clicks from granting two periods.
             activated = await Member.findOneAndUpdate({ _id: id, updatedAt: member.updatedAt, isActive: { $ne: false } }, { $set: {
-                membershipStatus: 'active', membershipType: plan.membershipType, membershipExpiresAt: expiry,
+                membershipStatus: 'active', membershipType: plan.membershipType, membershipExpiresAt: expiry, membershipNumber,
                 membershipActivatedAt: member.membershipActivatedAt || now, paymentId: orderId, paymentAmount: amount, lastPaymentDate: now
             } }, { new: true });
             if (!activated) throw ApiError.conflict('Member details changed. Refresh and check their membership before confirming again.');

@@ -2,6 +2,7 @@ const Member = require('./memberdetails.model');
 const Business = require('./businessinfo.model');
 const Order = require('../payment/paymentorder.model');
 const plans = require('./membershipplan.service');
+const rules = require('./membershipPlanRules');
 const { membershipState } = require('./membershipState');
 const ApiError = require('../../core/utils/ApiError');
 
@@ -14,32 +15,31 @@ async function eligibility(memberId) {
     const [business, current, active] = await Promise.all([
         Business.findOne({ userId: member._id }).lean(),
         Order.findOne({ memberId: member._id, orderType: 'membership', status: 'paid' }).sort({ paidAt: -1, createdAt: -1 }).lean(),
-        plans.listActive()
+        plans.listAll()
     ]);
-    const declared = String(member.memberType || member.registrationType || '').toLowerCase();
-    const kind = business ? business.doingBusiness === true ? 'business' : business.registrationType === 'student' ? 'student' : 'aspirant'
-        : ['student', 'aspirant', 'business'].includes(declared) ? declared : 'aspirant';
-    const year = business?.businessCommencementYear || business?.commencementYear || '';
-    const choices = active.filter(p => p.audience !== 'platinum' && p.key !== current?.planId);
-    return { currentPlan: current?.planName || '', currentPlanId: current?.planId || '', kind,
-        commencementYear: year, plans: choices, canUpgrade: !!choices.length,
-        reason: choices.length ? 'Choose your new plan. The full plan fee is charged; your category changes after verified payment. Annual upgrades are valid for one year from payment.' : 'No other active plans are available. Please contact ACTIV Membership.' };
+    const progress = rules.progression(member, business, current, active);
+    const enteringBusiness = progress.kind === 'student' || progress.kind === 'aspirant';
+    const offer = enteringBusiness ? rules.entryPlan(active) : progress.promoted ? progress.effective : null;
+    const canPurchase = enteringBusiness && !!offer;
+    const reason = enteringBusiness
+        ? offer ? `Start your business membership with ${offer.name}. Choose the year your business started. Your category changes after verified payment.` : 'No entry business plan is available. Please contact ACTIV Membership.'
+        : progress.promoted ? `${state.state === 'active' ? 'Congratulations! Your membership has advanced' : 'Your renewal plan has advanced'} to ${progress.effective.name}. Your current paid validity is unchanged. The new fee is due only at renewal.`
+        : progress.next ? `Your current plan is ${progress.effective?.name || current?.planName || 'Business'}. It advances automatically to ${progress.next.name}${progress.nextEligibleYear ? ` in ${progress.nextEligibleYear}` : ' when your business reaches its configured year range'}. The new fee applies at renewal.`
+        : 'You already hold the highest available business plan. Continue with your current plan at renewal.';
+    return { currentPlan: progress.effective?.name || current?.planName || '', currentPlanId: progress.effective?.key || current?.planId || '',
+        kind: progress.kind, commencementYear: offer && rules.matchesYear(offer, progress.commencementYear) ? progress.commencementYear : '',
+        plans: offer ? [rules.withYears(offer)] : [], canUpgrade: canPurchase, canPurchase,
+        automaticallyAdvanced: progress.promoted, nextEligibleYear: progress.nextEligibleYear, reason };
 }
 async function validate(memberId, planId, commencementYear) {
     const result = await eligibility(memberId);
+    if (!result.canPurchase) throw ApiError.badRequest('Business plans advance automatically. Pay the new fee only when renewing your membership.');
     const selected = result.plans.find(p => p.key === planId);
-    if (!selected) throw ApiError.badRequest('Choose a different active plan. Lifetime Membership is confirmed by the office.');
-    const kind = selected.audience;
-    if (!['student', 'aspirant', 'business'].includes(kind)) throw ApiError.badRequest('This plan is unavailable for an online upgrade.');
-    let year = '';
-    if (kind === 'business') {
-        year = String(commencementYear ?? result.commencementYear).trim();
-        const numeric = Number(year), now = new Date().getFullYear();
-        if (!/^\d{4}$/.test(year) || !Number.isInteger(numeric) || numeric < 1800 || numeric > now) throw ApiError.badRequest('Enter a valid business commencement year.');
-        const years = now - numeric;
-        if (years < Number(selected.minYears || 0) || (selected.maxYears != null && years >= Number(selected.maxYears))) throw ApiError.badRequest('The commencement year does not match this plan. Select the plan for your business age.');
-    }
-    return { purchasePurpose: 'upgrade', upgradeKind: kind, upgradeCommencementYear: year, previousPlanId: result.currentPlanId };
+    if (!selected) throw ApiError.badRequest('Choose the eligible entry business plan. Other tiers follow your business commencement year.');
+    const year = String(commencementYear ?? result.commencementYear).trim();
+    if (!rules.matchesYear(selected, year)) throw ApiError.badRequest('Choose a business commencement year from the selected plan’s year range.');
+    return { purchasePurpose: 'upgrade', upgradeKind: 'business', upgradeCommencementYear: year,
+        membershipCommencementYear: year, previousPlanId: result.currentPlanId };
 }
 // Called only by verified settlement. Keep company details and login credentials;
 // write just the classification snapshot stored on the server-priced order.

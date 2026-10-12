@@ -222,6 +222,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         if (req.body.upgrade !== true && renewal.state === 'active' && !renewal.canRenew) {
             return res.status(400).json(ApiResponse.error('Your membership is active. Use the membership upgrade page to change plans, or renew when your renewal window opens.'));
         }
+        if (req.body.upgrade !== true) Object.assign(upgradeFields, await require('../members/membershipEligibility').validatePurchase(profile, membershipType));
     }
 
     /*
@@ -549,7 +550,7 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
         // the three facts a member keeps from this message.
         planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
         activatedLabel: membershipContext.dateLabel(order.paidAt || new Date()),
-        validUntilLabel: membershipContext.dateLabel(member.membershipExpiresAt),
+        validUntilLabel: membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(require('../members/membershipState').periodEnd(member))),
         stage: 'active',
         data: { membershipType: member.membershipType, orderId: order.orderId }
     });

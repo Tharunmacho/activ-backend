@@ -95,7 +95,7 @@ const cachedMember = async (id) => {
     if (hit && hit.expires > Date.now()) return hit.value;
 
     let member = await MemberDetails.findById(id)
-        .select('fullName email state district block membershipStatus memberType registrationType paymentId membershipTier')
+        .select('fullName email state district block membershipStatus memberType registrationType paymentId membershipTier membershipType membershipExpiresAt membershipActivatedAt')
         .lean()
         .catch(() => null);
 
@@ -128,7 +128,7 @@ const resolveMemberContext = async (req) => {
         block: member?.block || user.block || '',
         // An admin is not a paying member, but must be able to preview what
         // members see; every caller treats `isAdmin` as the wider permission.
-        isPaid: isPaidStatus(member?.membershipStatus),
+        isPaid: !!member && require('../members/membershipState').membershipState(member).state === 'active',
         memberType: String(member?.memberType || member?.registrationType || '').toLowerCase(),
         role,
         isAdmin

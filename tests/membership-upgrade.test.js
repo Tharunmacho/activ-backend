@@ -40,6 +40,7 @@ Order.findOne = () => query(history);
 Order.create = async data => { const row = { status: 'created', ...clone(data) }; created.push(row); return row; };
 Auth.findByIdAndUpdate = Auth.updateOne = () => { throw Error('An upgrade must not change login credentials'); };
 plans.listActive = async () => available;
+plans.listAll = async () => available;
 plans.getPlanForPayment = async key => {
     const p = available.find(p => p.key === key && p.audience !== 'platinum');
     return p ? { ...p, id: p.key, amount: p.price } : null;
@@ -51,58 +52,36 @@ paymentService.createPaymentRequest = async input => {
 };
 const user = () => ({ userId: member._id, email: member.email, role: 'member' });
 async function main() {
-    for (const [prior, kind, age, expected] of [
-        ['student', 'aspirant', 0, 'aspirant'], ['student', 'business', 2, 'basic'],
-        ['aspirant', 'business', 5, 'intermediate'], ['basic', 'business', 10, 'ideal'],
-        ['intermediate', 'business', 4, 'basic']
-    ]) {
-        fixture(prior, kind, age);
+    for (const prior of ['student','aspirant']) {
+        fixture(prior, prior, 2);
         const eligible = await upgrades.eligibility(member._id);
-        assert.deepEqual(eligible.plans.map(p => p.key), catalogue.filter(p => p.key !== prior && p.audience !== 'platinum').map(p => p.key));
-        const before = clone(member), oldReceipt = clone(history);
-        const { receipt } = await orderService.createOrder(user(), { planId: expected, upgrade: true });
-        assert.equal(receipt.amount, catalogue.find(p => p.key === expected).price);
-        assert.equal(created[0].purchasePurpose, 'upgrade');
-        assert.equal(created[0].previousPlanId, prior);
-        assert.equal(created[0].upgradeKind, kind);
-        assert.equal(created[0].memberId, before._id);
-        assert.deepEqual(member, before, 'opening checkout must not activate or change the account');
-        assert.deepEqual(history, oldReceipt, 'previous receipts stay intact');
-        await assert.rejects(upgrades.validate(member._id, 'platinum'), /Lifetime Membership/);
-        await assert.rejects(orderService.createOrder(user(), { planId: expected }), /active/);
+        assert.deepEqual(eligible.plans.map(p=>p.key), ['basic']);
+        const before=clone(member), oldReceipt=clone(history);
+        const {receipt}=await orderService.createOrder(user(), {planId:'basic',upgrade:true,commencementYear:String(YEAR-2)});
+        assert.equal(receipt.amount, 5000);
+        assert.deepEqual(member,before);assert.deepEqual(history,oldReceipt);
+        await assert.rejects(upgrades.validate(member._id,'intermediate',String(YEAR-5)), /entry business plan/);
+        await assert.rejects(upgrades.validate(member._id,'basic',String(YEAR-6)), /commencement year/);
+        const snapshot=await upgrades.validate(member._id,'basic',String(YEAR-1));
+        await upgrades.applyPaidProfile({...snapshot,memberId:member._id});
+        assert.equal(business.registrationType,'business');
+        assert.equal(business.businessCommencementYear,String(YEAR-1));
     }
-    fixture('basic', 'business', 2);
-    assert.equal((await upgrades.eligibility(member._id)).canUpgrade, true);
-    await assert.rejects(upgrades.validate(member._id, 'basic'), /different active plan/);
-    for (const year of ['', 'NaN', '1799', String(YEAR + 1), '2020.5']) {
-        fixture('student', 'business'); business.businessCommencementYear = year;
-        assert.equal((await upgrades.eligibility(member._id)).canUpgrade, true);
-        await assert.rejects(upgrades.validate(member._id, 'basic', year), /commencement year/);
+    for (const [prior,age,expected] of [['basic',2,null],['basic',5,'intermediate'],['intermediate',10,'ideal'],['ideal',12,null]]) {
+        fixture(prior,'business',age);
+        const choice=await upgrades.eligibility(member._id);
+        assert.deepEqual(choice.plans.map(p=>p.key),expected?[expected]:[]);
+        assert.equal(choice.canPurchase,false);
+        await assert.rejects(upgrades.validate(member._id,expected||'ideal'),/automatically/);
     }
-    fixture('student', 'business', 7); available = catalogue.filter(p => p.key !== 'intermediate');
-    await assert.rejects(upgrades.validate(member._id, 'intermediate'), /different active plan/);
-    fixture(); member.membershipStatus = 'pending';
-    await assert.rejects(upgrades.eligibility(member._id), /first membership/);
-    fixture(); member.isActive = false;
-    await assert.rejects(upgrades.eligibility(member._id), /unavailable/);
-    fixture(); member.membershipType = 'lifetime';
-    await assert.rejects(upgrades.eligibility(member._id), /lifetime/);
-    fixture(); member.membershipTier = 'platinum';
-    await assert.rejects(upgrades.eligibility(member._id), /lifetime/);
-    fixture(); member.membershipStatus = 'expired';
-    assert.equal((await upgrades.eligibility(member._id)).canUpgrade, true);
-
-    fixture('student', 'student', 0);
-    const targetYear = String(YEAR - 6);
-    const snapshot = await upgrades.validate(member._id, 'intermediate', targetYear);
-    assert.equal(snapshot.upgradeKind, 'business');
-    assert.equal(business.registrationType, 'student', 'choosing a new plan does not prematurely change the profile');
-    await upgrades.applyPaidProfile({ ...snapshot, memberId: member._id });
-    assert.equal(business.registrationType, 'business');
-    assert.equal(business.businessCommencementYear, targetYear);
-    await upgrades.applyPaidProfile({ purchasePurpose: 'upgrade', upgradeKind: 'aspirant', memberId: member._id });
-    assert.equal(business.doingBusiness, false);
-    assert.equal(business.registrationType, 'aspirant');
+    for (const year of ['', 'NaN','1799',String(YEAR+1),'2020.5']) {
+        fixture('student','student',0);
+        await assert.rejects(upgrades.validate(member._id,'basic',year),/commencement year/);
+    }
+    fixture(); member.membershipStatus='pending';await assert.rejects(upgrades.eligibility(member._id),/first membership/);
+    fixture(); member.isActive=false;await assert.rejects(upgrades.eligibility(member._id),/unavailable/);
+    fixture(); member.membershipType='lifetime';await assert.rejects(upgrades.eligibility(member._id),/lifetime/);
+    fixture(); member.membershipTier='platinum';await assert.rejects(upgrades.eligibility(member._id),/lifetime/);
 
     const express = require('express'), request = require('supertest');
     const jwt = require('jsonwebtoken'), config = require('../src/config');
@@ -116,15 +95,15 @@ async function main() {
     app.get('/profile', require('../src/core/middleware/auth').verifyToken,
         require('../src/modules/members/member.controller').getMyProfile);
     app.use((error, req, res, next) => res.status(error.statusCode || 500).json({ message: error.message }));
-    fixture('student', 'business', 5);
+    fixture('student', 'student', 2);
     const token = jwt.sign(user(), config.jwt.secret);
     assert.equal((await request(app).get('/payment/upgrade/plans')).status, 401);
-    assert.equal((await request(app).get('/payment/upgrade/plans').auth(token, { type: 'bearer' })).body.data.plans.some(p => p.key === 'intermediate'), true);
+    assert.equal((await request(app).get('/payment/upgrade/plans').auth(token, { type: 'bearer' })).body.data.plans.some(p => p.key === 'basic'), true);
     const before = clone(member);
     const hosted = await request(app).post('/payment/create-request').auth(token, { type: 'bearer' })
-        .send({ membershipType: 'intermediate', upgrade: true, amount: 10000 });
+        .send({ membershipType: 'basic', upgrade: true, commencementYear: String(YEAR-2), amount: 5000 });
     assert.equal(hosted.status, 201, JSON.stringify(hosted.body));
-    assert.equal(gatewayCalls.at(-1).amount, 10000);
+    assert.equal(gatewayCalls.at(-1).amount, 5000);
     assert.equal(created.at(-1).purchasePurpose, 'upgrade');
     assert.equal(created.at(-1).planAudience, 'business');
     assert.deepEqual(member, before);
@@ -133,7 +112,7 @@ async function main() {
         .send({ membershipType: 'ideal', upgrade: true });
     assert.equal(wrongPlan.status, 400);
     const wrongPrice = await request(app).post('/payment/create-request').auth(token, { type: 'bearer' })
-        .send({ membershipType: 'intermediate', upgrade: true, amount: 1 });
+        .send({ membershipType: 'basic', upgrade: true, commencementYear: String(YEAR-2), amount: 1 });
     assert.equal(wrongPrice.status, 400);
     const noUpgrade = await request(app).post('/payment/create-request').auth(token, { type: 'bearer' })
         .send({ membershipType: 'intermediate' });

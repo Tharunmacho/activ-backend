@@ -58,6 +58,7 @@ router.get('/reach', requireRole(...EVENT_MANAGERS), controller.reach);
  * and answers 400 on a screen that would simply look broken.
  */
 router.get('/bookings/overview', requireRole(...BOOKING_VIEWERS), controller.bookingOverview);
+router.get('/bookings/export', requireRole(...BOOKING_VIEWERS), controller.exportFilteredBookings);
 
 /*
  * The contact book: everyone who has booked anything, and one person's history.

@@ -180,10 +180,12 @@ class PaymentOrderService {
                     : 'This membership is already active');
         }
 
+        const eligibilityFields = !companyId && !upgrade ? await require('../members/membershipEligibility').validatePurchase(member, planId) : {};
         const order = await PaymentOrder.create({
             orderType: companyId ? 'company_listing' : 'membership',
             companyId: companyId || undefined,
             ...upgradeFields,
+            ...eligibilityFields,
             orderId: 'ord_' + crypto.randomBytes(16).toString('hex'),
             memberId: member._id,
             email: member.email,
@@ -442,8 +444,7 @@ class PaymentOrderService {
             ? null
             : (() => {
                 const base = renewing && claimed.purchasePurpose !== 'upgrade' ? renewalBase(before) : new Date();
-                base.setFullYear(base.getFullYear() + 1);
-                return base;
+                return require('../members/membershipDates').annualExpiry(base);
             })();
 
         const member = await MemberDetails.findByIdAndUpdate(

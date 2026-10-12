@@ -31,7 +31,8 @@ router.get('/health', (req, res) => {
         success: true,
         message: 'Server is running',
         timestamp: new Date().toISOString(),
-        environment: config.env
+        environment: config.env,
+        membershipIdFormat: 'ACTIV-TYPE-YYYYMMDD-NNN'
     });
 });
 

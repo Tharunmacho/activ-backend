@@ -272,20 +272,7 @@ const listMyPlans = asyncHandler(async(req, res) => {
      * aspirant as far as pricing is concerned, which is the same conclusion
      * `doingBusiness: false` reaches.
      */
-    const business = await BusinessInfo.findOne({ userId: String(userId) }).lean().catch(() => null);
-
-    // Business, or one of the two non-business kinds — a student has its own fee.
-    const kind = !business
-        ? 'aspirant'
-        : business.doingBusiness === false
-            ? (business.registrationType === 'student' ? 'student' : 'aspirant')
-            : 'business';
-
-    const commencementYear = business
-        ? (business.businessCommencementYear || business.commencementYear || '')
-        : '';
-
-    const resolved = await membershipPlanService.resolveForMember({ commencementYear, kind });
+    const resolved = await require('./membershipEligibility').forMember(userId);
 
     res.json(ApiResponse.success(resolved));
 });
@@ -506,10 +493,7 @@ const getCertificate = asyncHandler(async(req, res) => {
     if (kind === 'tax-exemption') {
         validUntil = endOfFinancialYear(activatedAt || issuedAtForYear());
     } else {
-        validUntil = member.membershipExpiresAt || null;
-        if (!validUntil && type === 'annual' && activatedAt) {
-            validUntil = endOfFinancialYear(activatedAt);
-        }
+        validUntil = require('./membershipDates').lastValidDay(require('./membershipState').periodEnd({ membershipType: type, membershipTier: member.membershipTier, membershipExpiresAt: member.membershipExpiresAt, membershipActivatedAt: activatedAt }));
     }
 
     const issuedAt = new Date();

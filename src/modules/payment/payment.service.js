@@ -57,7 +57,7 @@ const announceActivation = async (member, { amount, orderId, planName, paymentMo
         paymentMode: paymentMode || '',
         receiptUrl: `${config.frontendUrl}/member/payment-success?view=receipt${orderId ? `&orderId=${encodeURIComponent(orderId)}` : ''}`,
         activatedLabel: membershipContext.dateLabel(new Date()),
-        validUntilLabel: membershipContext.dateLabel(member.membershipExpiresAt),
+        validUntilLabel: membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(require('../members/membershipState').periodEnd(member))),
         stage: 'active',
         data: { membershipType: member.membershipType, orderId: orderId || '' }
     });
@@ -499,8 +499,7 @@ class PaymentService {
                 const { renewalFor, renewalBase } = require('../members/membershipState');
                 const renewing = ['active', 'expired'].includes(renewalFor(member).state);
                 const expiresAt = claimed.membershipType === 'lifetime' ? null
-                    : renewing && claimed.purchasePurpose !== 'upgrade' ? renewalBase(member) : new Date();
-                if (expiresAt) expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+                    : require('../members/membershipDates').annualExpiry(renewing && claimed.purchasePurpose !== 'upgrade' ? renewalBase(member) : new Date());
                 member = await MemberDetails.findByIdAndUpdate(claimed.memberId, { $set: {
                     membershipStatus: 'active', membershipType: claimed.membershipType,
                     ...(claimed.purchasePurpose === 'upgrade' ? { memberType: claimed.upgradeKind, registrationType: claimed.upgradeKind } : {}),
@@ -811,8 +810,7 @@ class PaymentService {
                 const baseDate = member.membershipExpiresAt && member.membershipExpiresAt > new Date() ?
                     member.membershipExpiresAt :
                     new Date();
-                membershipExpiresAt = new Date(baseDate);
-                membershipExpiresAt.setFullYear(membershipExpiresAt.getFullYear() + 1);
+                membershipExpiresAt = require('../members/membershipDates').annualExpiry(baseDate);
             }
 
             member.membershipStatus = 'active';

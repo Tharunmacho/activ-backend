@@ -716,7 +716,7 @@ const getMyProfile = asyncHandler(async(req, res) => {
         membershipType: member.membershipType || 'none',
         // Platinum is a tier the Super Admin grants; expiry is null for a lifetime membership.
         membershipTier: member.membershipTier || 'standard',
-        membershipExpiresAt: member.membershipExpiresAt || null,
+        membershipExpiresAt: require('./membershipState').periodEnd(member),
         // Whether the Renew button shows, and what it says — the same rule
         // `paymentOrder.createOrder` enforces (`membershipState.renewalFor`).
         renewal: renewalFor(member && member.toObject ? member.toObject() : (member || {})),
@@ -803,7 +803,7 @@ const getMyProfile = asyncHandler(async(req, res) => {
         membershipType: member.membershipType || 'none',
         // Platinum is a tier the Super Admin grants; expiry is null for a lifetime membership.
         membershipTier: member.membershipTier || 'standard',
-        membershipExpiresAt: member.membershipExpiresAt || null,
+        membershipExpiresAt: require('./membershipState').periodEnd(member),
         // Whether the Renew button shows, and what it says — the same rule
         // `paymentOrder.createOrder` enforces (`membershipState.renewalFor`).
         renewal: renewalFor(member && member.toObject ? member.toObject() : (member || {})),
@@ -853,13 +853,14 @@ const getMyProfile = asyncHandler(async(req, res) => {
     // or a profile edit that has not yet been paid for.
     const paidOrder = await require('../payment/paymentorder.model').findOne({
         memberId: member._id, orderType: 'membership', status: 'paid'
-    }).sort({ paidAt: -1, createdAt: -1 }).select('planId planName planAudience upgradeKind orderId gatewayPaymentId amount paymentMethod provider paidAt').lean();
+    }).sort({ paidAt: -1, createdAt: -1 }).select('membershipCommencementYear upgradeCommencementYear planId planName planAudience upgradeKind orderId gatewayPaymentId amount paymentMethod provider paidAt').lean();
     profileData.paidMembership = paidOrder ? {
         planId: paidOrder.planId, planName: require('./membershipLabels').displayPlanName(paidOrder.planName, paidOrder.planId, paidOrder.planAudience),
         kind: paidOrder.upgradeKind || paidOrder.planAudience || '',
         orderId: paidOrder.orderId, paymentId: paidOrder.gatewayPaymentId,
         amount: paidOrder.amount, paymentMethod: paidOrder.paymentMethod || paidOrder.provider, paidAt: paidOrder.paidAt
     } : null;
+    profileData.currentMembership = await require('./membershipEligibility').currentMembership(member, paidOrder);
     if (paidOrder) {
         profileData.lastPaymentAmount = paidOrder.amount;
         profileData.paymentAmount = paidOrder.amount;

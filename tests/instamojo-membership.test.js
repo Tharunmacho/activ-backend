@@ -175,7 +175,7 @@ async function main() {
     assert.equal(upgraded.email, originalMember.email);
     assert.equal(upgraded.phoneNumber, originalMember.phoneNumber);
     assert.equal(+upgraded.membershipActivatedAt, +originalMember.membershipActivatedAt, 'member-since date stays unchanged');
-    const expectedEnd = new Date(); expectedEnd.setFullYear(expectedEnd.getFullYear() + 1);
+    const expectedEnd = require('../src/modules/members/membershipDates').annualExpiry(new Date());
     assert.ok(Math.abs(+upgraded.membershipExpiresAt - +expectedEnd) < 10000, 'an upgrade starts a new year from payment, rather than adding to old expiry');
     const upgradedEnd = +upgraded.membershipExpiresAt, noticesBeforeReplay = notices.length;
     await service.processPaymentWebhook(webhook({ ...upgrade, gatewayPaymentId: upgrade.gatewayRequestId }));
