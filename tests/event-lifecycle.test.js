@@ -3,7 +3,7 @@ process.env.NODE_ENV = 'test';
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 mongoose.set('bufferCommands', false);
-const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause } = require('../src/modules/events/eventLifecycle');
+const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause, bookingHistoryCategory } = require('../src/modules/events/eventLifecycle');
 const at = Date.parse('2026-10-12T10:00:00+05:30');
 const event = { _id: new mongoose.Types.ObjectId(), title: 'Retained conference', status: 'published', channel: 'public', audience: 'all', startAt: new Date('2026-10-10T09:00:00+05:30'), endAt: new Date('2026-10-10T17:00:00+05:30'), registrationEnabled: true };
 const untouched = { bookings: [{ amount: 1000, paid: true }], registrations: [{ paid: true }], attendance: [{ checkedIn: true }] };
@@ -25,6 +25,11 @@ require('../src/modules/audit/audit.service').record = async () => {};
 async function main() {
     assert.equal(isPastEvent(event, Date.parse(event.endAt) - 1), false);
     assert.equal(isPastEvent(event, Date.parse(event.endAt)), true);
+    assert.equal(bookingHistoryCategory(event, Date.parse(event.endAt) - 1), 'current');
+    assert.equal(bookingHistoryCategory(event, Date.parse(event.endAt)), 'past');
+    assert.equal(bookingHistoryCategory({ ...event, archivedAt: new Date() }, at), 'deleted');
+    assert.equal(bookingHistoryCategory({ startAt: '2099-01-01', bookingHistoryOnly: true }, at), 'deleted');
+    assert.equal(bookingHistoryCategory({ startAt: '2026-10-10', days: [{ date: '2026-10-12' }] }, at), 'current');
     assert.equal(isUpcomingEvent(event, at), false);
     assert.equal(eventEndsAt({ startAt: event.startAt }), Date.parse('2026-10-11T00:00:00+05:30'));
     assert.equal(eventEndsAt({ startAt: event.startAt, days: [{ date: '2026-10-12' }] }), Date.parse('2026-10-13T00:00:00+05:30'));
@@ -54,6 +59,9 @@ async function main() {
     const overviewQueries = [];
     Event.find = filter => { overviewQueries.push(filter); return query([event]); };
     Booking.aggregate = async () => [{ _id: event._id, bookings: 1, seats: 1, collected: 1000 }];
+    Booking.collection.aggregate = () => ({ toArray: async () => [] });
+    Booking.distinct = async () => [event._id];
+    Registration.distinct = async () => [];
     Registration.aggregate = async () => [];
     bookingService.sweepExpiredHolds = async () => {};
     const overview = await bookingService.bookingOverview();
@@ -61,6 +69,8 @@ async function main() {
     assert.equal(overview.events[0].title, event.title);
     assert(overview.events[0].archivedAt);
     assert.equal(overview.totals.collected, 1000);
+    assert.equal(overview.events[0].historyCategory, 'deleted');
+    assert.equal(overview.historyTotals.deleted.collected, 1000);
     console.log('PASS: exact end boundary, IST midnight, multi-day fallback, booking closure, both archive paths, preserved records, public/member 404 and super-admin history.');
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

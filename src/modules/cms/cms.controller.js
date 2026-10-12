@@ -311,7 +311,7 @@ const getEvents = asyncHandler(async(req, res) => {
  * 404 to everyone but a super admin — exactly as it is absent from the list.
  */
 const getEvent = asyncHandler(async(req, res) => {
-    const editor = canSeeEventDrafts(req);
+    const editor = canSeeEventDrafts(req) && String(req.query.scope || '') !== 'public';
     res.json(ApiResponse.success(
         await cmsService.listEvent(await resolveEventId(req.params.id), { includeDrafts: editor, privileged: editor }),
     ));

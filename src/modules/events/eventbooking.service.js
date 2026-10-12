@@ -1,4 +1,4 @@
-const { isPastEvent } = require('./eventLifecycle');
+const { isPastEvent, bookingHistoryCategory } = require('./eventLifecycle');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const EventBooking = require('./eventbooking.model');
@@ -1307,7 +1307,7 @@ class EventBookingService {
             ...toBooking(booking, joining),
             eventEndAt: event && event.endAt || null,
             eventDays: event && event.days || [],
-            eventArchived: !!(event && event.archivedAt),
+            eventArchived: !event || !!event.archivedAt,
             contactName: event && event.contactName || '',
             contactPhone: event && event.contactPhone || '',
             contactEmail: event && event.contactEmail || '',
@@ -1614,27 +1614,12 @@ class EventBookingService {
         return toBooking(booking.toObject ? booking.toObject() : booking);
     }
 
-    /**
-     * Free the seats without losing the record — and tell the booker.
-     *
-     * A waitlist entry can be cancelled too; it holds no seat, but the person
-     * on it is still waiting to hear.
-     */
+    /** Retention guard for older clients that still offer booking deletion. */
     async deleteBooking(eventId, bookingRef, actor = {}) {
         if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can delete bookings.');
         if (!mongoose.isValidObjectId(eventId)) throw ApiError.badRequest('A valid event id is required');
-        const ref = str(bookingRef).toUpperCase();
-        const previous = await EventBooking.findOne({ eventId, bookingRef: ref, deletedAt: null }).lean();
-        if (!previous) throw ApiError.notFound('No booking for this event with that reference');
-        const removed = await EventBooking.findOneAndUpdate({ eventId, bookingRef: ref, deletedAt: null }, { $set: {
-            status: 'cancelled', cancelledAt: new Date(), expiresAt: null,
-            deletedAt: new Date(), deletedBy: String(actor.userId || actor.id || actor._id || '')
-        } }, { new: true });
-        if (!removed) throw ApiError.notFound('Booking already deleted');
-        if (['active', 'waitlist'].includes(previous.status)) {
-            this.announce(removed, 'cancelled', { reason: 'Booking removed by the Super Admin. Contact the event organiser for assistance.' });
-        }
-        return { bookingRef: ref, deleted: true };
+        // Kept for older clients: even their old Delete button cannot hide history.
+        throw ApiError.conflict('Booking records are retained and cannot be deleted. Cancel the booking to release its seats while keeping its details.');
     }
 
     async cancelBooking(bookingRef, { reason } = {}) {
@@ -2424,23 +2409,29 @@ class EventBookingService {
         await this.sweepExpiredHolds(null);
 
         const query = {};
-        // Drafts are excluded by default: an unpublished event has no public
-        // booking page, so a row for it would read as an event taking bookings
-        // that nobody can reach. `?includeDrafts=1` shows them for the editor
-        // who wants to check one before publishing.
+        // Existing bookings remain discoverable even if the organiser later
+        // unpublishes the event. The draft toggle only adds empty drafts.
         if (!(filters.includeDrafts === true || filters.includeDrafts === '1' || filters.includeDrafts === 'true')) {
-            query.$or = [{ status: 'published' }, { archivedAt: { $ne: null } }];
+            const [bookedIds, registeredIds] = await Promise.all([
+                EventBooking.distinct('eventId', { deletedAt: null }),
+                EventRegistration.distinct('eventId'),
+            ]);
+            query.$or = [{ status: 'published' }, { archivedAt: { $ne: null } }, { _id: { $in: [...bookedIds, ...registeredIds] } }];
         }
 
-        const events = await Event.find(query)
-            .select('title startAt endAt venue capacity registrationFee memberFee '
+        const [currentEvents, deletedHistory] = await Promise.all([Event.find(query)
+            .select('title startAt endAt days venue capacity registrationFee memberFee '
                 + 'registrationEnabled status archivedAt category bannerUrl')
             .sort({ startAt: -1, createdAt: -1 })
-            .limit(500)
-            .lean()
-            .catch(() => []);
+            .lean(), require('./bookingHistory').deletedEventBookingHeaders()]);
 
-        if (!events.length) return { events: [], totals: EMPTY_OVERVIEW_TOTALS() };
+        const events = [...currentEvents, ...deletedHistory].sort((a, b) =>
+            new Date(b.startAt || 0).getTime() - new Date(a.startAt || 0).getTime());
+
+        const historyTotals = {
+            current: EMPTY_OVERVIEW_TOTALS(), past: EMPTY_OVERVIEW_TOTALS(), deleted: EMPTY_OVERVIEW_TOTALS(),
+        };
+        if (!events.length) return { events: [], totals: EMPTY_OVERVIEW_TOTALS(), historyTotals };
 
         const ids = events.map((e) => e._id);
         const now = new Date();
@@ -2528,6 +2519,7 @@ class EventBookingService {
 
         const rows = events.map((event) => {
             const id = String(event._id);
+            const historyCategory = bookingHistoryCategory(event, now);
             const booking = bookingsBy.get(id) || {};
             const registration = registrationsBy.get(id) || {};
 
@@ -2537,12 +2529,14 @@ class EventBookingService {
             // has no remaining figure to report, and reporting one invents a limit.
             const remaining = capacity > 0 ? Math.max(0, capacity - booked) : null;
 
-            totals.events += 1;
-            totals.seats += booked;
-            totals.capacity += capacity;
-            totals.bookings += Number(booking.bookings || 0);
-            totals.collected += Number(booking.collected || 0);
-            totals.pending += Number(booking.pending || 0);
+            for (const total of [totals, historyTotals[historyCategory]]) {
+                total.events += 1;
+                total.seats += booked;
+                total.capacity += capacity;
+                total.bookings += Number(booking.bookings || 0);
+                total.collected += Number(booking.collected || 0);
+                total.pending += Number(booking.pending || 0);
+            }
 
             return {
                 id,
@@ -2550,6 +2544,8 @@ class EventBookingService {
                 startAt: event.startAt || null,
                 endAt: event.endAt || null,
                 archivedAt: event.archivedAt || null,
+                bookingHistoryOnly: !!event.bookingHistoryOnly,
+                historyCategory,
                 venue: event.venue || '',
                 category: event.category || '',
                 status: event.status || 'draft',
@@ -2580,7 +2576,7 @@ class EventBookingService {
             };
         });
 
-        return { events: rows, totals };
+        return { events: rows, totals, historyTotals };
     }
 
     // ==================================================================

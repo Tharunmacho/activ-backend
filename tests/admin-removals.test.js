@@ -25,28 +25,16 @@ async function main() {
         await hooks(model, 'aggregate', aggregate);
         assert.deepEqual(aggregate.pipeline()[0], { $match: { deletedAt: null } });
     }
-    const matches = f => f.eventId === row.eventId && f.bookingRef === row.bookingRef && row.deletedAt == null;
-    Booking.findOne = f => ({ lean: async () => matches(f) ? structuredClone(row) : null });
-    Booking.findOneAndUpdate = async (f, update) => {
-        if (!matches(f)) return null;
-        Object.assign(row, update.$set);
-        return structuredClone(row);
-    };
+    const before = structuredClone(row);
+    Booking.findOneAndUpdate = Booking.updateOne = Booking.deleteOne = () => { throw Error('Booking deletion must not write'); };
     service.announce = (...args) => notices.push(args);
     await assert.rejects(service.deleteBooking(eventId, ref, { role: 'events_admin' }), e => e.statusCode === 403);
     await assert.rejects(service.deleteBooking('bad-id', ref, actor), e => e.statusCode === 400);
-    await assert.rejects(service.deleteBooking(new mongoose.Types.ObjectId().toString(), ref, actor), e => e.statusCode === 404);
-    assert.equal(row.status, 'active', 'a different event cannot delete this booking');
-    const result = await service.deleteBooking(eventId, ref, actor);
-    assert.equal(result.deleted, true);
-    assert.equal(row.status, 'cancelled');
-    assert.equal(row.expiresAt, null);
-    assert.equal(row.deletedBy, actor.userId);
-    assert.equal(row.payment.status, 'paid', 'receipt is retained and not falsely refunded');
-    assert.equal(notices.length, 1);
-    assert.equal(notices[0][1], 'cancelled');
-    await assert.rejects(service.deleteBooking(eventId, ref, actor), e => e.statusCode === 404);
-    assert.equal(notices.length, 1, 'repeat delete does not send another notice');
-    console.log('Admin deletion: Super Admin permission, event ownership, retained receipts, seat release, notices and archived-query protections passed.');
+    for (const id of [new mongoose.Types.ObjectId().toString(), eventId, eventId]) {
+        await assert.rejects(service.deleteBooking(id, ref, actor), e => e.statusCode === 409 && /retained/.test(e.message));
+    }
+    assert.deepEqual(row, before, 'booking, payment and contact records remain unchanged');
+    assert.equal(notices.length, 0, 'a rejected delete sends no notice');
+    console.log('PASS: old booking delete requests are blocked, records unchanged, no notifications, query protections retained.');
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

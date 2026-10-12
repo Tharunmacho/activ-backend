@@ -10,6 +10,7 @@
     "test:oauth-login": "node tests/oauth-login.test.js && node tests/oauth-app-client.test.js && node tests/oauth-providers.test.js && node tests/oauth-one-time.test.js",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
+    "test:event-module": "node tests/event-module-local.test.js",
     "test:workflow": "node tests/approval-workflow.test.js",
     "test:regions": "node tests/region-architecture.test.js && node tests/india-regions.test.js",
     "test:dashboard": "node tests/member-dashboard.test.js",
@@ -79,6 +80,7 @@
   "devDependencies": {
     "eslint": "^8.55.0",
     "jest": "^29.7.0",
+    "mongodb-memory-server-core": "10.4.3",
     "nodemon": "^3.0.2",
     "pm2": "^5.3.0",
     "supertest": "^6.3.3"

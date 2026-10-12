@@ -21,6 +21,10 @@ const isPastEvent = (event = {}, now = Date.now()) => {
     return end !== null && end <= Number(now);
 };
 const isUpcomingEvent = (event = {}, now = Date.now()) => !event.archivedAt && !isPastEvent(event, now);
+// Booking history is classified on read. No booking or event is moved or rewritten.
+const bookingHistoryCategory = (event = {}, now = Date.now()) =>
+    event.archivedAt || event.bookingHistoryOnly || event.status === 'deleted'
+        ? 'deleted' : isPastEvent(event, now) ? 'past' : 'current';
 const eventPhase = (event = {}, now = Date.now()) => {
     if (isPastEvent(event, now)) return 'past';
     const start = instant(event.startAt);
@@ -47,4 +51,4 @@ const eventPeriodClause = (period, now = new Date()) => ({
         : { $or: [{ $eq: [endingExpression, null] }, { $gt: [endingExpression, now] }] },
 });
 
-module.exports = { eventEndsAt, isPastEvent, isUpcomingEvent, eventPhase, eventPeriodClause };
+module.exports = { eventEndsAt, isPastEvent, isUpcomingEvent, eventPhase, eventPeriodClause, bookingHistoryCategory };

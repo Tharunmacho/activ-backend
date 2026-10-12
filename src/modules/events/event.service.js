@@ -893,7 +893,8 @@ class EventService {
         }
 
         if (filters.audience && ['all', 'paid'].includes(str(filters.audience).toLowerCase())) {
-            query.audience = str(filters.audience).toLowerCase();
+            // A display filter must narrow, never replace, membership eligibility.
+            query.$and = [...(query.$and || []), { audience: str(filters.audience).toLowerCase() }];
         }
 
         /*

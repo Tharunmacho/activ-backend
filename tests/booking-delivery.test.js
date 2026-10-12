@@ -251,7 +251,7 @@ const testExactlyOnce = async() => {
     // (e) Reconcile: never settles without the gateway saying Credit.
     fakeBookingStore();
     sent = recordDispatches();
-    const pending = [{ orderId: 'ord_r', bookingRef: 'ACTIVB-PAID-0001', status: 'created', amount: 1500, gatewayPaymentId: 'req_r', save: async() => {} }];
+    const pending = [{ orderId: 'ord_r', orderType: 'event_booking', bookingRef: 'ACTIVB-PAID-0001', status: 'created', amount: 1500, gatewayPaymentId: 'req_r', save: async() => {} }];
     stub(PaymentOrder, 'find', () => chain(pending));
     stub(paymentService, 'isConfigured', () => true);
     stub(paymentService, 'verifyPaymentWithGateway', async() => ({ paid: false }));

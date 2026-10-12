@@ -2085,7 +2085,11 @@ class CmsService {
      */
     async listEvents({ includeDrafts = false, limit = 100, privileged = false, period } = {}) {
         const filter = includeDrafts ? { archivedAt: null } : { status: 'published', archivedAt: null };
-        const effectivePeriod = ['upcoming', 'past', 'all'].includes(period) ? period : (includeDrafts ? 'all' : 'upcoming');
+        // Completed events belong in the admin history, including when an older
+        // public client still requests period=past or period=all.
+        const effectivePeriod = privileged
+            ? (['upcoming', 'past', 'all'].includes(period) ? period : (includeDrafts ? 'all' : 'upcoming'))
+            : 'upcoming';
         if (effectivePeriod !== 'all') filter.$and = [eventPeriodClause(effectivePeriod)];
 
         /*
@@ -2147,14 +2151,14 @@ class CmsService {
          * first), and every dated event follows in date order.
          */
         const upcoming = events
-            .filter(e => undated(e) || !over(e))
+            .filter(e => !over(e))
             .sort((a, b) => {
                 if (undated(a) !== undated(b)) return undated(a) ? -1 : 1;
                 if (undated(a)) return 0;
                 return at(a) - at(b);
             });
 
-        const past = events.filter(e => !undated(e) && over(e)).sort((a, b) => at(b) - at(a));
+        const past = events.filter(over).sort((a, b) => at(b) - at(a));
 
         // `privileged` carries the join link; `includeDrafts` is the same
         // question asked of a different field, and the controller derives both
@@ -2268,7 +2272,7 @@ class CmsService {
          * exactly where a link copied out of a member dashboard lands an
          * anonymous visitor.
          */
-        if (doc.archivedAt || (!includeDrafts && (isDraft || membersOnly || !isOnboardingContent(doc)))) {
+        if (doc.archivedAt || (!privileged && isPastEvent(doc)) || (!includeDrafts && (isDraft || membersOnly || !isOnboardingContent(doc)))) {
             throw ApiError.notFound('Event not found');
         }
 
