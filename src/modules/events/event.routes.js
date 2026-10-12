@@ -149,11 +149,18 @@ router.get('/:id/attendance', requireRole(...ATTENDANCE_VIEWERS), asyncHandler(a
 }));
 router.get('/:id/attendance/export', requireRole(...ATTENDANCE_VIEWERS), asyncHandler(async(req, res) => {
     const { liveService } = require('./eventcheckin.service');
+    if (req.query.format === 'xlsx') {
+        const { sendWorkbook } = require('../../core/utils/spreadsheet');
+        return sendWorkbook(req, res, await liveService().attendanceXlsx(req.params.id, {
+            includeContact: req.user && req.user.role === 'super_admin'
+        }));
+    }
     const { filename, csv } = await liveService().attendanceCsv(req.params.id, {
         includeContact: req.user && req.user.role === 'super_admin'
     });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
     res.send(csv);
 }));
 router.get('/:id/bookings/:ref', requireRole(...BOOKING_VIEWERS), controller.getBooking);

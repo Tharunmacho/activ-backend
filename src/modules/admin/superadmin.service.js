@@ -13,6 +13,7 @@ const adminRegions = require('./admin.regions');
 const regionService = require('../regions/region.service');
 const tierRouting = require('../common/tierRouting');
 const tierReviews = require('../common/tierReviews');
+const adminRosterPage = require('./adminRosterPage');
 
 const { buildApplicant, escapeRegex, LEVELS, classifyForLevel } = adminService;
 
@@ -840,126 +841,16 @@ class SuperAdminService {
     }
 
     async listAdmins(filters = {}, actor = {}) {
-        const { role, q } = filters;
-
-        /*
-         * The actor's patch first, and it is not negotiable.
-         *
-         * Applied before the caller's own filters rather than merged with them:
-         * a district admin passing `?state=Kerala` must be able to narrow their
-         * view inside their district, never to widen it. A `null` scope is an
-         * actor who manages nobody — answered with an empty list rather than
-         * with everything, which is what an unguarded query would return.
-         */
         const scope = await actorScope(actor);
-        const forced = scopeFilter(scope);
         const allowedRoles = MANAGEABLE_BY[scope.role] || [];
-
-        if (!forced) {
-            return {
-                admins: [],
-                counts: { all: 0, block_admin: 0, district_admin: 0, state_admin: 0 },
-                // `total` too: the clients read it, and an undefined count
-                // renders as "undefined admins" rather than as "none".
-                total: 0,
-                scope: { role: scope.role, state: scope.state, district: scope.district, manageableRoles: [] }
-            };
-        }
-
-        let admins = await this.allAdminRows();
-
-        /*
-         * Only the tiers beneath this actor — and ONLY for the tiers that have
-         * something above them.
-         *
-         * The super admin's list is left exactly as it was: every row this
-         * repository returns, filtered by nothing. Applying the role filter to
-         * them too was a quiet regression — it dropped any row whose role is not
-         * one of the three manageable ones from a screen that had always shown
-         * the whole roster.
-         */
-        if (scope.role !== 'super_admin') {
-            admins = admins.filter(a => allowedRoles.includes(a.role));
-        }
-
-        if (forced.state) admins = admins.filter(a => sameRegion(a.state, forced.state));
-        if (forced.district) admins = admins.filter(a => sameRegion(a.district, forced.district));
-
-        if (filters.state) {
-            const needle = String(filters.state).trim().toLowerCase();
-            admins = admins.filter(a => String(a.state || '').trim().toLowerCase() === needle);
-        }
-        if (filters.district) {
-            const needle = String(filters.district).trim().toLowerCase();
-            admins = admins.filter(a => String(a.district || '').trim().toLowerCase() === needle);
-        }
-        if (filters.block) {
-            const needle = String(filters.block).trim().toLowerCase();
-            admins = admins.filter(a => String(a.block || '').trim().toLowerCase() === needle);
-        }
-
-        const counts = {
-            all: admins.length,
-            block_admin: admins.filter(a => a.role === 'block_admin').length,
-            district_admin: admins.filter(a => a.role === 'district_admin').length,
-            state_admin: admins.filter(a => a.role === 'state_admin').length
-        };
-
-        if (role && role !== 'all') {
-            const roleFilter = String(role).toLowerCase();
-            admins = admins.filter(a => a.role === roleFilter);
-        }
-        if (q && String(q).trim().length >= 2) {
-            const needle = String(q).trim().toLowerCase();
-            admins = admins.filter(a =>
-                `${a.fullName} ${a.email} ${a.block} ${a.district} ${a.state}`.toLowerCase().includes(needle)
-            );
-        }
-
-        admins.sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || '')));
-
-        // Annotate each row with how many other active admins share its exact
-        // region. Computed here in one pass over the already-loaded list rather
-        // than per row, so a 1000-admin platform stays a single scan.
-        const all = await this.allAdminRows();
-        const regionKey = (admin) => [
-            admin.role,
-            String(admin.state || '').trim().toLowerCase(),
-            String(admin.district || '').trim().toLowerCase(),
-            String(admin.block || '').trim().toLowerCase()
-        ].join('|');
-
-        const perRegion = new Map();
-        all.filter(admin => admin.active).forEach((admin) => {
-            const key = regionKey(admin);
-            perRegion.set(key, (perRegion.get(key) || 0) + 1);
-        });
-
-        const annotated = admins.map(admin => ({
-            ...admin,
-            // Excludes the admin themselves, so 0 means "sole owner of this queue".
-            coAdmins: Math.max(0, (perRegion.get(regionKey(admin)) || 0) - (admin.active ? 1 : 0)),
-            region: [admin.block, admin.district, admin.state].filter(Boolean).join(', ')
-        }));
-
-        return {
-            admins: annotated,
-            counts,
-            total: annotated.length,
-            /*
-             * What this actor may do, told to the client rather than inferred
-             * there. The same page serves three tiers, and it must not offer a
-             * district admin a "state admin" option in the role dropdown that
-             * the server would then refuse — a form that can be filled in and
-             * not submitted is worse than one that never offered the field.
-             */
-            scope: {
-                role: scope.role,
-                state: scope.state,
-                district: scope.district,
-                manageableRoles: allowedRoles
-            }
-        };
+        const forced = scopeFilter(scope);
+        const authorized = forced && (scope.role === 'super_admin' ||
+            (scope.state && (scope.role !== 'district_admin' || scope.district)));
+        // One cached roster read, with sorting/search/queue counts shared by
+        // snapshot. New clients ask for bounded pages; older clients retain
+        // their existing response until they are updated.
+        const rows = authorized ? await this.allAdminRows() : [];
+        return adminRosterPage(rows, filters, scope, allowedRoles);
     }
 
     /**

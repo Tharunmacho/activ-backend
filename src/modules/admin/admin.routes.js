@@ -36,6 +36,7 @@ router.get('/super/admins', requireRole('super_admin'), controller.listAdmins);
 router.get('/super/membership/plans', requireRole('super_admin'), controller.listMembershipPlans);
 const membershipDashboard = require('./adminMembershipDashboard.controller');
 router.get('/super/membership/registrations', requireRole('super_admin'), membershipDashboard.overview);
+router.get('/super/membership/registrations/export', requireRole('super_admin'), membershipDashboard.exportReport);
 router.get('/super/membership/registrations/:memberId', requireRole('super_admin'), membershipDashboard.detail);
 router.post('/super/membership/registrations/:memberId/confirm', requireRole('super_admin'), membershipDashboard.confirm);
 router.delete('/super/membership/registrations/:memberId', requireRole('super_admin'), membershipDashboard.remove);

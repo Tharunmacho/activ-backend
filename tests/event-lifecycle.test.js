@@ -1,0 +1,66 @@
+// Isolated fixtures. Never connects to a database or sends a notification.
+process.env.NODE_ENV = 'test';
+const assert = require('node:assert/strict');
+const mongoose = require('mongoose');
+mongoose.set('bufferCommands', false);
+const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause } = require('../src/modules/events/eventLifecycle');
+const at = Date.parse('2026-10-12T10:00:00+05:30');
+const event = { _id: new mongoose.Types.ObjectId(), title: 'Retained conference', status: 'published', channel: 'public', audience: 'all', startAt: new Date('2026-10-10T09:00:00+05:30'), endAt: new Date('2026-10-10T17:00:00+05:30'), registrationEnabled: true };
+const untouched = { bookings: [{ amount: 1000, paid: true }], registrations: [{ paid: true }], attendance: [{ checkedIn: true }] };
+const history = structuredClone(untouched);
+const Event = require('../src/modules/events/event.model');
+const Registration = require('../src/modules/events/eventregistration.model');
+const Booking = require('../src/modules/events/eventbooking.model');
+const query = value => ({ select() { return this; }, sort() { return this; }, limit() { return this; }, lean: async () => value });
+Event.findOneAndUpdate = (filter, update) => {
+    if (event.archivedAt) return query(null);
+    assert.equal(filter.archivedAt, null);
+    Object.assign(event, update.$set);
+    return query(event);
+};
+Event.findById = () => query(event);
+Event.findByIdAndDelete = Event.deleteOne = Registration.deleteMany = Booking.deleteMany = () => { throw Error('History must not be deleted'); };
+require('../src/modules/audit/audit.service').record = async () => {};
+
+async function main() {
+    assert.equal(isPastEvent(event, Date.parse(event.endAt) - 1), false);
+    assert.equal(isPastEvent(event, Date.parse(event.endAt)), true);
+    assert.equal(isUpcomingEvent(event, at), false);
+    assert.equal(eventEndsAt({ startAt: event.startAt }), Date.parse('2026-10-11T00:00:00+05:30'));
+    assert.equal(eventEndsAt({ startAt: event.startAt, days: [{ date: '2026-10-12' }] }), Date.parse('2026-10-13T00:00:00+05:30'));
+    assert.equal(isUpcomingEvent({ startAt: null }, at), true);
+    assert.equal(isPastEvent({ startAt: 'invalid' }, at), false);
+    assert(eventPeriodClause('past', new Date(at)).$expr.$and, 'past requires a known finishing time');
+
+    const service = require('../src/modules/events/event.service');
+    service.countRegistrations = async () => ({});
+    service.myRegistrationsFor = async () => ({});
+    const cms = require('../src/modules/cms/cms.service');
+    const bookingService = require('../src/modules/events/eventbooking.service');
+    assert.equal(bookingService.isClosed(event), true, 'completed event cannot take new bookings');
+    const result = await service.deleteEvent(String(event._id), { role: 'super_admin' });
+    assert(result.archived && result.historyRetained);
+    assert(event.archivedAt);
+    assert.equal(event.status, 'draft');
+    assert.equal(event.registrationEnabled, false);
+    assert.equal(event.showInBanner, false);
+    assert.deepEqual(untouched, history, 'bookings, registrations and attendance stay unchanged');
+    await assert.rejects(cms.listEvent(String(event._id)), /not found/i);
+    await assert.rejects(service.getEvent(String(event._id), { role: 'member' }), /not found/i);
+    const admin = await service.getEvent(String(event._id), { role: 'super_admin', isAdmin: true });
+    assert.equal(admin.title, event.title);
+    assert(admin.archivedAt, 'super admin can still open the historical event');
+    assert.equal((await cms.deleteEvent(String(event._id), { role: 'cms_admin' })).historyRetained, true, 'CMS uses same archive and repeat delete is safe');
+    const overviewQueries = [];
+    Event.find = filter => { overviewQueries.push(filter); return query([event]); };
+    Booking.aggregate = async () => [{ _id: event._id, bookings: 1, seats: 1, collected: 1000 }];
+    Registration.aggregate = async () => [];
+    bookingService.sweepExpiredHolds = async () => {};
+    const overview = await bookingService.bookingOverview();
+    assert(overviewQueries[0].$or.some(clause => clause.archivedAt), 'booking overview includes archived records');
+    assert.equal(overview.events[0].title, event.title);
+    assert(overview.events[0].archivedAt);
+    assert.equal(overview.totals.collected, 1000);
+    console.log('PASS: exact end boundary, IST midnight, multi-day fallback, booking closure, both archive paths, preserved records, public/member 404 and super-admin history.');
+}
+main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

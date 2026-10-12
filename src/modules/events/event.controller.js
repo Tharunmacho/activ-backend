@@ -57,7 +57,7 @@ const setStatus = asyncHandler(async(req, res) => {
 
 const deleteEvent = asyncHandler(async(req, res) => {
     const data = await eventService.deleteEvent(req.params.id, req.user || {});
-    res.json(ApiResponse.success(data, 'Event deleted'));
+    res.json(ApiResponse.success(data, 'Event removed from public view; booking, payment and attendance history retained'));
 });
 
 /**
@@ -202,7 +202,12 @@ const listAttendees = asyncHandler(async(req, res) => {
  * make it save rather than render.
  */
 const exportBookings = asyncHandler(async(req, res) => {
+    if (req.query.format === 'xlsx') {
+        const { sendWorkbook } = require('../../core/utils/spreadsheet');
+        return sendWorkbook(req, res, await bookingService.exportBookingsXlsx(req.params.id));
+    }
     const { filename, csv } = await bookingService.exportBookingsCsv(req.params.id);
+    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csv);

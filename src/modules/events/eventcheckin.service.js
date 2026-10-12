@@ -1,7 +1,10 @@
+const { eventPeriodClause } = require('./eventLifecycle');
 const mongoose = require('mongoose');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 const pass = require('./eventPass');
+const { attendanceWorkbook } = require('./eventReports');
+const { formatDateIST, reportDay, csvCell: reportCsvCell } = require('../../core/utils/spreadsheet');
 
 /**
  * ============================================================================
@@ -85,6 +88,7 @@ const admissibility = (booking, index = 0, event = null, expectedEventId = '') =
     const status = str(booking.status) || 'active';
     const paymentStatus = str(booking.payment && booking.payment.status) || 'pending';
 
+    if (expectedEventId && event?.archivedAt) return { ok: false, code: 'archived_event', message: 'This event was archived. Its records are retained, but check-in is closed.' };
     if (status === 'cancelled') {
         return { ok: false, code: 'cancelled', message: 'This booking was cancelled. Do not admit — send the attendee to the organiser.' };
     }
@@ -241,7 +245,7 @@ const createCheckinService = (deps = {}) => {
     const loadEvent = async(eventId) => {
         const id = oid(eventId);
         if (!id) return null;
-        return lean(Event.findById(id, 'title startAt endAt venue mode category status slug')) || null;
+        return lean(Event.findById(id, 'title startAt endAt venue mode category status slug archivedAt')) || null;
     };
 
     const loadCheckin = (bookingId, index) =>
@@ -323,7 +327,7 @@ const createCheckinService = (deps = {}) => {
          * in" at another event's door.
          */
         const door = admissibility(booking, index, event, expectedEventId);
-        if (['wrong_event', 'online_event'].includes(door.code)) {
+        if (['wrong_event', 'online_event', 'archived_event'].includes(door.code)) {
             const error = ApiError.conflict(door.message);
             error.fields = { reason: door.code };
             error.reasonCode = door.code;
@@ -490,6 +494,9 @@ const createCheckinService = (deps = {}) => {
         };
     };
 
+    const attendanceXlsx = async(eventId, options = {}) =>
+        attendanceWorkbook(await attendance(eventId, { ...options, q: '', status: 'all' }), !!options.includeContact);
+
     const attendanceCsv = async(eventId, options = {}) => {
         const data = await attendance(eventId, { ...options, q: '', status: 'all' });
         const withContact = !!options.includeContact;
@@ -503,13 +510,13 @@ const createCheckinService = (deps = {}) => {
                 ...(withContact ? [r.email, r.phone] : [r.phoneMasked]),
                 r.bookedBy, r.payment,
                 r.checkedIn ? (r.bookingStatus === 'changed' ? 'Checked in (booking since changed)' : 'Checked in') : 'Not yet',
-                r.admittedAtLabel, r.admittedBy ? `${r.admittedBy}${r.admittedByEmail && withContact ? ` <${r.admittedByEmail}>` : ''}` : '',
+                formatDateIST(r.admittedAt), r.admittedBy ? `${r.admittedBy}${r.admittedByEmail && withContact ? ` <${r.admittedByEmail}>` : ''}` : '',
                 r.method === 'manual' ? 'Manual entry' : (r.method ? 'QR scan' : '')
-            ].map(csvCell).join(','));
+            ].map((value, index) => reportCsvCell(value, index === (withContact ? 5 : 4))).join(','));
         });
         const slug = str(data.event.title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'event';
         return {
-            filename: `attendance-${slug}-${new Date().toISOString().slice(0, 10)}.csv`,
+            filename: `attendance-${slug}-${reportDay()}.csv`,
             // BOM so Excel reads the names as UTF-8.
             csv: `﻿${lines.join('\r\n')}\r\n`
         };
@@ -522,13 +529,13 @@ const createCheckinService = (deps = {}) => {
      * checked-in counts.
      */
     const listCheckinEvents = async({ scope = 'upcoming', now = new Date() } = {}) => {
-        const since = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
         const past = scope === 'past';
         // In-person events only: an online event has no door (no `mode` = in person).
         const filter = {
-            status: 'published',
             mode: { $ne: 'online' },
-            startAt: past ? { $lt: since, $ne: null } : { $gte: since }
+            ...(past
+                ? { $or: [{ archivedAt: { $ne: null } }, { status: 'published', ...eventPeriodClause('past', now) }] }
+                : { status: 'published', archivedAt: null, ...eventPeriodClause('upcoming', now) })
         };
         const events = await lean(Event.find(filter, 'title startAt endAt venue mode category slug', {
             sort: { startAt: past ? -1 : 1 }, limit: 60
@@ -564,7 +571,7 @@ const createCheckinService = (deps = {}) => {
         }));
     };
 
-    return { resolve, lookup, admit, publicPass, attendance, attendanceCsv, listCheckinEvents };
+    return { resolve, lookup, admit, publicPass, attendance, attendanceCsv, attendanceXlsx, listCheckinEvents };
 };
 
 /** The live service, on the real models. Built on first use so requiring this file never opens a model. */

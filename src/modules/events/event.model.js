@@ -118,6 +118,9 @@ const eventSchema = new mongoose.Schema({
     endAt: {
         type: Date
     },
+    // Deleting an event archives its programme and keeps all linked records.
+    archivedAt: { type: Date, default: null, index: true },
+    archivedBy: { type: String, default: '' },
     /**
      * =====================================================================
      * HOW YOU ATTEND IT — a different question from what kind it is

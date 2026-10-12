@@ -1,3 +1,4 @@
+const { isPastEvent } = require('./eventLifecycle');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const EventBooking = require('./eventbooking.model');
@@ -7,6 +8,8 @@ const { validateMobile } = require('../common/phoneNumber');
 const { priceFor } = require('./eventPricing');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
+const { formatDateIST, csvCell: reportCsvCell } = require('../../core/utils/spreadsheet');
+const { bookingsWorkbook } = require('./eventReports');
 
 /**
  * Public event bookings — "Book Now", guest checkout, several participants.
@@ -704,8 +707,9 @@ class EventBookingService {
         };
     }
 
-    /** Whether the deadline has passed. A null deadline never closes. */
+    /** Booking closes at the deadline, event end, or archival, whichever comes first. */
     isClosed(event = {}) {
+        if (event.archivedAt || isPastEvent(event)) return true;
         const closesAt = event.registrationClosesAt || event.registrationDeadline;
         if (!closesAt) return false;
         const at = new Date(closesAt);
@@ -2189,7 +2193,7 @@ class EventBookingService {
         const fallback = rawDefault.split(',').map(Number).filter((h) => Number.isFinite(h) && h > 0);
 
         const horizon = new Date(now + 8 * 24 * 60 * 60 * 1000);
-        const events = await Event.find({ startAt: { $gt: new Date(now), $lte: horizon } })
+        const events = await Event.find({ archivedAt: null, status: 'published', startAt: { $gt: new Date(now), $lte: horizon } })
             .select('_id startAt reminderOffsetsHours')
             .lean()
             .catch(() => []);
@@ -2403,12 +2407,12 @@ class EventBookingService {
         // that nobody can reach. `?includeDrafts=1` shows them for the editor
         // who wants to check one before publishing.
         if (!(filters.includeDrafts === true || filters.includeDrafts === '1' || filters.includeDrafts === 'true')) {
-            query.status = 'published';
+            query.$or = [{ status: 'published' }, { archivedAt: { $ne: null } }];
         }
 
         const events = await Event.find(query)
             .select('title startAt endAt venue capacity registrationFee memberFee '
-                + 'registrationEnabled status category bannerUrl')
+                + 'registrationEnabled status archivedAt category bannerUrl')
             .sort({ startAt: -1, createdAt: -1 })
             .limit(500)
             .lean()
@@ -2523,6 +2527,7 @@ class EventBookingService {
                 title: event.title || '',
                 startAt: event.startAt || null,
                 endAt: event.endAt || null,
+                archivedAt: event.archivedAt || null,
                 venue: event.venue || '',
                 category: event.category || '',
                 status: event.status || 'draft',
@@ -2679,23 +2684,28 @@ class EventBookingService {
     //  Export
     // ==================================================================
 
-    /**
-     * Every booking on one event as CSV, participants expanded inline.
-     *
-     * CSV AND NOT XLSX. The button says "Excel Report" because that is what the
-     * association calls it and what they will do with it, and Excel opens a CSV
-     * natively. Generating a real workbook would add a binary dependency to the
-     * API for a file whose only job is to be opened once and sorted — and a CSV
-     * survives being mailed on, opened in Sheets, and read by a script, which
-     * an .xlsx does less well.
-     *
-     * ONE ROW PER BOOKING, with the participants in numbered columns rather than
-     * one row per participant. The organiser reconciling takings needs the money
-     * to add up down a column, and a booking repeated across four rows makes
-     * every total in the sheet four times too large. The door list — one row per
-     * person — is `listAttendees`, and has its own export for the same reason
-     * in reverse.
-     */
+    /** One financial row per booking; participants have their own workbook sheet. */
+    async exportBookingsXlsx(eventId) {
+        if (!/^[0-9a-fA-F]{24}$/.test(String(eventId || ''))) {
+            throw ApiError.badRequest('A valid event id is required');
+        }
+        const id = new mongoose.Types.ObjectId(String(eventId));
+        // Administrative evidence includes archived records. Explicit projections
+        // never load guest edit tokens, password material or operational metadata.
+        const [event, bookings] = await Promise.all([
+            Event.collection.findOne({ _id: id }, { projection: { title: 1, startAt: 1, venue: 1 } }),
+            EventBooking.collection.find({ eventId: id }, { projection: {
+                bookingRef: 1, createdAt: 1, bookedBy: 1, isGuest: 1, noOfPersons: 1,
+                participants: 1, unitAmount: 1, totalAmount: 1, memberRateApplied: 1,
+                payment: 1, status: 1, cancelledAt: 1, note: 1, deletedAt: 1,
+                eventTitle: 1, eventStartAt: 1, eventVenue: 1
+            } }).sort({ createdAt: 1 }).toArray()
+        ]);
+        if (!event && !bookings.length) throw ApiError.notFound('Event report not found.');
+        return bookingsWorkbook(event, bookings);
+    }
+
+    /** Legacy CSV clients remain supported; current clients request XLSX. */
     async exportBookingsCsv(eventId) {
         if (!/^[0-9a-fA-F]{24}$/.test(String(eventId || ''))) {
             throw ApiError.badRequest('A valid event id is required');
@@ -2714,7 +2724,7 @@ class EventBookingService {
         );
 
         const headers = [
-            'S.No', 'Booking Ref', 'Booked On', 'Name', 'Email', 'Mobile',
+            'S.No', 'Booking Ref', 'Booked On (IST)', 'Name', 'Email', 'Mobile',
             'Member', 'Rate Applied', 'Payment Mode', 'Payment Status',
             'No Of Participants', 'Unit Amount', 'Total Amount', 'Booking Status'
         ];
@@ -2728,7 +2738,7 @@ class EventBookingService {
             const cells = [
                 index + 1,
                 row.bookingRef || '',
-                row.createdAt ? new Date(row.createdAt).toISOString() : '',
+                formatDateIST(row.createdAt),
                 str(row.bookedBy && row.bookedBy.name),
                 str(row.bookedBy && row.bookedBy.email),
                 str(row.bookedBy && row.bookedBy.phone),
@@ -2748,7 +2758,7 @@ class EventBookingService {
                 cells.push(str(person.name), str(person.email), str(person.phone));
             }
 
-            lines.push(cells.map(csvCell).join(','));
+            lines.push(cells.map((value, column) => reportCsvCell(value, column === 5 || (column >= 14 && (column - 14) % 3 === 2))).join(','));
         });
 
         return {

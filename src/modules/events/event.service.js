@@ -8,6 +8,7 @@ const {
     multiTargetViewerClause, multiTargetsViewer, targetsLabel, regionPattern
 } = require('../common/regionMatch');
 
+const { isPastEvent, eventPeriodClause } = require('./eventLifecycle');
 const LIST_LIMIT = 100;
 
 /**
@@ -178,6 +179,7 @@ const toEvent = (doc = {}, extras = {}) => ({
     id: doc._id ? doc._id.toString() : '',
     // The public address; see eventSlug.js. Links use it, the API accepts either.
     slug: doc.slug || '',
+    archivedAt: doc.archivedAt || null,
     title: doc.title || '',
     description: doc.description || '',
     startAt: doc.startAt || null,
@@ -899,6 +901,8 @@ class EventService {
         context = withEventsAdmin(context);
         const isAdmin = !!context.isAdmin;
         const query = {};
+        const includeArchived = isSuperAdmin(context) && ['true', '1'].includes(str(filters.includeArchived));
+        if (!includeArchived) query.archivedAt = null;
 
         if (!isAdmin) {
             query.status = 'published';
@@ -936,14 +940,9 @@ class EventService {
          * the morning of its first day. Pushed onto `$and` so it cannot
          * collide with the targeting `$or` below.
          */
-        if (str(filters.upcoming) === 'true') {
-            const now = new Date();
-            query.$and = [...(query.$and || []), {
-                $or: [
-                    { endAt: { $gte: now } },
-                    { endAt: null, startAt: { $gte: now } }
-                ]
-            }];
+        const period = str(filters.period) || (str(filters.upcoming) === 'true' ? 'upcoming' : 'all');
+        if (['upcoming', 'past'].includes(period)) {
+            query.$and = [...(query.$and || []), eventPeriodClause(period)];
         }
 
         /*
@@ -1020,6 +1019,7 @@ class EventService {
         if (!doc) throw ApiError.notFound('Event not found');
 
         const isAdmin = !!context.isAdmin;
+        if (doc.archivedAt && !isSuperAdmin(context)) throw ApiError.notFound('Event not found');
         if (!isAdmin) {
             if (doc.status !== 'published') throw ApiError.notFound('Event not found');
             if (doc.audience === 'paid' && !context.isPaid) {
@@ -1182,7 +1182,7 @@ class EventService {
         const data = sanitize(payload);
         if (data.title !== undefined && !data.title) throw ApiError.badRequest('Title cannot be empty');
 
-        const updated = await Event.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true })
+        const updated = await Event.findOneAndUpdate({ _id: id, archivedAt: null }, { $set: data }, { new: true, runValidators: true })
             .lean()
             .catch(() => null);
         if (!updated) throw ApiError.notFound('Event not found');
@@ -1209,27 +1209,7 @@ class EventService {
     }
 
     async deleteEvent(id, actor = {}) {
-        if (!mongoose.Types.ObjectId.isValid(String(id || ''))) throw ApiError.badRequest('Invalid event id');
-
-        const removed = await Event.findByIdAndDelete(id).lean().catch(() => null);
-        if (!removed) throw ApiError.notFound('Event not found');
-
-        // The seats go with the event. Leaving them would orphan every row and
-        // keep the member's "you are registered" badge pointing at nothing.
-        await EventRegistration.deleteMany({ eventId: removed._id }).catch(() => null);
-
-        await auditService.record({
-            action: 'event.deleted',
-            category: 'event',
-            summary: 'Super Admin deleted event "' + (removed.title || 'Untitled') + '"',
-            actorEmail: actor.email || '',
-            actorRole: actor.role || 'super_admin',
-            targetId: String(id),
-            targetLabel: removed.title || '',
-            state: removed.state || ''
-        });
-
-        return { id: String(id), deleted: true };
+        return require('./archiveEvent')(id, actor);
     }
 
     /**
@@ -1322,6 +1302,7 @@ class EventService {
      */
     async register(eventId, context = {}, payload = {}) {
         const event = await this.getEvent(eventId, context);
+        if (event.archivedAt || isPastEvent(event)) throw ApiError.badRequest('This event has finished or is no longer available for registration');
 
         if (!event.registrationEnabled) {
             throw ApiError.badRequest('This event is not taking registrations');

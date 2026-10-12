@@ -300,6 +300,7 @@ const getEvents = asyncHandler(async(req, res) => {
         // `withJoinLink` in the service. Same predicate as the drafts, because
         // it is the same question: is this an editor or a visitor.
         privileged: editor,
+        period: req.query.period,
     })));
 });
 
@@ -334,7 +335,7 @@ const updateEvent = asyncHandler(async(req, res) => {
 
 
 const deleteEvent = asyncHandler(async(req, res) => {
-    res.json(ApiResponse.success(await cmsService.deleteEvent(req.params.id), 'Event deleted'));
+    res.json(ApiResponse.success(await cmsService.deleteEvent(req.params.id, req.user || {}), 'Event removed from public view; booking, payment and attendance history retained'));
 });
 
 // ---------------------------------------------------------------- legal

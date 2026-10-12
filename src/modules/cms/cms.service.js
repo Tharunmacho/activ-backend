@@ -1,3 +1,4 @@
+const { isPastEvent, eventPeriodClause } = require('../events/eventLifecycle');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 const {
@@ -2082,8 +2083,10 @@ class CmsService {
      * the alternative — two queries — would have to split the limit between
      * them without knowing how many of each exist.
      */
-    async listEvents({ includeDrafts = false, limit = 100, privileged = false } = {}) {
-        const filter = includeDrafts ? {} : { status: 'published' };
+    async listEvents({ includeDrafts = false, limit = 100, privileged = false, period } = {}) {
+        const filter = includeDrafts ? { archivedAt: null } : { status: 'published', archivedAt: null };
+        const effectivePeriod = ['upcoming', 'past', 'all'].includes(period) ? period : (includeDrafts ? 'all' : 'upcoming');
+        if (effectivePeriod !== 'all') filter.$and = [eventPeriodClause(effectivePeriod)];
 
         /*
          * A members-only event is not public-site content.
@@ -2120,17 +2123,14 @@ class CmsService {
         // Fetched newest-first so the limit keeps the most relevant events when
         // there are more than it allows: an old event dropping off matters far
         // less than a forthcoming one.
-        const events = await Event.find(filter).sort({ startAt: -1 }).limit(Number(limit)).lean().catch(() => []);
+        const events = await Event.find(filter).sort({ startAt: effectivePeriod === 'upcoming' ? 1 : -1 }).limit(Number(limit)).lean().catch(() => []);
 
         const now = Date.now();
         const at = e => (e.startAt ? new Date(e.startAt).getTime() : 0);
         const undated = e => !e.startAt;
         /* An event is over when it ENDS. A three-day conclave on its second
            morning is still upcoming; reading `startAt` alone filed it as past. */
-        const over = e => {
-            const finish = e.endAt || e.startAt;
-            return !!finish && new Date(finish).getTime() < now;
-        };
+        const over = e => isPastEvent(e, now);
 
         /*
          * AN UNDATED EVENT IS NOT A PAST ONE.
@@ -2159,7 +2159,8 @@ class CmsService {
         // `privileged` carries the join link; `includeDrafts` is the same
         // question asked of a different field, and the controller derives both
         // from `canSeeDrafts`.
-        return this.mapEvents([...upcoming, ...past], { privileged });
+        const listed = effectivePeriod === 'upcoming' ? upcoming : effectivePeriod === 'past' ? past : [...upcoming, ...past];
+        return this.mapEvents(listed, { privileged });
     }
 
     /**
@@ -2177,6 +2178,7 @@ class CmsService {
             description: e.description || '',
             startAt: e.startAt || null,
             endAt: e.endAt || null,
+            archivedAt: e.archivedAt || null,
             location: e.venue || [e.block, e.district, e.state].filter(Boolean).join(', '),
             venue: e.venue || '',
             state: e.state || '',
@@ -2266,7 +2268,7 @@ class CmsService {
          * exactly where a link copied out of a member dashboard lands an
          * anonymous visitor.
          */
-        if (!includeDrafts && (isDraft || membersOnly || !isOnboardingContent(doc))) {
+        if (doc.archivedAt || (!includeDrafts && (isDraft || membersOnly || !isOnboardingContent(doc)))) {
             throw ApiError.notFound('Event not found');
         }
 
@@ -2375,19 +2377,15 @@ class CmsService {
 
         const before = await Event.findById(id).select('bannerUrl').lean().catch(() => null);
 
-        const doc = await Event.findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true }).lean();
+        const doc = await Event.findOneAndUpdate({ _id: id, archivedAt: null }, { $set: update }, { new: true, runValidators: true }).lean();
         if (!doc) throw ApiError.notFound('Event not found');
 
         if (before) await reclaim(before.bannerUrl);
         return doc;
     }
 
-    async deleteEvent(id) {
-        const doc = await Event.findByIdAndDelete(id);
-        if (!doc) throw ApiError.notFound('Event not found');
-
-        await reclaim(doc.bannerUrl);
-        return { id };
+    async deleteEvent(id, actor = {}) {
+        return require('../events/archiveEvent')(id, actor);
     }
 
     // ============================================================ overview

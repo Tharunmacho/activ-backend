@@ -276,10 +276,11 @@ const publicUpcomingEvents = async() => {
     const { onboardingClause } = require('../events/onboardingVisibility');
     return Event.find({
         status: 'published',
+        archivedAt: null,
         audience: { $ne: 'paid' },
         $and: [
             onboardingClause(),
-            { $or: [{ startAt: null }, { startAt: { $gte: new Date() } }] }
+            require('../events/eventLifecycle').eventPeriodClause('upcoming')
         ]
     }).sort({ startAt: 1 }).limit(5).lean().catch(() => []);
 };
