@@ -780,45 +780,7 @@ const sanitizeRegistrationFields = (value) => {
  * `label` is copied in at this moment on purpose: see the note on `responses`
  * in the registration model. The answer keeps the wording it was given under.
  */
-const buildResponses = (fields = [], payload = {}) => {
-    const answers = payload && typeof payload === 'object' ? payload : {};
-
-    return (fields || []).map((field) => {
-        const raw = answers[field.key];
-
-        // A checkbox is the one type whose "unanswered" is a real answer.
-        const value = field.type === 'checkbox'
-            ? (raw === true || raw === 'true' ? 'Yes' : 'No')
-            : str(raw);
-
-        if (field.required && field.type !== 'checkbox' && !value) {
-            throw ApiError.badRequest(field.label + ' is required');
-        }
-        if (field.required && field.type === 'checkbox' && value !== 'Yes') {
-            throw ApiError.badRequest(field.label + ' must be ticked');
-        }
-
-        /*
-         * A select answer must be one of ITS OWN options.
-         *
-         * Not a formality: the options are the organiser's categories — a
-         * delegate class, a meal choice, a session stream — and an answer
-         * outside them is one nothing downstream can count. Checked
-         * case-insensitively and stored in the option's own spelling, so a
-         * client sending "veg" records "Vegetarian".
-         */
-        if (field.type === 'select' && value) {
-            const match = (field.options || [])
-                .find((option) => option.toLowerCase() === value.toLowerCase());
-
-            if (!match) throw ApiError.badRequest('"' + value + '" is not an option for ' + field.label);
-
-            return { key: field.key, label: field.label, value: match };
-        }
-
-        return { key: field.key, label: field.label, value };
-    });
-};
+const { buildResponses } = require('./eventRegistrationFields');
 
 /**
  * The region list an editor chose, cleaned.

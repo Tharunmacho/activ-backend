@@ -149,6 +149,7 @@ router.post('/reports/generate', requireRole('block_admin', 'district_admin', 's
 router.post('/users/:id/:action', requireRole('state_admin', 'super_admin'), controller.userAction);
 
 // The caller's own profile
+router.post('/profile/photo', requireRole('block_admin', 'district_admin', 'state_admin', 'super_admin'), upload.single('photo'), controller.uploadAdminPhoto);
 router.get('/profile', controller.getAdminProfile);
 router.put('/profile', controller.updateAdminProfile);
 

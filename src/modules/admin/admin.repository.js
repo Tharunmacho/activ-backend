@@ -146,7 +146,7 @@ let generation = 0;
  */
 const ROW_PROJECTION = {
     _id: 1, role: 1, adminType: 1, fullName: 1, name: 1, email: 1,
-    phoneNumber: 1, phone: 1, state: 1, district: 1, block: 1, meta: 1,
+    phoneNumber: 1, phone: 1, profilePhoto: 1, state: 1, district: 1, block: 1, meta: 1,
     isActive: 1, active: 1, createdVia: 1, mustResetPassword: 1,
     parentAdminId: 1, notificationEmail: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
 };

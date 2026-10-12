@@ -445,7 +445,7 @@ const bookingAsRegistration = (b = {}) => {
             method: payment.mode || '',
             paidAt: payment.paidAt || null
         },
-        responses: [],
+        responses: Array.isArray(b.responses) ? b.responses : [],
         memberName: bookedBy.name || '',
         email: bookedBy.email || '',
         phone: bookedBy.phone || '',
@@ -512,6 +512,7 @@ const toBooking = (doc = {}, joining = null) => ({
 
     status: doc.status || 'active',
     note: doc.note || '',
+    responses: (doc.responses || []).map(({ key, label, value }) => ({ key, label, value })),
     createdAt: doc.createdAt || null,
     /*
      * When an unpaid hold lapses, so the checkout page can show a countdown
@@ -687,6 +688,8 @@ class EventBookingService {
             contactPhone: event.contactPhone || '',
             contactEmail: event.contactEmail || '',
             registrationNote: event.registrationNote || '',
+            registrationFields: event.registrationFields || [],
+            days: (event.days || []).map((day) => ({ date: day.date, startTime: day.startTime, endTime: day.endTime })),
             registrationClosesAt: event.registrationClosesAt || event.registrationDeadline || null,
 
             /*
@@ -713,7 +716,7 @@ class EventBookingService {
         const closesAt = event.registrationClosesAt || event.registrationDeadline;
         if (!closesAt) return false;
         const at = new Date(closesAt);
-        return !Number.isNaN(at.getTime()) && at.getTime() < Date.now();
+        return !Number.isNaN(at.getTime()) && at.getTime() <= Date.now();
     }
 
     // ==================================================================
@@ -1086,6 +1089,7 @@ class EventBookingService {
             participants[0] = { ...bookedBy };
         }
 
+        const responses = require('./eventRegistrationFields').buildResponses(event.registrationFields, payload.responses);
         await this.assertNotAlreadyBooked(event, bookedBy, participants);
 
         // ---------------------------------------------------------- seats
@@ -1172,6 +1176,7 @@ class EventBookingService {
             isGuest: !context,
             noOfPersons: requested,
             participants,
+            responses,
             unitAmount,
             totalAmount,
             // What was charged, and what it would have been. Stored, because
@@ -1289,11 +1294,28 @@ class EventBookingService {
         if (!booking) throw ApiError.notFound('No such booking');
 
         const event = await Event.findById(booking.eventId)
-            .select('mode onlinePlatform onlineUrl')
+            .select('mode onlinePlatform onlineUrl endAt days archivedAt attachments whatsappChannelUrl contactName contactPhone contactEmail')
             .lean()
             .catch(() => null);
 
-        return toBooking(booking, event);
+        const settled = ['active', 'expired'].includes(booking.status)
+            && ['paid', 'not_required'].includes(booking.payment && booking.payment.status)
+            && !(booking.status === 'expired' && booking.payment.status !== 'paid');
+        const access = settled && event && !event.archivedAt;
+        const joining = event ? { mode: event.mode, onlinePlatform: event.onlinePlatform, onlineUrl: access ? event.onlineUrl : '' } : null;
+        return {
+            ...toBooking(booking, joining),
+            eventEndAt: event && event.endAt || null,
+            eventDays: event && event.days || [],
+            eventArchived: !!(event && event.archivedAt),
+            contactName: event && event.contactName || '',
+            contactPhone: event && event.contactPhone || '',
+            contactEmail: event && event.contactEmail || '',
+            // Same HMAC-signed, seat-specific entry passes used in confirmation emails.
+            ...(access ? passesFor(booking, 'confirmed', event.mode === 'online') : { ticketUrl: '', registrationNo: '', passes: [] }),
+            whatsappChannelUrl: access ? event.whatsappChannelUrl || '' : '',
+            attachments: access && Array.isArray(event.attachments) ? event.attachments : []
+        };
     }
 
     /**

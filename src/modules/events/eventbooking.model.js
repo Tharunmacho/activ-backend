@@ -320,6 +320,16 @@ const eventBookingSchema = new mongoose.Schema({
      */
     manageToken: { type: String, trim: true, default: '', select: false },
 
+    // Snapshot the questions as answered; later CMS edits must not relabel history.
+    responses: {
+        type: [new mongoose.Schema({
+            key: { type: String, trim: true, default: '' },
+            label: { type: String, trim: true, default: '' },
+            value: { type: String, trim: true, default: '' }
+        }, { _id: false })],
+        default: []
+    },
+
     /**
      * What the booker's browser was. Not analytics — a public, unauthenticated
      * endpoint that writes rows needs something to look at when it is abused,

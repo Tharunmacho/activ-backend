@@ -247,7 +247,8 @@ class DonationService {
                     buyerName: form.donor.fullName,
                     email: form.donor.email,
                     phone: form.donor.phone,
-                    redirectUrl: `${siteBase}/donate/thank-you?orderId=${encodeURIComponent(orderId)}`,
+                    redirectUrl: `${siteBase}/donate/thank-you?orderId=${encodeURIComponent(orderId)}`
+                        + (body.client === 'app' ? '&client=app' : ''),
                     webhookUrl: require('../../config/publicUrl').instamojoWebhookUrl()
                 });
                 paymentUrl = result.payment_url || '';
@@ -345,7 +346,8 @@ class DonationService {
     async resolveReturn(orderId, { paymentId = '', gatewayStatus = '' } = {}) {
         const order = await this.orderFor(orderId);
         let donation = await Donation.findById(order.donationId);
-        if (donation && donation.status === 'pending' && String(gatewayStatus).toLowerCase() !== 'failed') {
+        // A browser cancellation/failure hint cannot suppress provider verification.
+        if (donation && donation.status === 'pending') {
             const requestId = String(order.gatewayPaymentId || '');
             if (requestId) {
                 const paymentService = require('../payment/payment.service');

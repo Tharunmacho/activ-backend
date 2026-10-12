@@ -116,6 +116,19 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         if (!booking) {
             return res.status(400).json(ApiResponse.error('Invalid booking reference'));
         }
+        // A new charge needs an active seat hold. Already-started gateway
+        // payments still settle through the existing verification/webhook path.
+        const closedEvent = booking.eventArchived || require('../events/eventLifecycle').isPastEvent({
+            startAt: booking.eventStartAt, endAt: booking.eventEndAt, days: booking.eventDays
+        });
+        const holdExpired = booking.expiresAt && new Date(booking.expiresAt).getTime() <= Date.now();
+        if (booking.status !== 'active' || closedEvent || holdExpired) {
+            return res.status(409).json(ApiResponse.error('This booking is no longer available for payment. Open the event to check availability.'));
+        }
+        if (!['pending', 'failed'].includes(booking.payment && booking.payment.status)
+            || !(Number(booking.totalAmount) > 0)) {
+            return res.status(409).json(ApiResponse.error('This booking does not need another payment. Open your booking to view its status.'));
+        }
         calculatedAmount = booking.totalAmount;
         finalPurpose = purpose || `ACTIV Event Booking - ${bookingRef}`;
         /* The booking's OWN contact details, which a guest has just typed in
@@ -238,7 +251,8 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
     const siteBase = (origin && trusted.includes(origin)) ? origin : String(process.env.FRONTEND_URL || '').replace(/\/+$/, '');
 
     const returnUrl = `${siteBase}/payment-success`
-        + `?orderId=${encodeURIComponent(orderId)}`;
+        + `?orderId=${encodeURIComponent(orderId)}`
+        + (req.body.client === 'app' ? '&client=app' : '');
 
     const paymentData = {
         amount: calculatedAmount,
