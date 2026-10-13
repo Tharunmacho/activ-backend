@@ -315,6 +315,9 @@ const memberDetailsSchema = new mongoose.Schema({
         default: true
     },
     deletedAt: { type: Date, default: null },
+    deletionAuthId: { type: mongoose.Schema.Types.ObjectId, select: false },
+    deletedEmail: { type: String, select: false },
+    deletionCompletedAt: { type: Date, select: false },
     deletedBy: { type: String, default: '' },
 
     /*

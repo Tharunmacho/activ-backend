@@ -19,6 +19,7 @@ const matches = (row, f) => Object.entries(f).every(([k, v]) => {
     if (v && typeof v === 'object') {
         if ('$nin' in v) return !v.$nin.includes(row[k]);
         if ('$ne' in v) return row[k] !== v.$ne;
+        if ('$exists' in v) return (row[k] !== undefined) === v.$exists;
     }
     return String(row[k]) === String(v);
 });
@@ -27,13 +28,20 @@ Member.find = f => query(members.filter(m => matches(m, f)));
 Member.findOne = f => query(members.find(m => matches(m, f)));
 Member.findById = id => query(members.find(m => String(m._id) === String(id)));
 let failWrite = false;
-Member.findOneAndUpdate = async (f, p) => {
-    if (failWrite) { failWrite = false; throw new Error('Temporary member write failure'); }
+Member.findOneAndUpdate = (f, p) => {
+    if (failWrite) { failWrite = false; return Promise.reject(new Error('Temporary member write failure')); }
     const m = members.find(m => matches(m, f));
-    if (!m) return null;
+    if (!m) return query(null);
     Object.assign(m, p.$set, { updatedAt: new Date(+m.updatedAt + 1) });
-    return clone(m);
+    return query(m);
 };
+Member.collection.findOne = async f => clone(members.find(m => matches(m, f)));
+Member.collection.updateOne = async (f, p) => {
+    const member = members.find(m => matches(m, f));
+    if (member) Object.assign(member, p.$set);
+    return { matchedCount: member ? 1 : 0 };
+};
+require('../src/modules/auth/auth.model').findOne = () => query(null);
 Application.find = f => query(apps.filter(a => matches(a, f)).sort((a, b) => +b.updatedAt - +a.updatedAt));
 Order.find = f => query(orders.filter(o => matches(o, f)).sort((a, b) => +b.createdAt - +a.createdAt));
 Order.create = async o => { const receipt = { ...clone(o), _id: new mongoose.Types.ObjectId().toString(), createdAt: new Date() }; orders.push(receipt); return receipt; };
@@ -119,16 +127,27 @@ async function main() {
     assert.equal(office.payments[0].manual.admission, true);
     assert.equal(notices.filter(n => n.member._id === unsubmitted._id).length, 1);
     await assert.rejects(service.remove(offline._id, { role: 'state_admin' }), e => e.statusCode === 403);
+    // The destructive database workflow is exercised against disposable Mongo
+    // in member-deletion-local.test.js. Here verify delegation and fresh totals.
+    require('../src/modules/members/memberDeletion.service').remove = async (id, user) => {
+        assert.equal(id, offline._id);
+        assert.equal(user.role, 'super_admin');
+        members.splice(members.findIndex(m => m._id === id), 1);
+        for (const rows of [apps, orders]) {
+            for (let i = rows.length - 1; i >= 0; i--) {
+                if (rows[i].userId === id || rows[i].memberId === id) rows.splice(i, 1);
+            }
+        }
+        return { deleted: true };
+    };
     await service.remove(offline._id, actor);
-    assert.equal(offline.isActive, false);
-    assert.equal(offline.membershipStatus, 'cancelled');
-    assert.equal(offline.deletedBy, actor.userId);
+    assert.equal(members.some(m => m._id === offline._id), false);
     await assert.rejects(service.confirm(offline._id, body, actor), /Member not found/);
     await assert.rejects(service.detail(offline._id, actor), /Member not found/);
     const afterDelete = await service.overview(actor);
     assert.equal(afterDelete.rows.some(r => r.id === offline._id), false);
-    assert.equal(afterDelete.summary.collected, 2000, 'deletion retains money actually received');
-    assert.equal(afterDelete.payments.find(p => p.memberId === offline._id).registrationDeleted, true);
+    assert.equal(afterDelete.summary.collected, 1000, 'permanently removed membership payments leave current totals');
+    assert.equal(afterDelete.payments.some(p => p.memberId === offline._id), false);
     const authoritative = fixture('Approved');
     apps.push({ _id: new mongoose.Types.ObjectId().toString(), userId: authoritative._id, email: authoritative.email, status: 'Rejected', updatedAt: new Date(Date.now() + 1000) });
     assert.equal((await service.detail(authoritative._id, actor)).member.applicationStatus, 'Approved', 'approved applications match the existing member directory');

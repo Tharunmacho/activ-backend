@@ -140,6 +140,7 @@ const normalizeRole = (r) => {
 class AuthService {
     async register(userData) {
         const email = String(userData.email || '').toLowerCase().trim();
+        await require('../members/memberDeletion.service').releaseArchivedEmail(email);
 
         /*
          * Both collections, not just the profile one.
@@ -638,7 +639,7 @@ class AuthService {
 
             const memberDetails = await MemberDetails.findById(decoded.userId);
 
-            if (!memberDetails) {
+            if (!memberDetails || memberDetails.isActive === false) {
                 throw ApiError.unauthorized('Invalid refresh token');
             }
 

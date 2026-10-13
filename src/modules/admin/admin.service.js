@@ -1562,6 +1562,11 @@ class AdminService {
             };
         }
 
+        if (member) {
+            const result = await require('../members/memberDeletion.service').purgeMember(member._id, user);
+            return { ...result, action, status: 'deleted' };
+        }
+
         const BusinessInfo = require('../members/businessinfo.model');
         const FinancialInfo = require('../members/memberfinancialinfo.model');
         const Declaration = require('../members/memberdeclaration.model');
@@ -1580,7 +1585,7 @@ class AdminService {
         const removed = {};
         const drop = async (label, model, filter) => {
             if (!filter) { removed[label] = 0; return; }
-            const result = await model.deleteMany(filter).catch(() => null);
+            const result = await model.deleteMany(filter);
             removed[label] = (result && result.deletedCount) || 0;
         };
 
@@ -1588,7 +1593,7 @@ class AdminService {
         // product whose company no longer exists is unreachable rather than
         // deleted.
         const companies = byOwner
-            ? await Company.find({ userId: byOwner }).select('_id').lean().catch(() => [])
+            ? await Company.find({ userId: byOwner }).select('_id').lean()
             : [];
         const companyIds = companies.map(c => c._id);
         await drop('products', Product,
@@ -1606,11 +1611,11 @@ class AdminService {
         // between the two, what is left is an application with no login — a row
         // the admin can see and retry — rather than a login with no application,
         // which is a live account invisible to every dashboard.
-        if (member) await Member.deleteOne({ _id: member._id }).catch(() => null);
+        if (member) await Member.deleteOne({ _id: member._id });
         removed.member = member ? 1 : 0;
-        if (auth) await User.deleteOne({ _id: auth._id }).catch(() => null);
+        if (auth) await User.deleteOne({ _id: auth._id });
         removed.auth = auth ? 1 : 0;
-        if (application) await Application.deleteOne({ _id: application._id }).catch(() => null);
+        if (application) await Application.deleteOne({ _id: application._id });
         removed.application = application ? 1 : 0;
 
         logger.warn('Member deleted by admin', {

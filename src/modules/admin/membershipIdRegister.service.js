@@ -38,14 +38,14 @@ async function list(query, actor) {
     const page = Math.max(1, Math.floor(Number(query.page) || 1));
     const limit = Math.max(1, Math.min(50, Math.floor(Number(query.limit) || 20)));
     const search = String(query.search || '').trim().slice(0, 120);
-    const filters = [enrolled];
+    const filters = [enrolled, { deletedAt: null }];
     if (search) {
         const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         filters.push({ $or: ['membershipNumber', 'legacyMembershipNumbers', 'fullName', 'email', 'phoneNumber'].map(key => ({ [key]: rx })) });
     }
     const filter = { $and: filters };
-    // Raw read includes archived identities. Deleting a registration cannot free
-    // its old ID for another person or remove it from the historical register.
+    // Only current accounts appear here. Historical IDs remain reserved in the
+    // archived record and can never be assigned to a different person.
     const [members, total] = await Promise.all([
         Member.collection.find(filter, { projection }).sort({ membershipActivatedAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
         Member.collection.countDocuments(filter)
@@ -54,7 +54,7 @@ async function list(query, actor) {
 }
 async function detail(id, actor) {
     superOnly(actor);
-    const member = await Member.collection.findOne({ _id: validId(id), ...enrolled }, { projection: { ...projection, membershipEdits: 1 } });
+    const member = await Member.collection.findOne({ _id: validId(id), ...enrolled, deletedAt: null }, { projection: { ...projection, membershipEdits: 1 } });
     if (!member) throw ApiError.notFound('Membership record not found.');
     return shape(member);
 }

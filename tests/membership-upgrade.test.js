@@ -72,6 +72,8 @@ async function main() {
         const choice=await upgrades.eligibility(member._id);
         assert.deepEqual(choice.plans.map(p=>p.key),expected?[expected]:[]);
         assert.equal(choice.canPurchase,false);
+        assert.equal(choice.commencementYear, String(YEAR-age), 'saved business year stays visible without a purchasable upgrade');
+        assert(choice.currentPlanDetails?.key, 'the current plan and benefits are returned even without an upgrade offer');
         await assert.rejects(upgrades.validate(member._id,expected||'ideal'),/automatically/);
     }
     for (const year of ['', 'NaN','1799',String(YEAR+1),'2020.5']) {

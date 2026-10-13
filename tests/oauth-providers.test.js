@@ -23,6 +23,8 @@ let verified = true;
 let email = 'MEMBER@example.com';
 let tokenFailure = null;
 let calls = [];
+let emailPermission = 'granted';
+let permissionsUnavailable = false;
 MemberAuth.findOne = () => ({ select: () => ({ lean: async () => member }) });
 admins.findRawByEmail = async () => admin;
 auth.memberSession = async loginEmail => ({ token: 'test-session', role: 'member', user: { email: loginEmail }, memberDetails: { membershipStatus } });
@@ -33,6 +35,10 @@ axios.post = async (url, body, options) => {
 };
 axios.get = async (url, options) => {
     calls.push({ url, options });
+    if (url.endsWith('/me/permissions')) {
+        if (permissionsUnavailable) throw new Error('permission diagnostic unavailable');
+        return { data: { data: [{ permission: 'email', status: emailPermission }] } };
+    }
     if (url.endsWith('/oauth/access_token')) {
         if (tokenFailure) throw tokenFailure;
         return { data: { access_token: 'isolated-access-token' } };
@@ -50,6 +56,7 @@ const begin = (provider, client = '') => {
     const callback = `http://localhost:5057/api/v1/auth/oauth/${provider}/callback`;
     assert.equal(start.searchParams.get('redirect_uri'), callback);
     assert.equal(start.searchParams.get('response_type'), 'code');
+    if (provider === 'facebook') assert.equal(start.searchParams.get('auth_type'), 'rerequest');
     assert(!start.toString().includes('test-' + provider + '-secret'));
     return { start, callback, res, req: { query: { code: 'provider-code', state: start.searchParams.get('state') }, headers: { cookie: `activ_oauth=${nonce}` } } };
 };
@@ -104,7 +111,7 @@ const login = async (provider, client = '') => {
         await assert.rejects(oauth.exchange(responseFields(await login(provider)).get('code')), /blocked/);
         member.isActive = true;
         email = '';
-        assert.equal(responseFields(await login(provider)).get('error'), 'no_email');
+        assert.equal(responseFields(await login(provider)).get('error'), provider === 'facebook' ? 'facebook_no_email' : 'no_email');
         email = 'MEMBER@example.com';
         const flow = begin(provider);
         flow.req.headers.cookie = 'activ_oauth=wrong-browser';
@@ -117,6 +124,19 @@ const login = async (provider, client = '') => {
         assert.equal(responseFields(await login('google')).get('error'), 'no_email');
     }
     verified = true;
+    email = '';
+    for (emailPermission of ['declined', 'expired', undefined]) {
+        for (const client of ['', 'app']) {
+            const fields = responseFields(await login('facebook', client));
+            assert.equal(fields.get('error'), 'email_permission');
+            assert.equal(fields.has('code'), false, 'No session without a Facebook email');
+        }
+    }
+    permissionsUnavailable = true;
+    assert.equal(responseFields(await login('facebook')).get('error'), 'no_email');
+    permissionsUnavailable = false;
+    emailPermission = 'granted';
+    email = 'MEMBER@example.com';
     for (const [provider, raw, reason] of [
         ['google', 'invalid_client', 'configuration'],
         ['linkedin', 'unauthorized_scope_error', 'permissions'],

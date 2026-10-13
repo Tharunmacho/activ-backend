@@ -176,16 +176,7 @@ class MembershipDashboardService {
     }
 
     async remove(id, actor) {
-        superOnly(actor); validId(id);
-        // Archive rather than erase receipts. The model excludes archived accounts
-        // from login, profile/payment writes and registration directories.
-        const removed = await Member.findOneAndUpdate({ ...MEMBER_FILTER, _id: id }, { $set: {
-            deletedAt: new Date(), deletedBy: String(actor.userId || actor.id || actor._id || ''),
-            isActive: false, membershipStatus: 'cancelled'
-        } }, { new: true });
-        if (!removed) throw ApiError.notFound('Member not found.');
-        invalidateMemberContext(id);
-        return { id: String(removed._id), deleted: true };
+        return require('../members/memberDeletion.service').remove(id, actor);
     }
 }
 module.exports = new MembershipDashboardService();

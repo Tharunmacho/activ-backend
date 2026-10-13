@@ -39,6 +39,7 @@ const membershipIds = require('./membershipIdRegister.controller');
 router.get('/super/membership/ids', requireRole('super_admin'), membershipIds.list);
 router.get('/super/membership/ids/:memberId', requireRole('super_admin'), membershipIds.detail);
 router.patch('/super/membership/ids/:memberId', requireRole('super_admin'), membershipIds.update);
+router.delete('/super/membership/ids/:memberId', requireRole('super_admin'), membershipDashboard.remove);
 router.get('/super/membership/registrations', requireRole('super_admin'), membershipDashboard.overview);
 router.get('/super/membership/registrations/export', requireRole('super_admin'), membershipDashboard.exportReport);
 router.get('/super/membership/registrations/:memberId', requireRole('super_admin'), membershipDashboard.detail);

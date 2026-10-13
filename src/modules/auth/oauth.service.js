@@ -80,7 +80,9 @@ const PROVIDERS = {
         clientSecret: () => env('FACEBOOK_APP_SECRET'),
         get authorizeUrl() { return `https://www.facebook.com/${facebookVersion()}/dialog/oauth`; },
         scope: 'email,public_profile',
-        extraParams: {},
+        // Facebook otherwise remembers a previously declined email permission
+        // and repeats the same missing-email result without asking again.
+        extraParams: { auth_type: 'rerequest' },
         async profile(code, redirectUri) {
             const token = await axios.get(`https://graph.facebook.com/${facebookVersion()}/oauth/access_token`, {
                 params: {
@@ -97,8 +99,23 @@ const PROVIDERS = {
                 headers: { Authorization: `Bearer ${bearer}` },
                 params: { fields: 'id,name,email', appsecret_proof: proof }, timeout: 15000
             });
-            // Without the granted email permission there is no account to match.
-            return { email: info.data.email, verified: !!info.data.email, name: info.data.name };
+            const email = typeof info.data.email === 'string' ? info.data.email.trim() : '';
+            let emailError = 'no_email';
+            if (!email) {
+                // A phone-only Facebook account and declined consent need
+                // different recovery instructions. Neither can prove ownership
+                // of an ACTIV email, so no session is issued in either case.
+                try {
+                    const permissions = await axios.get(`https://graph.facebook.com/${facebookVersion()}/me/permissions`, {
+                        headers: { Authorization: `Bearer ${bearer}` },
+                        params: { appsecret_proof: proof }, timeout: 15000
+                    });
+                    const rows = permissions.data?.data;
+                    if (Array.isArray(rows)) emailError = rows.some(row => row.permission === 'email' && row.status === 'granted')
+                        ? 'facebook_no_email' : 'email_permission';
+                } catch { /* Keep the actionable generic recovery if this diagnostic is unavailable. */ }
+            }
+            return { email, verified: !!email, name: info.data.name, emailError };
         }
     },
     linkedin: {
@@ -280,7 +297,7 @@ const handleCallback = async(provider, req, res) => {
     }
 
     const email = String((who && who.email) || '').toLowerCase().trim();
-    if (!email || !who.verified) return back({ error: 'no_email', provider });
+    if (!email || !who.verified) return back({ error: who?.emailError || 'no_email', provider });
 
     const member = await MemberAuth.findOne({ email }).select('_id isActive').lean().catch(() => null);
     if (!member) {

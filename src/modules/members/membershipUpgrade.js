@@ -27,7 +27,11 @@ async function eligibility(memberId) {
         : progress.next ? `Your current plan is ${progress.effective?.name || current?.planName || 'Business'}. It advances automatically to ${progress.next.name}${progress.nextEligibleYear ? ` in ${progress.nextEligibleYear}` : ' when your business reaches its configured year range'}. The new fee applies at renewal.`
         : 'You already hold the highest available business plan. Continue with your current plan at renewal.';
     return { currentPlan: progress.effective?.name || current?.planName || '', currentPlanId: progress.effective?.key || current?.planId || '',
-        kind: progress.kind, commencementYear: offer && rules.matchesYear(offer, progress.commencementYear) ? progress.commencementYear : '',
+        kind: progress.kind,
+        commencementYear: enteringBusiness
+            ? offer && rules.matchesYear(offer, progress.commencementYear) ? progress.commencementYear : ''
+            : progress.commencementYear,
+        currentPlanDetails: progress.effective ? rules.withYears(progress.effective) : null,
         plans: offer ? [rules.withYears(offer)] : [], canUpgrade: canPurchase, canPurchase,
         automaticallyAdvanced: progress.promoted, nextEligibleYear: progress.nextEligibleYear, reason };
 }
