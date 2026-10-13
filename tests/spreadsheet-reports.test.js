@@ -72,6 +72,10 @@ const cell = (sheet, title, offset = 1) => sheet.getCell(HEADER_ROW + offset, co
     assert.equal(cell(participants, 'Mobile number', 2).value, '+91 90923 17264');
     assert.ok(!participants.getRow(HEADER_ROW).values.some(value => String(value).includes('Amount')), 'financial totals never repeated per participant');
     assert.ok(!JSON.stringify(book.model).includes(base.manageToken));
+    const historical = await load(await bookingsWorkbook(event, [{ ...base, noOfPersons: 10, participants: Array.from({ length: 10 }, () => ({})) }]));
+    assert.equal(historical.getWorksheet('Participants').rowCount - HEADER_ROW, 1, 'legacy empty seats do not create blank spreadsheet contacts');
+    assert.equal(cell(historical.getWorksheet('Participants'), 'Email address').value, base.bookedBy.email);
+    assert.equal(cell(historical.getWorksheet('Bookings'), 'Participants').value, 10, 'historical booked seat counts remain intact');
     console.log('PASS: readable XLSX headers/widths/frozen filters, exact phone text, numeric money, separate participants and complete evidence.');
 
     const attendance = { event, rows: [{ registrationNo: 'ACTIVB-SAMPLE-001-P1', bookingRef: base.bookingRef,

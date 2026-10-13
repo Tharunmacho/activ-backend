@@ -101,7 +101,7 @@ async function main() {
         assert.equal(page.amount, kind === 'paid' ? 600 : 1000);
         const n = kind === 'paid' ? 2 : 1;
         booked[kind] = await request('/event-bookings/event/' + paid._id, { token, method: 'POST', status: 201,
-            body: { ...person(n), noOfPersons: 2, amount: 1, totalAmount: 1 } });
+            body: { ...person(n), noOfPersons: 2, participants: [person(n), person(n + 100)], amount: 1, totalAmount: 1 } });
         assert.equal(booked[kind].totalAmount, page.amount * 2, 'posted amounts never override server pricing');
         const saved = await Booking.findOne({ bookingRef: booked[kind].bookingRef }).lean();
         assert.equal(saved.userId, members[kind].id, 'member booking belongs to signed-in account');
@@ -184,6 +184,29 @@ async function main() {
     assert.deepEqual(await snapshot(), before, 'history reads and exports cannot mutate records');
     assert.equal(await Event.countDocuments({ _id: missing._id }), 0, 'history never recreates deleted events');
     assert(notifications.length > 0, 'booking notices were captured locally');
+    const completeEvent = await event('All participants required', { capacity: 60, maxPerBooking: 10 });
+    for (const [offset, token] of [[300, ''], [400, members.unpaid.token], [500, members.paid.token]]) {
+        const beforeCount = await Booking.countDocuments({ eventId: completeEvent._id });
+        const beforePayments = await Payment.countDocuments();
+        await request('/event-bookings/event/' + completeEvent._id, { token, method: 'POST', status: 400,
+            body: { ...person(offset), noOfPersons: 10, participants: [person(offset)] } });
+        assert.equal(await Booking.countDocuments({ eventId: completeEvent._id }), beforeCount);
+        assert.equal(await Payment.countDocuments(), beforePayments, 'missing attendees never start payment');
+        const completed = await request('/event-bookings/event/' + completeEvent._id, { token, method: 'POST', status: 201,
+            body: { ...person(offset), noOfPersons: 10, participants: [{}, ...Array.from({ length: 9 }, (_, i) => person(offset + i + 1))] } });
+        assert.equal(completed.participants.length, 10);
+        assert(completed.participants.every(p => p.name && p.email && p.phone));
+        assert.equal(completed.participants[0].email, person(offset).email);
+    }
+    const fullExport = await request('/events/' + completeEvent._id + '/bookings/export?format=xlsx&encoding=base64');
+    const workbook = new (require('exceljs').Workbook)();
+    await workbook.xlsx.load(Buffer.from(fullExport.base64, 'base64'));
+    const people = workbook.getWorksheet('Participants');
+    const { HEADER_ROW } = require('../src/core/utils/spreadsheet');
+    assert.equal(people.rowCount - HEADER_ROW, 30, 'three complete ten-person bookings export exactly thirty contacts');
+    for (let i = HEADER_ROW + 1; i <= people.rowCount; i++) {
+        for (const column of [4, 5, 6]) assert(people.getRow(i).getCell(column).value, 'name, phone and email must be present');
+    }
     console.log('PASS: ' + checks + ' real API requests; paid/unpaid eligibility and prices, free/paid checkout, member history, date transitions, both delete routes, unchanged retained records, exports and missing-event payment protection.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

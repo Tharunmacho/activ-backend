@@ -56,9 +56,14 @@ async function bookingsWorkbook(event, bookings, { events = [], filters = {} } =
     }));
     const people = [];
     bookings.forEach(row => {
-        const count = Math.max((row.participants || []).length, number(row.noOfPersons));
+        const count = Math.max((row.participants || []).length, 1);
         for (let index = 0; index < count; index += 1) {
-            const person = row.participants?.[index] || {};
+            let person = row.participants?.[index] || {};
+            const hasDetails = value => [value.name, value.phone, value.email].some(item => text(item));
+            if (index === 0 && !hasDetails(person)) person = row.bookedBy || {};
+            // Older bookings may contain empty seats. Keep the seat total on
+            // Bookings, without inventing blank contact rows in Participants.
+            if (!hasDetails(person)) continue;
             people.push({
                 ...eventValues(row),
                 serial: people.length + 1, reference: row.bookingRef, seat: index + 1,
@@ -74,7 +79,9 @@ async function bookingsWorkbook(event, bookings, { events = [], filters = {} } =
             { item: 'Event date and time (IST)', value: formatDateIST(event?.startAt || bookings[0]?.eventStartAt) },
             { item: 'Venue', value: text(event?.venue || bookings[0]?.eventVenue) },
             { item: 'Total bookings', value: rows.length },
+            { item: 'Seats booked', value: rows.reduce((sum, row) => sum + number(row.seats), 0) },
             { item: 'Participant records', value: people.length },
+            { item: 'Historical seats without participant details', value: Math.max(0, rows.reduce((sum, row) => sum + number(row.seats), 0) - people.length) },
             { item: 'Paid bookings', value: paid.length },
             { item: 'Amount received', value: money(rows.reduce((sum, row) => sum + row.received, 0)) },
             { item: 'Filters', value: Object.entries(filters).map(([key, value]) => key + ': ' + value).join(' · ') || 'All records for this event, including archived booking records.' },

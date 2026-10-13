@@ -281,7 +281,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
  * office manager booking two colleagues may genuinely not have their addresses,
  * and refusing the booking over it would send them away.
  */
-const cleanPerson = (input = {}, { label = '', required = false } = {}) => {
+const cleanPerson = (input = {}, { label = '', required = false, fieldPrefix = '' } = {}) => {
     const name = str(input.name);
     const email = str(input.email).toLowerCase();
     const rawPhone = str(input.phone || input.mobile);
@@ -298,21 +298,25 @@ const cleanPerson = (input = {}, { label = '', required = false } = {}) => {
      * participant's carries "Participant 2", which is the only thing that
      * distinguishes four identical rows.
      */
-    const say = (message) => ApiError.badRequest(
+    const say = (message, field) => {
+        const error = ApiError.badRequest(
         label
             ? `${label}: ${message}`
             // Capitalised only when it is the whole sentence. The messages are
             // written to follow "Participant 2: ", so an unprefixed one would
             // otherwise open a sentence in lower case.
             : message.charAt(0).toUpperCase() + message.slice(1)
-    );
+        );
+        if (field) error.fields = { [fieldPrefix + field]: message.charAt(0).toUpperCase() + message.slice(1) };
+        return error;
+    };
 
-    if (required && !name) throw say('please enter your name');
-    if (name.length > 120) throw say('that name is too long');
+    if (required && !name) throw say('please enter your name', 'name');
+    if (name.length > 120) throw say('that name is too long', 'name');
 
-    if (required && !email) throw say('please enter your email address');
+    if (required && !email) throw say('please enter your email address', 'email');
     if (email && !EMAIL_RE.test(email)) {
-        throw say(`"${email}" is not a valid email address`);
+        throw say(`"${email}" is not a valid email address`, 'email');
     }
 
     let phone = '';
@@ -327,13 +331,38 @@ const cleanPerson = (input = {}, { label = '', required = false } = {}) => {
          * here would store a fourth spelling that nothing else matches.
          */
         const checked = validateMobile(rawPhone, { label: 'Mobile number' });
-        if (!checked.ok) throw say(checked.reason || 'that mobile number is not valid');
+        if (!checked.ok) throw say(checked.reason || 'that mobile number is not valid', 'phone');
         phone = checked.stored || checked.national || '';
     } else if (required) {
-        throw say('please enter your mobile number');
+        throw say('please enter your mobile number', 'phone');
     }
 
     return { name, email, phone };
+};
+
+/** Every reserved seat needs a complete attendee. A wholly omitted first row
+ * uses the booking contact for older clients and single-person bookings. */
+const cleanParticipants = (input, count, booker) => {
+    const sent = Array.isArray(input) ? input : [];
+    const emails = new Set();
+    const phones = new Set();
+    return Array.from({ length: count }, (_, index) => {
+        const row = sent[index] || {};
+        const isEmpty = ![row.name, row.email, row.phone, row.mobile].some(value => str(value));
+        const person = cleanPerson(index === 0 && isEmpty ? booker : row, {
+            label: `Participant ${index + 1}`, required: true, fieldPrefix: `participants.${index}.`
+        });
+        const fields = {};
+        if (emails.has(person.email)) fields[`participants.${index}.email`] = 'Use another email';
+        if (phones.has(phoneKey(person.phone))) fields[`participants.${index}.phone`] = 'Use another mobile number';
+        if (Object.keys(fields).length) {
+            const error = ApiError.conflict('Each participant needs their own email and mobile number.');
+            error.fields = fields;
+            throw error;
+        }
+        emails.add(person.email); phones.add(phoneKey(person.phone));
+        return person;
+    });
 };
 
 /** What a client is allowed to see about a booking. */
@@ -707,6 +736,7 @@ class EventBookingService {
             ...priceFor(event, context),
             ...seats,
             maxPerBooking: Math.min(MAX_PARTICIPANTS, seats.seatsLeft > 0 ? seats.seatsLeft : MAX_PARTICIPANTS),
+            participantDetailsRequired: true,
             closed: this.isClosed(event)
         };
     }
@@ -1068,27 +1098,7 @@ class EventBookingService {
          * participant nobody paid for. Slicing to the count makes the number
          * that was PRICED the number that is stored, always.
          */
-        const sent = Array.isArray(payload.participants) ? payload.participants : [];
-        const participants = [];
-        for (let i = 0; i < requested; i += 1) {
-            participants.push(cleanPerson(sent[i] || {}, {
-                label: `Participant ${i + 1}`,
-                required: false
-            }));
-        }
-
-        /*
-         * An unnamed first participant is the booker.
-         *
-         * The client's form asks for the booker's details and then for a row
-         * per participant, and on a one-person booking people fill the top half
-         * and leave the row blank — they have already typed their name once. An
-         * attendee list with a blank first line is the organiser's problem on
-         * the day, so the booker's own details stand in.
-         */
-        if (participants.length && !participants[0].name) {
-            participants[0] = { ...bookedBy };
-        }
+        const participants = cleanParticipants(payload.participants, requested, bookedBy);
 
         const responses = require('./eventRegistrationFields').buildResponses(event.registrationFields, payload.responses);
         await this.assertNotAlreadyBooked(event, bookedBy, participants);
@@ -1586,22 +1596,7 @@ class EventBookingService {
             );
         }
 
-        const sent = Array.isArray(participants) ? participants : [];
-        const next = [];
-        for (let i = 0; i < booking.noOfPersons; i += 1) {
-            next.push(cleanPerson(sent[i] || {}, { label: `Participant ${i + 1}`, required: false }));
-        }
-
-        // The same substitution `createBooking` makes, for the same reason: an
-        // attendee list with a blank first line is the organiser's problem on
-        // the day.
-        if (next.length && !next[0].name) {
-            next[0] = {
-                name: (booking.bookedBy && booking.bookedBy.name) || '',
-                email: (booking.bookedBy && booking.bookedBy.email) || '',
-                phone: (booking.bookedBy && booking.bookedBy.phone) || ''
-            };
-        }
+        const next = cleanParticipants(participants, booking.noOfPersons, booking.bookedBy || {});
 
         booking.participants = next;
         await booking.save();

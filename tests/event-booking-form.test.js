@@ -48,13 +48,27 @@ let announcements = 0;
     EventBooking.create = async value => { stored = { ...value, _id: row._id }; return stored; };
     const bookable = await service.getBookableEvent(event.id, { isPaid: true });
     assert.deepEqual(bookable.registrationFields, fields);
-    const body = { name: 'Booker', email: 'booker@example.test', phone: '9000000001', noOfPersons: 2, responses: answers, amount: 1, totalAmount: 1 };
+    assert.equal(bookable.participantDetailsRequired, true);
+    const person = index => ({ name: 'Delegate ' + index, email: 'delegate' + index + '@example.test', phone: '91736524' + String(index).padStart(2, '0') });
+    const body = { name: 'Booker', email: 'booker@example.test', phone: '9000000001', noOfPersons: 2, participants: [{}, person(1)], responses: answers, amount: 1, totalAmount: 1 };
     const created = await service.createBooking(event.id, body, { id: 'member', isPaid: true });
     assert.equal(created.payment.status, 'pending');
     assert.equal(created.unitAmount, bookable.amount);
     assert.equal(created.totalAmount, bookable.amount * 2);
     assert.deepEqual(stored.responses, row.responses);
     assert.equal(announcements, 0, 'pending is not announced as confirmed');
+    assert.deepEqual(stored.participants[0], { name: body.name, email: body.email, phone: body.phone }, 'first participant uses booking contact');
+    for (const participants of [[], [body], [body, { name: 'Missing contacts' }], [body, { ...person(1), phone: '' }]]) {
+        stored = null;
+        await assert.rejects(service.createBooking(event.id, { ...body, noOfPersons: 10, participants }), error => error.statusCode === 400 && Object.keys(error.fields).some(key => key.startsWith('participants.')));
+        assert.equal(stored, null, 'incomplete attendees cannot create a booking or payment');
+    }
+    await service.createBooking(event.id, { ...body, noOfPersons: 10, participants: [{}, ...Array.from({ length: 9 }, (_, index) => person(index + 1))] });
+    assert.equal(stored.participants.length, 10);
+    assert(stored.participants.every(person => person.name && person.email && person.phone), 'all ten exported participants have full contact details');
+    stored = null;
+    await assert.rejects(service.createBooking(event.id, { ...body, participants: [body, body] }), error => error.statusCode === 409 && !!error.fields['participants.1.email']);
+    assert.equal(stored, null, 'duplicate contacts cannot create placeholder seats');
     stored = null;
     await assert.rejects(service.createBooking(event.id, { ...body, responses: {} }, { id: 'member', isPaid: true }), error => error.statusCode === 400);
     assert.equal(stored, null, 'invalid required answers do not write a booking');
