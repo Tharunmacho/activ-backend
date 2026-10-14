@@ -494,7 +494,7 @@ class NotificationService {
                     let usedHeader = rendered.whatsapp.headerImage || '';
                     let fb = rendered.whatsapp.fallback;
                     const refused = [];
-                    while (!sent.success && fb && fb.template) {
+                    while (!sent.success && fb && fb.template && require('./templateFallback')(sent.error)) {
                         if (fb.template !== tried) {
                             refused.push(`"${tried}": ${sent.error}`);
                             logger.warn('WhatsApp template refused; trying the next one', {

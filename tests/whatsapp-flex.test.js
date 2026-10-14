@@ -302,7 +302,9 @@ const testWiring = () => {
         for (const [eventName, ctx, prefix] of cases) {
             const rendered = templates.render(eventName, ctx);
             const chain = chainOf(rendered.whatsapp);
-            const [first, second, third] = chain;
+            say('standard layout is prepended while the configured fallback contracts remain intact',
+                chain.filter(step => /_standard_/.test(step.template)).length === 2);
+            const [first, second, third] = chain.filter(step => !/_standard_/.test(step.template));
             const label = `${eventName}${ctx.isOnline ? ' (online)' : ''}`;
             say(`flags on: ${label} → ${prefix} (image) first, even with no organiser contact or notes`,
                 first.template === (Object.values({ ...flex.NAMES, ...flex.READABLE_NAMES }).find((n) => n.image.startsWith(prefix)) || {}).image, chain.map((s) => s.template).join(' > '));

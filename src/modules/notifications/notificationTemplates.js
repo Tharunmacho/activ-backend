@@ -1,5 +1,6 @@
 const config = require('../../config');
 const FLEX = require('./whatsappFlex');
+const STANDARD = require('./whatsappStandard');
 
 /**
  * What each lifecycle event SAYS, on all three channels, in one place.
@@ -1207,6 +1208,7 @@ const TEMPLATES = {
  * `scripts/test-notifications.js --templates` prints both versions.
  */
 const WHATSAPP_TEMPLATES = [
+    ...STANDARD.WHATSAPP_TEMPLATES,
     ...WORKFLOW.WHATSAPP_TEMPLATES,
     {
         name: 'activ_event_channel_v2', envKey: 'BOTBEE_TPL_EVENT_CHANNEL',
@@ -1229,6 +1231,15 @@ const WHATSAPP_TEMPLATES = [
             + 'Please keep these details with your booking confirmation.',
         params: ['event', 'booking ID', 'WhatsApp channel link'],
         samples: ['Entrepreneurship Awareness Programme', 'ACTIVB-TEST-1234', 'https://whatsapp.com/channel/0029VaDdseGKLaHrWNV7ZK1X'],
+    },
+    {
+        name: 'activ_event_document_standard_v1', envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
+        category: 'Utility', meta: true, standard: true, header: 'DOCUMENT', footer: 'ACTIV',
+        bodyWithVariables: 'Dear *{{1}}*,\n\n*Event document*\n\n'
+            + '*Document:* {{2}}\n\n*Event:* {{3}}\n\n*Schedule:* {{4}}\n\n*Booking ID:* {{5}}\n\n'
+            + '*Event queries:* events@activ.org.in\n\nPlease keep this file with your booking confirmation.',
+        params: ['name', 'document name', 'event', 'date & time', 'booking ID'],
+        samples: ['Tharun', 'Agenda.pdf', 'Entrepreneurship Awareness Programme', 'Friday, 23 October 2026, 9:00 AM IST', 'ACTIVB-TEST-1234'],
     },
     {
         name: 'activ_event_document_readable_v2', envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
@@ -1663,6 +1674,17 @@ const render = (eventName, ctx = {}) => {
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
     const out = builder(ctx);
+    if (out?.whatsapp) {
+        const configured = /^EVENT_(BOOKING|PARTICIPANT)_/.test(eventName)
+            ? flexNames(STANDARD.EVENT_KINDS[eventName], ctx) : null;
+        const known = new Set(Object.values({ ...FLEX.NAMES, ...FLEX.READABLE_NAMES }).flatMap(Object.values)
+            .concat(Object.values(FLEX.NAMES).flatMap(Object.values)));
+        // A deployment's explicit custom template and disabled variants retain
+        // their meaning. Only the built-in event families migrate by default.
+        const custom = configured && Object.values(configured).some(value => value && !known.has(value));
+        if (!custom) out.whatsapp = STANDARD.prepend(eventName, ctx, out.whatsapp, DEFAULT_WHATSAPP_POSTER(),
+            configured ? Object.entries(configured).filter(([, value]) => !!value).map(([variant]) => variant) : undefined);
+    }
     // The brief fallback templates also carry the correct queries inbox.
     for (let wa = out && out.whatsapp; wa; wa = wa.fallback) {
         const slot = [TPL.event, TPL.bookingInPerson, TPL.bookingOnline].includes(wa.template)

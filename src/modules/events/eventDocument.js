@@ -45,4 +45,19 @@ const validateDocument = async (url) => {
     }
 };
 
-module.exports = { validateDocument, documentUrl, documentForResend };
+// The readable caption has its own name and preserves the five-slot contract.
+const sendDocument = async (phone, configuredTemplate, params, headerDocument) => {
+    const sender = require('../notifications/whatsappTemplate');
+    const readable = 'activ_event_document_standard_v1';
+    const previous = 'activ_event_document_v1';
+    let template = [previous, 'activ_event_document_readable_v2'].includes(configuredTemplate) ? readable : configuredTemplate;
+    const values = params.map(value => String(value ?? '').replace(/\s+/g, ' ').trim());
+    let outcome = await sender.sendTemplateMessage(phone, template, values, 'en', '', { headerDocument });
+    if (!outcome.success && template === readable && require('../notifications/templateFallback')(outcome.error)) {
+        template = previous;
+        outcome = await sender.sendTemplateMessage(phone, template, values, 'en', '', { headerDocument });
+    }
+    return { outcome, template, params: values };
+};
+
+module.exports = { validateDocument, documentUrl, documentForResend, sendDocument };

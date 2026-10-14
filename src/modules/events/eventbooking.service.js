@@ -1913,7 +1913,7 @@ class EventBookingService {
             const sendDocuments = async(toPhone, toName) => {
                 const template = require('../../config').botbee.templates.eventDocument;
                 if (!toPhone || !documents.length || !template || String(template).toLowerCase() === 'none') return;
-                const whatsappTemplate = require('../notifications/whatsappTemplate');
+                const documentService = require('./eventDocument');
                 for (const doc of documents) {
                     const docParams = [
                         str(toName) || 'Member',
@@ -1923,15 +1923,16 @@ class EventBookingService {
                         ctx.bookingRef || '-'
                     ];
                     const headerDocument = { link: doc.url, filename: doc.name };
-                    const sent = await require('./eventDocument').validateDocument(doc.url)
-                        .then(() => whatsappTemplate.sendTemplateMessage(toPhone, template, docParams, 'en', '', { headerDocument }))
-                        .catch((e) => ({ success: false, error: e && e.message }));
+                    const result = await documentService.validateDocument(doc.url)
+                        .then(() => documentService.sendDocument(toPhone, template, docParams, headerDocument))
+                        .catch((e) => ({ outcome: { success: false, error: e && e.message }, template, params: docParams }));
+                    const sent = result.outcome;
                     await notificationService.log({
                         user: booking.userId || null,
                         event: `EVENT_DOCUMENT_${resolvedKind.toUpperCase()}`,
                         channel: 'whatsapp',
                         recipient: sent.to || toPhone,
-                        templateId: template,
+                        templateId: result.template,
                         subject: doc.name,
                         status: sent.success ? 'sent' : 'failed',
                         mock: !!sent.mock,
@@ -1945,7 +1946,7 @@ class EventBookingService {
                         recipientName: str(toName),
                         resendOf: extra.resendOf,
                         // Everything a replay needs to send the same file again.
-                        data: { bookingRef: booking.bookingRef, document: doc.url, params: docParams, headerDocument }
+                        data: { bookingRef: booking.bookingRef, document: doc.url, params: result.params, headerDocument }
                     }).catch(() => {});
                 }
             };
@@ -2134,14 +2135,14 @@ class EventBookingService {
             }
             const params = [str(row.recipientName || (data.params || [])[0]) || 'Member', headerDocument.filename,
                 ctx.eventTitle || 'the event', ctx.whenLabel || 'Date to be confirmed', ctx.bookingRef || booking.bookingRef];
-            const refreshedData = { ...data, bookingRef: booking.bookingRef, document: headerDocument.link, params, headerDocument };
-            const whatsappTemplate = require('../notifications/whatsappTemplate');
-            const outcome = await documentService.validateDocument(headerDocument.link)
-                .then(() => whatsappTemplate.sendTemplateMessage(row.recipient, template, params, 'en', '',
-                    { headerDocument })).catch((e) => ({ success: false, error: e && e.message }));
+            const result = await documentService.validateDocument(headerDocument.link)
+                .then(() => documentService.sendDocument(row.recipient, template, params, headerDocument))
+                .catch((e) => ({ outcome: { success: false, error: e && e.message }, template, params }));
+            const outcome = result.outcome;
+            const refreshedData = { ...data, bookingRef: booking.bookingRef, document: headerDocument.link, params: result.params, headerDocument };
             const fresh = await notificationService.log({
                 user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
-                templateId: template, subject: headerDocument.filename, status: outcome.success ? 'sent' : 'failed',
+                templateId: result.template, subject: headerDocument.filename, status: outcome.success ? 'sent' : 'failed',
                 mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error,
                 provider: outcome.provider,
                 deliveryStatus: outcome.mock ? undefined : (outcome.success ? 'accepted' : 'failed'),
