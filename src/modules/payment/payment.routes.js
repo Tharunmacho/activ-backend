@@ -304,6 +304,8 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
     });
 
+    if (orderType === 'membership') orderService.schedulePendingPaymentNotice(orderId);
+
     /*
      * `orderId` and `amount` ride back with the gateway's own fields.
      *

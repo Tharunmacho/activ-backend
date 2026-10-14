@@ -264,13 +264,23 @@ class PaymentOrderService {
      */
     async notifyPaymentPending(orderId) {
         try {
-            const order = await PaymentOrder.findOne({ orderId: String(orderId) }).lean();
+            let order = await PaymentOrder.findOne({ orderId: String(orderId) }).lean();
             if (!order) return;
+            if (order.orderType && order.orderType !== 'membership') return;
 
             // 'paid', 'failed', 'cancelled' — all of them mean nothing is owed
             // on this order any more.
             if (order.status !== 'created') return;
             if (order.expiresAt && new Date(order.expiresAt).getTime() < Date.now()) return;
+            if (order.failedPaymentNoticeIds?.length) return;
+
+            // Hosted checkout can have paid before its webhook arrives. Ask
+            // the gateway through the same trusted return/settlement path.
+            if (order.provider === 'instamojo') {
+                await require('./payment.service').resolveReturn(order.orderId);
+                order = await PaymentOrder.findOne({ orderId: String(orderId) }).lean();
+                if (!order || order.status !== 'created' || order.failedPaymentNoticeIds?.length) return;
+            }
 
             const member = await MemberDetails.findById(order.memberId).lean().catch(() => null);
             if (!member) return;
@@ -425,7 +435,9 @@ class PaymentOrderService {
 
         if (!claimed) throw ApiError.badRequest('This order has already been paid');
         if (claimed.orderType === 'company_listing') {
-            await require('../members/company.model').updateOne({ _id: claimed.companyId, userId: claimed.memberId }, { $set: { isActive: true, status: 'active' } });
+            const company = await require('../members/company.model').findOneAndUpdate(
+                { _id: claimed.companyId, userId: claimed.memberId }, { $set: { isActive: true, status: 'active' } }, { new: true });
+            if (company) await require('./payment.service').announceCompanyPayment(claimed, company);
             return { order: claimed };
         }
 

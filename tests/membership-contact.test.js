@@ -16,9 +16,9 @@ async function main() {
     const html = email.buildHtmlTemplate({ title: 'Member activated', bodyHtml: '<p>Membership active.</p>', contact: regional });
     assert(html.includes(office.email) && html.includes(office.phone));
     assert(!html.includes('Regional Fixture') && !html.includes('District Fixture') && !html.includes('9000000000'));
-    assert.equal(email.resolveSender(regional, 'event@example.test', 'events').replyTo, 'event@example.test');
+    assert.equal(email.resolveSender(regional, 'event@example.test', 'events').replyTo, 'events@activ.org.in');
     const eventHtml = email.buildHtmlTemplate({ title: 'Event booked', bodyHtml: '<p>Event confirmed.</p>', category: 'events', contact: regional });
-    assert(eventHtml.includes('District Fixture'), 'event contact behavior is preserved');
+    assert(eventHtml.includes('events@activ.org.in') && !eventHtml.includes('District Fixture'), 'event queries use the events support inbox');
     const reply = await bot.helpReply({ member: { fullName: 'Member Fixture', state: 'Region Fixture' } });
     assert(reply.includes(office.email) && reply.includes(office.phone));
     assert(!reply.includes('District Admin') && !reply.includes('Region Fixture'));
@@ -27,6 +27,6 @@ async function main() {
     const params = notices.retryParams({event:'MEMBERSHIP_ACTIVATED', templateId:'activ_membership_active_v1'}, {params:saved});
     assert.deepEqual(params.slice(-3), [office.name, office.phone, office.email]);
     assert.deepEqual(notices.retryParams({event:'EVENT_BOOKING_CONFIRMED'}, {params:saved}), saved);
-    console.log('Membership contact: central sender/reply-to, email footer and WhatsApp HELP passed; event contact behavior preserved.');
+    console.log('Membership and event support inboxes, sender/reply-to, email footer and WhatsApp HELP passed.');
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

@@ -134,8 +134,8 @@ class EmailService {
      */
     resolveSender(contact = null, overrideReplyTo = null, category = 'events') {
         const account = accountFor(category);
-        if (category === 'membership') {
-            const office = require('./membershipContact');
+        if (category === 'membership' || category === 'events') {
+            const office = category === 'events' ? require('./eventContact') : require('./membershipContact');
             return { fromEmail: account.defaultFrom, fromName: office.name,
                 fromHeader: `"${office.name}" <${account.defaultFrom}>`, replyTo: office.email };
         }
@@ -341,7 +341,7 @@ class EmailService {
         const orgName = 'Adidravidar Confederation of Trade and Industrial Vision';
         const membership = category === 'membership' ? require('./membershipContact') : null;
         const orgPhone = membership?.phone || process.env.EMAIL_ORG_PHONE || '+91 82201 12188';
-        const orgEmail = membership?.email || process.env.EMAIL_ORG_EMAIL || 'enquiry@activ.org.in';
+        const orgEmail = membership?.email || require('./eventContact').email;
         // The address is often configured with the organisation's name in front
         // of it; the footer already prints the name, so it is not said twice.
         const orgAddress = String(process.env.EMAIL_ORG_ADDRESS
@@ -467,12 +467,7 @@ class EmailService {
         /* ------------------------------------------------------------- help */
         const office = membership
             ? `<strong style="color:${INK};">ACTIV Membership support</strong><br />Phone: ${esc(membership.phone)}<br />Email: ${esc(membership.email)}. Reply to this email for help.`
-            : contact && contact.nearest
-            ? `Replying to this email reaches your
-               <strong style="color:${INK};">${esc([contact.nearest.regionName, contact.nearest.tierLabel].filter(Boolean).join(' '))}
-               Admin</strong>${contact.nearest.name ? ` (${esc(contact.nearest.name)})` : ''} directly.
-               ${contact.nearest.phone ? `<br />Phone: ${esc(contact.nearest.phone)}` : ''}`
-            : `<strong style="color:${INK};">Need help?</strong> Just reply to this email and it reaches the ACTIV support desk.`;
+            : `<strong style="color:${INK};">ACTIV Events support</strong><br />Email: ${esc(orgEmail)}. Reply to this email for event queries.`;
 
         const logoHtml = logoSrc
             ? `<img src="${esc(logoSrc)}" width="180" alt="ACTIV"

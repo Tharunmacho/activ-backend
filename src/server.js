@@ -158,6 +158,7 @@ const startServer = async() => {
         // `MEMBERSHIP_RENEWAL_REMINDERS=false` turns it off.
         try {
             require('./modules/notifications/membershipRenewal.service').start();
+            require('./modules/notifications/membershipProgression.service').start();
         } catch (error) {
             logger.warn('Membership renewal reminders not started', { error: error && error.message });
         }

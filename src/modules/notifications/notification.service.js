@@ -3,7 +3,7 @@ const Notification = require('./notification.model');
 const NotificationLog = require('./notificationLog.model');
 const emailService = require('./email.service');
 const botbeeService = require('./botbee.service');
-// Templates pick their provider; free text is always BotBee. See whatsappTemplate.js.
+// Templates pick their provider; conversation replies retain their original provider.
 const whatsappTemplate = require('./whatsappTemplate');
 const regionalContacts = require('./regionalContacts.service');
 const templates = require('./notificationTemplates');
@@ -414,6 +414,8 @@ class NotificationService {
                         deliveryStatus: sent.mock ? undefined : (sent.success ? 'accepted' : 'failed'),
                         ...trace,
                         data: {
+                            lifecycleData: payload.data || {},
+                            emailHtml: html,
                             recipientName: ctx.name,
                             bodyHtml: rendered.email.bodyHtml,
                             region: contact && contact.region,
@@ -613,6 +615,7 @@ class NotificationService {
                         // fallback text, so a replay has something to send
                         // without re-running the whole lifecycle event.
                         data: {
+                            lifecycleData: payload.data || {},
                             // The SENT template's values and header, so a
                             // replay of this row is the same message.
                             params: usedParams,
@@ -825,6 +828,12 @@ class NotificationService {
 
         const row = await NotificationLog.findById(logId);
         if (!row) return null;
+        const stateReason = await require('./retryEligibility').reasonToSkip(row);
+        if (stateReason) return { row, skipped: true, reason: stateReason };
+        if (['EVENT_UPDATED', 'EVENT_CANCELLED'].includes(row.event)) {
+            const changeReason = await require('../events/eventChanges.service').reasonToSkipChange(row);
+            if (changeReason) return { row, skipped: true, reason: changeReason };
+        }
 
         // An in-app row has no external provider to retry against: the
         // notification either exists on the member's account or it does not.
@@ -909,7 +918,7 @@ class NotificationService {
         }
 
         if (row.channel === 'email') {
-            const html = emailService.buildHtmlTemplate({
+            const html = data.emailHtml || emailService.buildHtmlTemplate({
                 category: require('./emailAccounts').categoryForEvent(row.event),
                 title: row.subject || 'ACTIV',
                 recipientName: data.recipientName || 'Member',
@@ -938,7 +947,16 @@ class NotificationService {
                     headerImage: data.headerImage || '',
                     headerDocument: data.headerDocument || undefined
                 })
-                : await botbeeService.sendTextMessage(row.recipient, data.text || 'ACTIV notification');
+                : row.provider === 'meta'
+                    ? await require('./metaCloud.service').sendTextMessage(row.recipient, data.text || '', {
+                        replyTo: data.inboundMessageId
+                    })
+                    : await botbeeService.sendTextMessage(row.recipient, data.text || 'ACTIV notification');
+        }
+
+        if (row.event === 'BOT_REPLY') {
+            row.data = { ...data, replyAttempted: true, replyDeferred: false };
+            if (typeof row.markModified === 'function') row.markModified('data');
         }
 
         row.status = outcome.success ? 'sent' : 'failed';

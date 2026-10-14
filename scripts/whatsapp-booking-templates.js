@@ -39,8 +39,8 @@ const language = process.env.META_TEMPLATE_LANGUAGE || 'en_US';
 const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7)
     .split(',').map((s) => s.trim()).filter(Boolean);
 const picked = (t) => !only.length || only.includes(t.name) || (only.includes('flex') && t.flex)
-    || (only.includes('aligned') && /^activ_evt_(confirmed|online)_(whatsapp|video|whatsapp_video)_(image|plain)_v2$/.test(t.name))
-    || (only.includes('pdf-links') && /^activ_evt_(confirmed|online)_.*document.*_(image|plain)_v3$/.test(t.name));
+    || (only.includes('aligned') && /^activ_evt_(confirmed|online)_(whatsapp|video|whatsapp_video)_(image|plain)_v4$/.test(t.name))
+    || (only.includes('pdf-links') && /^activ_evt_(confirmed|online)_.*document.*_(image|plain)_v4$/.test(t.name));
 const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && picked(t));
 const flex = require('../src/modules/notifications/whatsappFlex');
 let imageHandle = process.env.META_TEMPLATE_IMAGE_HANDLE || '';
@@ -145,6 +145,7 @@ const need = () => {
 };
 
 (async() => {
+    if (!booking.length) throw new Error('No templates matched --only. Nothing was submitted.');
     if (args.has('--status')) {
         need();
         for (const t of booking) {
@@ -183,13 +184,17 @@ const need = () => {
             problems += issues.length;
             console.log('');
         }
-        if (problems) console.log(`${problems} problem(s) above - fix before --submit.`);
+        if (problems) {
+            console.log(`${problems} problem(s) above - fix before --submit.`);
+            process.exitCode = 1;
+        }
         return;
     }
 
     need();
     if (booking.some((t) => t.header === 'IMAGE')) await uploadSampleImage();
     if (booking.some((t) => t.header === 'DOCUMENT')) await uploadSamplePdf();
+    let failures = 0;
     for (const t of booking) {
         try {
             const res = await axios.post(`${base}/${version}/${waba}/message_templates`, payloadFor(t), {
@@ -198,9 +203,12 @@ const need = () => {
             });
             console.log(`${t.name}: submitted - ${JSON.stringify(res.data)}`);
         } catch (error) {
+            failures++;
             console.log(`${t.name}: ${JSON.stringify((error.response && error.response.data) || error.message)}`);
         }
     }
+    console.log(`Submitted ${booking.length - failures} of ${booking.length} templates; ${failures} failed.`);
+    if (failures) process.exitCode = 1;
     console.log('\nRun with --status in a few minutes. When APPROVED, put the names in backend/.env and restart.');
 })().catch((error) => {
     // Axios errors contain request headers; never print the error object.

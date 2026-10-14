@@ -23,11 +23,9 @@ const metaCloudService = require('./metaCloud.service');
  *   reaches a member outside the 24-hour window, and reaching them badly beats
  *   not reaching them.
  *
- * FREE TEXT IS NOT ROUTED HERE. Session replies, the keyword bot and the
- * inbound webhook stay on BotBee unconditionally -- Meta delivers inbound
- * events to exactly one webhook URL and that URL is BotBee's. Call sites that
- * send text keep calling `botbee.service` directly, and this module has no
- * `sendTextMessage` so that boundary cannot blur.
+ * Free text is not routed here. Authenticated conversation replies use the
+ * provider of their inbound webhook; retry logic retains that provider and
+ * verifies the original reply window. Lifecycle sends always use templates.
  */
 
 /**
@@ -103,7 +101,7 @@ const ownSendingNumber = async() => {
         const mc = config.metaCloud || {};
         if (!mc.phoneNumberId || !mc.accessToken) { ownNumber = ''; return ownNumber; }
         const url = `${mc.baseUrl || 'https://graph.facebook.com'}/${mc.apiVersion || 'v21.0'}/${mc.phoneNumberId}?fields=display_phone_number`;
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${mc.accessToken}` } });
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${mc.accessToken}` }, signal: AbortSignal.timeout(10000) });
         const body = await res.json().catch(() => ({}));
         ownNumber = lastTen(body && body.display_phone_number);
     } catch (err) {

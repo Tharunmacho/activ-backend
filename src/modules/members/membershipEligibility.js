@@ -42,6 +42,10 @@ async function currentMembership(member, paidOrder) {
     const progress = rules.progression(member, data.business, paidOrder, data.plans);
     if (!progress.effective) return null;
     const active = require('./membershipState').membershipState(member).state === 'active';
+    if (active && process.env.MEMBERSHIP_PLAN_NOTICES !== 'false') {
+        require('../notifications/membershipProgression.service').observe(member, progress).catch(error =>
+            require('../../config/logger').warn('Membership plan notification failed', { error: error.message }));
+    }
     return { planId: progress.effective.key, planName: progress.effective.name, kind: progress.kind,
         automaticallyAdvanced: progress.promoted, commencementYear: progress.commencementYear,
         nextPlanName: progress.next?.name || '', nextEligibleYear: progress.nextEligibleYear,

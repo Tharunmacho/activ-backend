@@ -1145,10 +1145,14 @@ class EventService {
         const data = sanitize(payload);
         if (data.title !== undefined && !data.title) throw ApiError.badRequest('Title cannot be empty');
 
+        const before = await Event.findOne({ _id: id, archivedAt: null }).lean();
+
         const updated = await Event.findOneAndUpdate({ _id: id, archivedAt: null }, { $set: data }, { new: true, runValidators: true })
             .lean()
             .catch(() => null);
         if (!updated) throw ApiError.notFound('Event not found');
+
+        require('./eventChanges.service').announceChange(before, updated);
 
         return toEvent(updated);
     }
@@ -1346,7 +1350,7 @@ class EventService {
             userId: String(context.id),
             memberName: str(payload.memberName) || context.fullName || '',
             email: str(payload.email).toLowerCase() || context.email || '',
-            phone: str(payload.phone),
+            phone: str(payload.phone || context.whatsappNumber || context.phoneNumber),
             organization: str(payload.organization),
             state: context.state || '',
             district: context.district || '',
@@ -1378,32 +1382,7 @@ class EventService {
          * failure because a mail host timed out — the member would tap Register
          * again against a unique index that now refuses them.
          */
-        const confirmSeat = (row) => {
-            const notificationService = require('../notifications/notification.service');
-
-            notificationService.dispatchInBackground('EVENT_REGISTERED', {
-                id: context.id,
-                name: seat.memberName,
-                email: seat.email,
-                phone: seat.phone || context.phoneNumber,
-                state: seat.state,
-                district: seat.district,
-                block: seat.block
-            }, {
-                eventTitle: event.title || 'ACTIV event',
-                whenLabel: event.startAt
-                    ? new Date(event.startAt).toLocaleString('en-IN', {
-                        day: 'numeric', month: 'long', year: 'numeric',
-                        hour: 'numeric', minute: '2-digit'
-                    })
-                    // An undated event is a real state on this platform and
-                    // "Date to be confirmed" is what every other surface prints
-                    // for it. An omitted line reads as a rendering fault.
-                    : 'Date to be confirmed',
-                venue: event.venue || event.location || '',
-                data: { eventId: String(event._id || ''), registrationId: String((row && row._id) || '') }
-            });
-        };
+        const confirmSeat = row => require('./eventChanges.service').announceRegistration(row, event);
 
         // Re-registering reuses the cancelled row: the unique index below means
         // an insert would fail anyway, and the member is the same person.
@@ -1478,8 +1457,8 @@ class EventService {
 
         const method = str(payload.method).toLowerCase() || 'card';
 
-        const settledRow = await EventRegistration.findByIdAndUpdate(
-            row._id,
+        const settledRow = await EventRegistration.findOneAndUpdate(
+            { _id: row._id, status: 'registered', 'payment.status': 'pending' },
             {
                 $set: {
                     'payment.status': 'paid',
@@ -1493,6 +1472,12 @@ class EventService {
             { new: true }
         ).lean();
 
+        if (!settledRow) {
+            const current = await EventRegistration.findById(row._id).lean();
+            if (current?.payment?.status === 'paid') return { ...toRegistration(current), alreadyPaid: true };
+            throw ApiError.conflict('This registration changed. Refresh before continuing.');
+        }
+        require('./eventChanges.service').announceRegistration(settledRow, eventId);
         return toRegistration(settledRow);
     }
 
@@ -1502,12 +1487,20 @@ class EventService {
         if (!context.id) throw ApiError.unauthorized('No member on this token');
 
         const row = await EventRegistration.findOneAndUpdate(
-            { eventId, userId: String(context.id) },
+            { eventId, userId: String(context.id), status: { $ne: 'cancelled' } },
             { $set: { status: 'cancelled', cancelledAt: new Date() } },
             { new: true }
         ).lean().catch(() => null);
 
-        if (!row) throw ApiError.notFound('You are not registered for this event');
+        if (!row) {
+            const existing = await EventRegistration.findOne({ eventId, userId: String(context.id) }).lean();
+            if (existing) return toRegistration(existing);
+            throw ApiError.notFound('You are not registered for this event');
+        }
+
+        require('./eventChanges.service').announceRegistration(row, eventId, 'cancelled', {
+            cancelledScope: 'registration', reason: 'Your registration was cancelled at your request.',
+        });
 
         /*
          * Promote the longest-waiting person on the list into the seat.
@@ -1522,18 +1515,31 @@ class EventService {
     }
 
     async promoteFromWaitlist(eventId) {
-        const event = await Event.findById(eventId).select('capacity').lean().catch(() => null);
-        if (!event || !event.capacity) return null;
+        const event = await Event.findById(eventId).lean().catch(() => null);
+        if (!event || !event.capacity || event.archivedAt || event.status !== 'published' || isPastEvent(event)) return null;
 
         const taken = await EventRegistration.countDocuments({ eventId, status: 'registered' }).catch(() => 0);
         if (taken >= event.capacity) return null;
 
+        const candidate = await EventRegistration.findOne({ eventId, status: 'waitlist' }).sort({ registeredAt: 1 }).lean();
+        if (!candidate) return null;
+        const memberContext = await require('../common/memberContext').resolveMemberContext({ user: { userId: candidate.userId, role: 'member' } });
+        const amount = priceFor(event, memberContext).amount;
+        const alreadyPaid = candidate.payment?.status === 'paid';
+        const payment = alreadyPaid ? candidate.payment : {
+            status: amount > 0 ? 'pending' : 'not_required', amount,
+            reference: amount > 0 ? candidate.payment?.reference || newPaymentReference() : '',
+            method: '', paidAt: null,
+        };
         const next = await EventRegistration.findOneAndUpdate(
-            { eventId, status: 'waitlist' },
-            { $set: { status: 'registered' } },
-            { new: true, sort: { registeredAt: 1 } }
-        ).lean().catch(() => null);
+            { _id: candidate._id, eventId, status: 'waitlist' },
+            { $set: { status: 'registered', payment } }, { new: true }
+        ).lean();
 
+        if (next) require('./eventChanges.service').announceRegistration(next, event,
+            next.payment?.status === 'pending' ? 'updated' : undefined, {
+                changeSummary: 'A place is now available from the waiting list. Complete the payment shown in your event registration to confirm your seat.',
+            });
         return next ? toRegistration(next) : null;
     }
 

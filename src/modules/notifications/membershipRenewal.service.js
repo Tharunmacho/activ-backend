@@ -27,6 +27,41 @@ const logger = require('../../config/logger');
  */
 
 const DAY = 24 * 60 * 60 * 1000;
+const PAGE_SIZE = 500;
+const PAID_VALUES = PAID_STATUSES.concat(PAID_STATUSES.map(value => value.toUpperCase()));
+
+// Keyset pagination keeps members past the first page eligible even when older
+// rows have already received their reminder. Updating rows during a sweep does
+// not shift the cursor as it would with skip()/offset pagination.
+async function* membersFor(filter) {
+    let lastId = null;
+    while (true) {
+        const rows = await MemberDetails.find({ ...filter, ...(lastId ? { _id: { $gt: lastId } } : {}) })
+            .sort({ _id: 1 }).limit(PAGE_SIZE).lean();
+        if (!rows || !rows.length) return;
+        for (const member of rows) yield member;
+        if (rows.length < PAGE_SIZE) return;
+        lastId = rows[rows.length - 1]._id;
+    }
+}
+
+// A renewal can leave status='active' while extending the expiry. Match the
+// period as well as status so a concurrently renewed member cannot be expired
+// or sent a reminder based on the old scan. The fallback activation and lifetime
+// fields protect older records without a stored membershipExpiresAt too.
+const periodSnapshot = member => ({
+    _id: member._id,
+    membershipStatus: member.membershipStatus,
+    membershipExpiresAt: member.membershipExpiresAt || null,
+    membershipActivatedAt: member.membershipActivatedAt || null,
+    membershipType: member.membershipType ?? null,
+    membershipTier: member.membershipTier ?? null,
+});
+
+const claimReminder = (member, key, now) => MemberDetails.findOneAndUpdate({
+    ...periodSnapshot(member), isActive: { $ne: false },
+    renewalReminderEnabled: { $ne: false }, renewalReminders: { $ne: key },
+}, { $addToSet: { renewalReminders: key }, $set: { lastRenewalReminderAt: now } }, { new: true }).lean();
 
 /** The reminder windows, widest first. `0` is "on or just after expiry". */
 const WINDOWS = [30, 7, 0];
@@ -49,10 +84,10 @@ const inWords = (daysLeft) => {
 };
 
 /** One renewal message, on every channel. Used by the sweep and by an admin's "send now". */
-const dispatchRenewal = (member, now = new Date(), data = {}) => {
+const dispatchRenewal = async (member, now = new Date(), data = {}) => {
     const expiresAt = periodEnd(member);
     const daysLeft = expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / DAY) : 0;
-    notificationService.dispatchInBackground('MEMBERSHIP_RENEWAL_DUE',
+    await notificationService.dispatchLifecycleEvent('MEMBERSHIP_RENEWAL_DUE',
         membershipContext.recipientFromMember(member), {
             membershipNumber: membershipContext.membershipNumberOf(member),
             membershipType: member.membershipType,
@@ -84,29 +119,31 @@ class MembershipRenewalService {
      */
     async flipExpired(now = new Date(), { dryRun = false } = {}) {
         const yearAgo = new Date(now); yearAgo.setFullYear(yearAgo.getFullYear() - 1);
-        const candidates = await MemberDetails.find({
-            membershipStatus: { $in: PAID_STATUSES.concat(PAID_STATUSES.map((st) => st.toUpperCase())) },
+        const filter = {
+            membershipStatus: { $in: PAID_VALUES },
             membershipType: { $ne: 'lifetime' },
             membershipTier: { $ne: 'platinum' },
             $or: [
                 { membershipExpiresAt: { $lte: now } },
                 { membershipExpiresAt: null, membershipType: 'annual', membershipActivatedAt: { $lte: yearAgo } }
             ]
-        }).limit(1000).lean().catch(() => []);
+        };
 
         const flipped = [];
-        for (const member of candidates || []) {
+        for await (const member of membersFor(filter)) {
             const { state, expiresAt } = membershipState(member, { now });
             if (state !== 'expired') continue;
-            flipped.push({ id: String(member._id), expiresAt });
-            if (dryRun) continue;
+            if (dryRun) { flipped.push({ id: String(member._id), expiresAt }); continue; }
             const set = { membershipStatus: 'expired' };
             if (!member.membershipExpiresAt && expiresAt) set.membershipExpiresAt = expiresAt;
             const res = await MemberDetails.updateOne(
-                { _id: member._id, membershipStatus: member.membershipStatus },
+                periodSnapshot(member),
                 { $set: set }
             ).catch(() => null);
-            if (res && res.modifiedCount) invalidateMemberContext(member._id);
+            if (res && res.modifiedCount) {
+                invalidateMemberContext(member._id);
+                flipped.push({ id: String(member._id), expiresAt });
+            }
         }
         if (flipped.length && !dryRun) logger.info('Memberships marked expired', { count: flipped.length });
         return flipped;
@@ -114,21 +151,18 @@ class MembershipRenewalService {
 
     /** "Your membership has expired — renew now", once per half-month (1st, 15th). */
     async sendMonthlyExpired(now = new Date()) {
-        const members = await MemberDetails.find({
+        const filter = {
             membershipStatus: { $in: ['expired', 'EXPIRED'] },
-            renewalReminderEnabled: { $ne: false }
-        }).limit(1000).lean().catch(() => []);
+            renewalReminderEnabled: { $ne: false }, isActive: { $ne: false },
+        };
 
         let sent = 0;
-        for (const member of members || []) {
+        for await (const member of membersFor(filter)) {
             const key = monthlyReminderDue(member, { now, already: member.renewalReminders });
             if (!key) continue;
-            const claimed = await MemberDetails.updateOne(
-                { _id: member._id, renewalReminders: { $ne: key } },
-                { $addToSet: { renewalReminders: key }, $set: { lastRenewalReminderAt: now } }
-            ).catch(() => null);
-            if (!claimed || !claimed.modifiedCount) continue;
-            dispatchRenewal(member, now, { monthly: key });
+            const claimed = await claimReminder(member, key, now);
+            if (!claimed) continue;
+            await dispatchRenewal(claimed, now, { monthly: key });
             sent++;
         }
         if (sent) logger.info('Expired-membership reminders sent', { count: sent });
@@ -139,14 +173,16 @@ class MembershipRenewalService {
         const from = new Date(now.getTime() - 7 * DAY);
         const to = new Date(now.getTime() + 30 * DAY);
 
-        const members = await MemberDetails.find({
+        const filter = {
             membershipExpiresAt: { $gte: from, $lte: to },
-            membershipStatus: { $in: PAID_STATUSES.concat(PAID_STATUSES.map((s) => s.toUpperCase())) }
-        }).limit(500).lean().catch(() => []);
+            membershipStatus: { $in: PAID_VALUES },
+            renewalReminderEnabled: { $ne: false }, isActive: { $ne: false },
+        };
 
         let sent = 0;
-        for (const member of members || []) {
-            const expiresAt = new Date(member.membershipExpiresAt);
+        for await (const member of membersFor(filter)) {
+            const expiresAt = periodEnd(member);
+            if (!expiresAt || !Number.isFinite(expiresAt.getTime())) continue;
             const daysLeft = Math.ceil((expiresAt.getTime() - now.getTime()) / DAY);
             const window = windowFor(daysLeft);
             if (window === null) continue;
@@ -159,21 +195,9 @@ class MembershipRenewalService {
 
             // Claim the key BEFORE sending, conditionally, so two instances of
             // the server cannot both send the same reminder.
-            const claimed = await MemberDetails.updateOne(
-                { _id: member._id, renewalReminders: { $ne: key } },
-                { $addToSet: { renewalReminders: key }, $set: { lastRenewalReminderAt: now } }
-            ).catch(() => null);
-            if (!claimed || !claimed.modifiedCount) continue;
-
-            notificationService.dispatchInBackground('MEMBERSHIP_RENEWAL_DUE',
-                membershipContext.recipientFromMember(member), {
-                    membershipNumber: membershipContext.membershipNumberOf(member),
-                    membershipType: member.membershipType,
-                    validUntilLabel: membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(expiresAt)),
-                    daysLeft,
-                    expiresInLabel: inWords(daysLeft),
-                    data: { window, expiresAt: expiresAt.toISOString() }
-                });
+            const claimed = await claimReminder(member, key, now);
+            if (!claimed) continue;
+            await dispatchRenewal(claimed, now, { window });
             sent++;
         }
 
@@ -187,8 +211,13 @@ class MembershipRenewalService {
         if (String(process.env.MEMBERSHIP_RENEWAL_REMINDERS || 'true').toLowerCase() === 'false') return;
 
         const hours = Math.max(1, parseInt(process.env.MEMBERSHIP_RENEWAL_INTERVAL_HOURS, 10) || 6);
-        const tick = () => this.sendDue().catch((error) =>
-            logger.warn('Membership renewal sweep failed', { error: error && error.message }));
+        let running = false;
+        const tick = () => {
+            if (running) return;
+            running = true;
+            this.sendDue().catch((error) => logger.warn('Membership renewal sweep failed', { error: error && error.message }))
+                .finally(() => { running = false; });
+        };
 
         this.timer = setInterval(tick, hours * 60 * 60 * 1000);
         if (this.timer.unref) this.timer.unref();

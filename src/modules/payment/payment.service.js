@@ -10,6 +10,13 @@ const { invalidateMemberContext } = require('../common/memberContext');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 
+// Reconciliation must not send a backlog of failure notices on deployment.
+// A configured rollout boundary survives restarts; the default only includes
+// orders created since this process started. Direct callbacks/returns still
+// verify and report their own attempts, including an older checkout.
+const configuredFailureBoundary = Date.parse(process.env.PAYMENT_FAILURE_NOTICES_FROM || '');
+const failureNoticeBoundary = Number.isFinite(configuredFailureBoundary) ? configuredFailureBoundary : Date.now();
+
 /**
  * Tell a member their membership went live, on every channel they can be
  * reached on.
@@ -95,6 +102,25 @@ const announceActivation = async (member, { amount, orderId, planName, paymentMo
 class PaymentService {
     announceMembershipActivation(member, payload) {
         return announceActivation(member, payload);
+    }
+    async announceCompanyPayment(order, company) {
+        if (!order || order.status !== 'paid' || !company) return;
+        try {
+            const member = await MemberDetails.findById(order.memberId);
+            if (!member || member.deletedAt) return;
+            notificationService.dispatchInBackground('COMPANY_PAYMENT_CONFIRMED', membershipContext.recipientFromMember(member), {
+                companyName: company.businessName || 'Your company',
+                planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
+                reference: order.orderId, orderId: order.orderId,
+                amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
+                paymentId: order.gatewayPaymentId || '', paymentMode: order.paymentMethod || order.provider || '',
+                paidAtLabel: membershipContext.dateLabel(order.paidAt),
+                receiptUrl: `${String(config.frontendUrl || '').replace(/\/+$/, '')}/payment-success?orderId=${encodeURIComponent(order.orderId)}&view=receipt`,
+                data: { orderId: order.orderId, companyId: String(order.companyId || company._id), orderType: 'company_listing' }
+            });
+        } catch (error) {
+            logger.warn('Company payment notice could not be prepared', { orderId: order.orderId, error: error && error.message });
+        }
     }
     constructor() {
         this.apiKey = config.instamojo.apiKey;
@@ -343,8 +369,9 @@ class PaymentService {
                 throw ApiError.badRequest('Missing gateway payment identifiers');
             }
 
-            // Only process successful payments
-            if (payment_status !== 'Credit') {
+            // Pending/unknown status is not a failed payment. Instamojo signs
+            // the explicit Failed status for an unsuccessful payment attempt.
+            if (!['Credit', 'Failed'].includes(payment_status)) {
                 logger.warn('Payment not successful', {
                     paymentId: payment_id,
                     status: payment_status
@@ -354,12 +381,6 @@ class PaymentService {
                     message: 'Payment not successful'
                 };
             }
-
-            logger.info('Processing successful payment', {
-                paymentId: payment_id,
-                email: buyer,
-                amount: amount
-            });
 
             // Look up the order we created before sending the user to Instamojo
             const PaymentOrder = require('./paymentorder.model');
@@ -377,6 +398,25 @@ class PaymentService {
             if (order.status === 'paid') {
                 return { success: true, message: 'Already processed' };
             }
+
+            if (payment_status === 'Failed') {
+                // A delayed Failed webhook may follow a successful retry.
+                const verdict = await this.verifyPaymentWithGateway(
+                    String(order.gatewayRequestId || order.gatewayPaymentId), '', order.amount);
+                if (verdict.paid && ['membership', 'company_listing', 'event_booking'].includes(order.orderType)) {
+                    if (order.orderType === 'event_booking') await this.settleEventBookingOrder(order, verdict.paymentId);
+                    else await this.settleMembershipOrder(order, verdict.paymentId);
+                    return { success: true, message: 'Successful payment retry confirmed' };
+                }
+                await this.announceFailedPaymentAttempt(order, payment_id);
+                return { success: false, message: 'Payment attempt failed' };
+            }
+
+            logger.info('Processing successful payment', {
+                paymentId: payment_id,
+                email: buyer,
+                amount: amount
+            });
 
             const paidAmount = parseFloat(amount);
 
@@ -421,6 +461,47 @@ class PaymentService {
             });
             throw error;
         }
+    }
+
+    /** Called only after a verified provider failure, never from a client status. */
+    async announceFailedPaymentAttempt(order, paymentId) {
+        if (!order || order.provider !== 'instamojo' || order.status !== 'created' || !paymentId
+            || !['membership', 'company_listing', 'event_booking'].includes(order.orderType)) return false;
+
+        let recipient, booking;
+        if (order.orderType === 'event_booking') {
+            booking = await require('../events/eventbooking.model').findOne({ bookingRef: order.bookingRef }).lean();
+            // A different order may have paid this booking while this attempt failed.
+            if (!booking || booking.payment?.status === 'paid' || booking.status === 'cancelled') return false;
+            recipient = { id: booking.userId || undefined, name: booking.bookedBy?.name,
+                email: booking.bookedBy?.email, phone: booking.bookedBy?.phone };
+        } else {
+            const member = await MemberDetails.findById(order.memberId).lean();
+            if (!member) return false; // An account deleted by its owner/admin stays deleted.
+            recipient = { id: member._id, name: member.fullName, email: member.email,
+                phone: member.phoneNumber, whatsapp: member.whatsappNumber,
+                state: member.state, district: member.district, block: member.block };
+        }
+        const PaymentOrder = require('./paymentorder.model');
+        const claimed = await PaymentOrder.findOneAndUpdate({ _id: order._id, provider: 'instamojo',
+            status: 'created', failedPaymentNoticeIds: { $ne: String(paymentId) },
+            $or: [{ settlementStartedAt: { $exists: false } }, { settlementStartedAt: null }]
+        }, { $addToSet: { failedPaymentNoticeIds: String(paymentId) } }, { new: true });
+        if (!claimed) return false;
+
+        // Preserve created: Failed describes this attempt, not all future
+        // attempts on the gateway request. A later Credit must still settle.
+        const isEvent = order.orderType === 'event_booking';
+        const retryUrl = `${String(config.frontendUrl || '').replace(/\/+$/, '')}/payment-success?orderId=${encodeURIComponent(order.orderId)}`;
+        notificationService.dispatchInBackground(isEvent ? 'EVENT_PAYMENT_FAILED' : 'PAYMENT_FAILED', recipient, {
+            orderType: order.orderType, reference: order.orderId, orderId: order.orderId,
+            paymentId: String(paymentId), amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
+            planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
+            eventTitle: booking?.eventTitle || '', bookingRef: order.bookingRef || '', retryUrl,
+            data: { orderId: order.orderId, paymentId: String(paymentId), orderType: order.orderType,
+                eventId: booking?.eventId ? String(booking.eventId) : order.eventId || '', bookingRef: order.bookingRef || '' }
+        });
+        return true;
     }
 
     /**
@@ -490,6 +571,7 @@ class PaymentService {
                     $unset: { settlementToken: '', settlementStartedAt: '' }
                 }, { new: true });
                 if (!settled) throw ApiError.badRequest('Payment confirmation is being retried');
+                await this.announceCompanyPayment(settled, company);
                 return { success: true, message: 'Company publishing payment confirmed' };
             }
             let member = await MemberDetails.findById(claimed.memberId);
@@ -545,6 +627,15 @@ class PaymentService {
         const amountOk = (value) => Number.isFinite(Number(value)) && Number(value) > 0
             && Number(value) + 0.001 >= Number(expectedAmount);
 
+        const failed = new Set();
+        let unsettledAttempt = false;
+        const rememberFailure = (payment, fallbackId = '') => {
+            if (!payment || typeof payment !== 'object') return;
+            const status = String(payment.status || '').toLowerCase();
+            const id = String(payment.payment_id || fallbackId || '');
+            if (status === 'failed' && id) failed.add(id);
+            else unsettledAttempt = true;
+        };
         try {
             if (paymentId) {
                 // A stale browser payment ID must not prevent checking our request.
@@ -557,6 +648,7 @@ class PaymentService {
                     if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
                         return { paid: true, paymentId: payment.payment_id || paymentId };
                     }
+                    rememberFailure(payment, paymentId);
                 } catch { /* Still verify the stored request below. */ }
             }
 
@@ -569,6 +661,7 @@ class PaymentService {
             const credited = payments.find((p) => p && typeof p === 'object'
                 && p.payment_id && String(p.status).toLowerCase() === 'credit' && amountOk(p.amount));
             if (credited) return { paid: true, paymentId: credited.payment_id };
+            for (const payment of payments.filter(p => p && typeof p === 'object')) rememberFailure(payment);
             // Some API responses contain only IDs. Fetch the payment itself.
             for (const id of payments.filter(p => typeof p === 'string')) {
                 const detail = await axios.get(
@@ -579,7 +672,12 @@ class PaymentService {
                 if (payment && String(payment.status).toLowerCase() === 'credit' && amountOk(payment.amount)) {
                     return { paid: true, paymentId: payment.payment_id || id };
                 }
+                if (!payment) unsettledAttempt = true;
+                else rememberFailure(payment, id);
             }
+            // Request status Sent/Completed and an abandoned checkout alone do
+            // not prove failure. Explicit failed attempts must come from the API.
+            if (failed.size && !unsettledAttempt) return { paid: false, failedPaymentIds: [...failed] };
         } catch (error) {
             logger.warn('Instamojo payment verification failed', {
                 paymentRequestId, error: error && error.message
@@ -618,6 +716,10 @@ class PaymentService {
                             orderId: order.orderId, bookingRef: order.bookingRef, error: error && error.message
                         });
                     });
+                } else {
+                    for (const failedPaymentId of verdict.failedPaymentIds || []) {
+                        await this.announceFailedPaymentAttempt(order, failedPaymentId);
+                    }
                 }
             }
         }
@@ -707,7 +809,15 @@ class PaymentService {
         for (const order of orders || []) {
             try {
                 const verdict = await this.verifyPaymentWithGateway(String(order.gatewayRequestId || order.gatewayPaymentId), '', order.amount);
-                if (!verdict.paid) continue;
+                if (!verdict.paid) {
+                    const createdAt = new Date(order.createdAt).getTime();
+                    if (Number.isFinite(createdAt) && createdAt >= failureNoticeBoundary) {
+                        for (const failedPaymentId of verdict.failedPaymentIds || []) {
+                            await this.announceFailedPaymentAttempt(order, failedPaymentId);
+                        }
+                    }
+                    continue;
+                }
                 if (order.orderType !== 'event_booking') await this.settleMembershipOrder(order, verdict.paymentId);
                 else await this.settleEventBookingOrder(order, verdict.paymentId);
                 settled += 1;

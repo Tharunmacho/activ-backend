@@ -138,7 +138,8 @@ const whereOf = (ctx = {}, { withLink = true } = {}) => {
 };
 
 /** The organiser, only the parts the editor saved: "K. Ravi, +91 82201 12188, a@b.in". */
-const contactOf = (ctx = {}) => [one(ctx.contactName, 80), prettyPhone(ctx.contactPhone), one(ctx.contactEmail, 120)]
+const contactOf = (ctx = {}) => [one(ctx.contactName, 80), prettyPhone(ctx.contactPhone),
+    ctx.contactEmail === ctx.supportEmail ? '' : one(ctx.contactEmail, 120)]
     .filter(Boolean).join(', ');
 
 /** The organiser's "Please note" lines, as typed, on one line. */
@@ -178,6 +179,8 @@ const detailItems = (kind, ctx = {}) => {
     const showNames = !ctx.forParticipant && (names.length > 1 || (names.length === 1 && names[0] !== nameOf(ctx)));
     const items = [];
     const add = (key, text, rank) => { if (text) items.push({ key, text, rank }); };
+    // Keep the queries inbox even when optional details need shortening.
+    const addSupport = () => add('support', ctx.supportEmail ? `Queries: ${one(ctx.supportEmail, 120)}` : '', 0);
 
     if (kind === 'cancelled') {
         add('seats', `${seatsOf(ctx)} released`, 0);
@@ -187,6 +190,7 @@ const detailItems = (kind, ctx = {}) => {
             add('fee', paid.length ? `Amount: ${paid.join(', ')}` : '', 3);
         }
         add('contact', contactOf(ctx) ? `Organiser: ${contactOf(ctx)}` : '', 2);
+        addSupport();
         return items;
     }
 
@@ -194,6 +198,7 @@ const detailItems = (kind, ctx = {}) => {
         add('seats', `${seatsOf(ctx)} requested`, 0);
         add('language', ctx.language ? `Language: ${one(ctx.language, 40)}` : '', 3);
         add('contact', contactOf(ctx) ? `Organiser: ${contactOf(ctx)}` : '', 2);
+        addSupport();
         return items;
     }
 
@@ -205,6 +210,7 @@ const detailItems = (kind, ctx = {}) => {
     add('language', ctx.language ? `Language: ${one(ctx.language, 40)}` : '', 4);
     add('topic', ctx.topic ? `Topic: ${clauseOf(ctx.topic, 120)}` : '', 8);
     add('contact', contactOf(ctx) ? `Organiser: ${contactOf(ctx)}` : '', 2);
+    addSupport();
     add('notes', notesOf(ctx) ? `Note: ${notesOf(ctx)}` : '', 3);
     add('video', ctx.videoUrl ? `Event video: ${one(ctx.videoUrl, 300)}` : '', 9);
     add('whatsapp', ctx.whatsappChannelUrl ? `${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)}: ${ctx.whatsappChannelUrl}` : '', 0);
@@ -482,7 +488,7 @@ const READABLE_BODIES = Object.fromEntries(Object.keys(READABLE_NAMES).map((mess
 const firstDocument = (ctx = {}) => (ctx.attachments || []).find(a => a.url && (/\.pdf(?:\?|$)/i.test(a.url) || /application\/pdf/i.test(a.type || '')));
 const readableLayout = (ctx = {}) => [ctx.whatsappChannelUrl ? 'whatsapp' : '', firstDocument(ctx) ? 'document' : '', ctx.videoUrl ? 'video' : ''].filter(Boolean).join('_');
 const readableTemplateName = (message, ctx = {}, variant = 'image', layout = readableLayout(ctx)) => {
-    return layout ? `activ_evt_${message}_${layout}_${variant}_${layout.includes('document') ? 'v3' : 'v2'}` : READABLE_NAMES[message][variant];
+    return layout ? `activ_evt_${message}_${layout}_${variant}_v4` : READABLE_NAMES[message][variant];
 };
 const readableBody = (message, layout = '') => {
     const original = READABLE_BODIES[message];
@@ -492,7 +498,8 @@ const readableBody = (message, layout = '') => {
     if (layout.includes('whatsapp')) sections.push(`*{{${next++}}}:*\n{{${next++}}}`);
     if (layout.includes('document')) sections.push(`*Supporting PDF:* {{${next++}}}\n*Open document:* {{${next++}}}`);
     if (layout.includes('video')) sections.push(`*Event video:*\n{{${next++}}}`);
-    return original.replace('Please keep your booking ID', sections.join('\n\n') + '\n\nPlease keep your booking ID');
+    return original.replace('Please keep your booking ID', sections.join('\n\n')
+        + '\n\nEvent queries: events@activ.org.in\n\nPlease keep your booking ID');
 };
 const readableParams = (message, ctx = {}, layout = readableLayout(ctx)) => {
     const body = readableBody(message, layout);
@@ -512,7 +519,8 @@ const readableParams = (message, ctx = {}, layout = readableLayout(ctx)) => {
         one(ctx.timeLabel, 60) || 'Time to be confirmed',
         ctx.isOnline ? whereOf(ctx, { withLink: false }) : one(ctx.venueLabel || ctx.venue, 220) || 'To be announced by the organiser',
         seatsOf(ctx), feeOf(ctx) || 'See payment details in your booking',
-        ref, one(ctx.registrationNo, 40) || ref, link,
+        ref, one(ctx.registrationNo, 40) || ref,
+        ctx.supportEmail && !layout ? `${link} | Event queries: ${one(ctx.supportEmail, 120)}` : link,
         ...(layout.includes('whatsapp') ? [require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl), one(ctx.whatsappChannelUrl, 400)] : []),
         ...(layout.includes('document') ? [one(document.name, 90) || 'Event document.pdf', one(document.url, 400)] : []),
         ...(layout.includes('video') ? [one(ctx.videoUrl, 400)] : []),

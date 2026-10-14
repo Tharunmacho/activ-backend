@@ -88,7 +88,9 @@ const buildLogQuery = ({ channel, status, event, search, delivery, group, eventI
     if (g === 'automation' || g === 'booking' || g === 'membership' || g === 'account') {
         if (!ch) and.push({ channel: { $in: ['email', 'whatsapp'] } });
         and.push({ event: { $nin: NOT_AUTOMATION } });
-        if (g === 'booking') and.push({ event: { $regex: BOOKING_EVENT_RE.source } });
+        // The events tab covers the full event journey, including legacy
+        // registrations, schedule changes, cancellations and failed payments.
+        if (g === 'booking') and.push({ event: { $regex: '^EVENT_' } });
         if (g === 'membership') {
             and.push({ event: { $not: BOOKING_EVENT_RE } }, { event: { $not: /^EVENT_/ } }, { event: { $nin: ACCOUNT_EVENTS } });
         }

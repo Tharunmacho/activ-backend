@@ -30,7 +30,7 @@ Booking.collection.aggregate = pipeline => {
 };
 Booking.find = () => query([booking]);
 Booking.countDocuments = async () => 1;
-Booking.aggregate = async pipeline => pipeline[0].$match.eventId?.$in
+Booking.aggregate = async pipeline => pipeline[0]?.$match?.eventId?.$in
     ? [{ _id: deletedId, bookings: 1, seats: 1, collected: 500, paidBookings: 1 }]
     : [{ _id: { pay: 'paid', live: true, admissible: true }, bookings: 1, seats: 1, amount: 500 }];
 Booking.collection.find = () => ({ sort() { return this; }, toArray: async () => [booking] });

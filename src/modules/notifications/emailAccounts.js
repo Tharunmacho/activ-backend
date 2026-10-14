@@ -3,7 +3,11 @@ const config = require('../../config');
 const categoryForEvent = (event = '') => /^EVENT_/.test(event) ? 'events' : 'membership';
 const accountFor = (category = 'membership') => {
     const base = config.email;
-    if (category === 'events') return base;
+    if (category === 'events') {
+        const office = require('./eventContact');
+        return { ...base, defaultFrom: office.email, from: `${office.name} <${office.email}>`,
+            fromName: office.name, supportAddress: office.email, useRegionalFrom: false };
+    }
     const fromAddress = require('./membershipContact').email;
     // Like events@, the member address uses the existing authenticated relay.
     // A separately hosted mailbox can opt into its own SMTP transport.

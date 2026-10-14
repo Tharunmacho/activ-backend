@@ -1654,7 +1654,7 @@ class EventBookingService {
      */
     async messageContext(booking, kind = 'confirmed', extra = {}) {
         const b = booking && booking.toObject ? booking.toObject() : (booking || {});
-        const event = (await Event.findById(b.eventId).lean().catch(() => null)) || {};
+        const event = extra.eventSnapshot || (await Event.findById(b.eventId).lean().catch(() => null)) || {};
 
         const startAt = event.startAt || b.eventStartAt || null;
         const endAt = event.endAt || null;
@@ -1682,7 +1682,8 @@ class EventBookingService {
                 : `Paid to the organiser${modeLabel ? ` (${modeLabel})` : ''}`;
         }
 
-        const contactLine = [event.contactName, event.contactPhone, event.contactEmail]
+        const contactEmail = require('../notifications/eventContact').email;
+        const contactLine = [event.contactName, event.contactPhone, contactEmail]
             .filter(Boolean).join(' · ');
 
         const eventId = String(b.eventId || '');
@@ -1751,7 +1752,9 @@ class EventBookingService {
              * `joinUrl` stays empty: it is reserved for the joining link a
              * platform webhook will hand back per attendee later.
              */
-            registerUrl: isOnline && (kind === 'confirmed' || kind === 'reminder') ? (event.onlineUrl || '') : '',
+            registerUrl: isOnline && (kind === 'confirmed' || kind === 'reminder'
+                || (kind === 'updated' && b.status === 'active' && ['paid', 'not_required'].includes(payment.status)))
+                ? (event.onlineUrl || '') : '',
             joinUrl: '',
             /*
              * The event's own poster, as an ABSOLUTE address — an email and a
@@ -1785,7 +1788,7 @@ class EventBookingService {
             contactLine,
             contactName: event.contactName || '',
             contactPhone: event.contactPhone || '',
-            contactEmail: event.contactEmail || '',
+            contactEmail,
             viewUrl: eventId && b.bookingRef
                 ? appUrl(`/events/${publicId}/book?ref=${encodeURIComponent(b.bookingRef)}`)
                 : '',
@@ -1810,7 +1813,9 @@ class EventBookingService {
                     timeZone: TZ, day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit'
                 })
                 : '',
-            data: { bookingRef: b.bookingRef, eventId, seats },
+            data: { bookingRef: b.bookingRef, eventId, seats,
+                ...(extra.changeId ? { changeId: extra.changeId, changeSnapshotKey: extra.changeSnapshotKey,
+                    cancelledScope: extra.cancelledScope, bookingStatus: b.status } : {}) },
             ...extra
         };
     }
@@ -1835,7 +1840,7 @@ class EventBookingService {
         if (!booking) return;
         const resolvedKind = kind || (booking.status === 'waitlist' ? 'waitlist' : 'confirmed');
 
-        (async() => {
+        return (async() => {
             const email = (booking.bookedBy && booking.bookedBy.email) || '';
             const phone = (booking.bookedBy && booking.bookedBy.phone) || '';
             if (!email && !phone) return;
@@ -1864,6 +1869,8 @@ class EventBookingService {
                 confirmed: 'EVENT_BOOKING_CONFIRMED',
                 cancelled: 'EVENT_BOOKING_CANCELLED',
                 reminder: 'EVENT_BOOKING_REMINDER',
+                updated: 'EVENT_UPDATED',
+                event_cancelled: 'EVENT_CANCELLED',
                 waitlist: 'EVENT_BOOKING_WAITLISTED'
             }[resolvedKind] || 'EVENT_BOOKING_CONFIRMED';
 
@@ -1946,23 +1953,22 @@ class EventBookingService {
                 if (!toPhone || !ctx.whatsappChannelUrl || !['confirmed', 'reminder'].includes(resolvedKind)) return;
                 const template = require('../../config').botbee.templates.eventChannel;
                 if (!template || template === 'none') return;
-                const params = [ctx.eventTitle, ctx.bookingRef, ctx.whatsappChannelUrl];
-                const sent = await require('../notifications/whatsappTemplate').sendTemplateMessage(toPhone, template, params, 'en', '', { noHeader: true })
-                    .catch((error) => ({ success: false, error: error.message }));
+                const result = await require('./eventChannel').sendChannel(toPhone, toName, ctx);
+                const { outcome: sent, params } = result;
                 await notificationService.log({
                     user: booking.userId || null, event: `EVENT_CHANNEL_${resolvedKind.toUpperCase()}`,
-                    channel: 'whatsapp', recipient: sent.to || toPhone, templateId: template,
+                    channel: 'whatsapp', recipient: sent.to || toPhone, templateId: result.template,
                     subject: ctx.eventTitle, status: sent.success ? 'sent' : 'failed', mock: !!sent.mock,
                     providerMessageId: sent.messageId, lastError: sent.error, provider: sent.provider,
                     deliveryStatus: sent.mock ? undefined : sent.success ? 'accepted' : 'failed',
                     bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
-                    recipientName: str(toName), data: { params, bookingRef: ctx.bookingRef },
+                    recipientName: str(toName), data: { params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
                 }).catch(() => {});
             };
             await sendChannel(phone, (booking.bookedBy && booking.bookedBy.name) || '');
             await sendDocuments(phone, (booking.bookedBy && booking.bookedBy.name) || '');
 
-            if (!['confirmed', 'reminder', 'cancelled'].includes(resolvedKind)) return;
+            if (!['confirmed', 'reminder', 'cancelled', 'updated', 'event_cancelled'].includes(resolvedKind)) return;
             const seen = new Set([phoneKey(phone), str(email).toLowerCase()].filter(Boolean));
             const people = (booking.participants || []).filter((p) => {
                 const keys = [phoneKey(p && p.phone), str(p && p.email).toLowerCase()].filter(Boolean);
@@ -1973,6 +1979,8 @@ class EventBookingService {
             const participantEvent = {
                 confirmed: 'EVENT_PARTICIPANT_CONFIRMED',
                 reminder: 'EVENT_PARTICIPANT_REMINDER',
+                updated: 'EVENT_UPDATED',
+                event_cancelled: 'EVENT_CANCELLED',
                 cancelled: 'EVENT_PARTICIPANT_CANCELLED'
             }[resolvedKind];
             for (const person of people) {
@@ -2097,15 +2105,15 @@ class EventBookingService {
             const ctx = await this.messageContext(booking, kind);
             const template = require('../../config').botbee.templates.eventChannel;
             if (!ctx.whatsappChannelUrl || !template || template === 'none') return { skipped: true, reason: 'Event channel is not configured' };
-            const params = [ctx.eventTitle, ctx.bookingRef, ctx.whatsappChannelUrl];
-            const outcome = await require('../notifications/whatsappTemplate').sendTemplateMessage(row.recipient, template, params, 'en', '', { noHeader: true });
+            const result = await require('./eventChannel').sendChannel(row.recipient, row.recipientName, ctx);
+            const { outcome, params } = result;
             const fresh = await notificationService.log({
                 user: row.user, event, channel: 'whatsapp', recipient: outcome.to || row.recipient,
-                templateId: template, subject: ctx.eventTitle, status: outcome.success ? 'sent' : 'failed',
+                templateId: result.template, subject: ctx.eventTitle, status: outcome.success ? 'sent' : 'failed',
                 mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error, provider: outcome.provider,
                 deliveryStatus: outcome.mock ? undefined : outcome.success ? 'accepted' : 'failed',
                 bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
-                recipientName: row.recipientName, resendOf: row._id, data: { params, bookingRef: ctx.bookingRef },
+                recipientName: row.recipientName, resendOf: row._id, data: { params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
             });
             return { row: fresh, outcome };
         }

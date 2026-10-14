@@ -417,7 +417,7 @@ module.exports = {
                 bookingFlexPlain: real(process.env.BOTBEE_TPL_BOOKING_FLEX_PLAIN) || 'activ_evt_confirmed_readable_plain_v1',
                 webinarFlex: real(process.env.BOTBEE_TPL_WEBINAR_FLEX) || 'activ_evt_online_readable_v1',
                 webinarFlexPlain: real(process.env.BOTBEE_TPL_WEBINAR_FLEX_PLAIN) || 'activ_evt_online_readable_plain_v1',
-                eventChannel: real(process.env.BOTBEE_TPL_EVENT_CHANNEL) || '',
+                eventChannel: real(process.env.BOTBEE_TPL_EVENT_CHANNEL) || 'activ_event_channel_v2',
                 reminderFlex: real(process.env.BOTBEE_TPL_REMINDER_FLEX) || 'activ_evt_reminder_v1',
                 reminderFlexPlain: real(process.env.BOTBEE_TPL_REMINDER_FLEX_PLAIN) || 'activ_evt_reminder_plain_v1',
                 cancelFlex: real(process.env.BOTBEE_TPL_CANCEL_FLEX) || 'activ_evt_cancelled_v1',

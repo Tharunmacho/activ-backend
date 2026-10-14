@@ -246,6 +246,9 @@ const memberDetailsSchema = new mongoose.Schema({
         type: [String],
         default: undefined
     },
+    planNotificationState: { type: new mongoose.Schema({
+        planId: String, planName: String, minYears: Number, initializedAt: Date, notifiedAt: Date
+    }, { _id: false }), default: undefined },
     /*
      * THE "RENEW NOW" MESSAGES AFTER A MEMBERSHIP HAS EXPIRED — twice a month
      * (the 1st and the 15th) while this is on. Only the State Admin (and the

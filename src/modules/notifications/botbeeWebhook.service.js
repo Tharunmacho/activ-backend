@@ -391,7 +391,7 @@ const eventsReply = async({ member = null, phone = '' } = {}) => {
                 + 'We will message you as soon as the next one is announced.');
         }
 
-        parts.push(`🌐 Full programme: ${config.frontendUrl}/events\n`
+        parts.push(`Event queries: ${accountFor('events').supportAddress}\n\n🌐 Full programme: ${config.frontendUrl}/events\n`
             + (member ? 'Reply *STATUS* for your membership · *HELP* for ACTIV Membership support'
                 : `Not a member yet? Join ACTIV at ${config.frontendUrl}`));
 
@@ -399,7 +399,7 @@ const eventsReply = async({ member = null, phone = '' } = {}) => {
     } catch (error) {
         logger.warn('WhatsApp bot could not list events', { error: error && error.message });
         return `Hello${who ? ` ${who}` : ''}, the events list is unavailable right now. `
-            + `You can see the full programme at ${config.frontendUrl}/events`;
+            + `You can see the full programme at ${config.frontendUrl}/events\n\nEvent queries: ${accountFor('events').supportAddress}`;
     }
 };
 
@@ -570,9 +570,21 @@ const handleInbound = async(body = {}, options = {}) => {
     const sender = options.provider === 'meta' ? require('./metaCloud.service') : botbeeService;
     const sends = [];
     const chunks = replyChunks(reply);
+    const inboundTime = options.inboundAt ? new Date(options.inboundAt) : null;
+    const inboundAt = inboundTime && Number.isFinite(inboundTime.getTime()) ? inboundTime.toISOString() : undefined;
+    let priorPartFailed = false;
+    if (typeof options.beforeReplySend === 'function') await options.beforeReplySend();
     for (let i = 0; i < chunks.length; i++) {
-        const sent = await sender.sendTextMessage(incoming.from, chunks[i], { replyTo: incoming.messageId });
-        sends.push(sent);
+        // A failed part stops provider calls, but not persistence. Otherwise a
+        // long reply would lose its remaining text forever: the inbound receipt
+        // must not replay the already accepted prefix. The delivery worker can
+        // send each deferred part only after all earlier parts are accepted.
+        const deferred = priorPartFailed;
+        const sent = deferred
+            ? { success: false, to: String(incoming.from),
+                error: 'Earlier reply part temporarily failed; this part has not been sent.' }
+            : await sender.sendTextMessage(incoming.from, chunks[i], { replyTo: incoming.messageId });
+        if (!deferred) sends.push(sent);
         await notificationService.log({
             user: identity && !identity.ambiguous && identity.member && identity.member._id,
             event: 'BOT_REPLY',
@@ -584,10 +596,12 @@ const handleInbound = async(body = {}, options = {}) => {
             providerMessageId: sent.messageId,
             lastError: sent.error,
             provider: options.provider === 'meta' ? 'meta' : 'botbee',
+            deliveryStatus: sent.mock ? undefined : sent.success ? 'accepted' : 'failed',
             data: { inbound: String(incoming.text).slice(0, 500), inboundMessageId: incoming.messageId,
-                command, text: chunks[i], part: i + 1, parts: chunks.length }
+                inboundAt, command, text: chunks[i], part: i + 1, parts: chunks.length,
+                replyAttempted: !deferred, replyDeferred: deferred }
         });
-        if (!sent.success) break;
+        if (!sent.success) priorPartFailed = true;
     }
     const sent = { ...sends[sends.length - 1], success: sends.length === chunks.length && sends.every(s => s.success),
         messageIds: sends.map(s => s.messageId).filter(Boolean) };

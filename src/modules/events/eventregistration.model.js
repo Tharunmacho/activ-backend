@@ -92,6 +92,7 @@ const eventRegistrationSchema = new mongoose.Schema({
 
     registeredAt: { type: Date, default: Date.now },
     cancelledAt: { type: Date, default: null },
+    eventChangesSent: { type: [String], default: [] },
 
     /**
      * What this seat cost and whether it has been paid for (EVT-002).

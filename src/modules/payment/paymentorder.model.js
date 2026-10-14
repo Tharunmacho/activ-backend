@@ -145,6 +145,8 @@ const paymentOrderSchema = new mongoose.Schema({
     },
     /** Preserve the request ID after settlement for repeated webhooks. */
     gatewayRequestId: { type: String, trim: true, default: '', index: true },
+    /** Failed attempts already announced; a later attempt may still pay this request. */
+    failedPaymentNoticeIds: { type: [String], default: [] },
     /** Recoverable claim shared by the webhook, return page and reconcile. */
     settlementToken: { type: String, default: '' },
     settlementStartedAt: { type: Date },

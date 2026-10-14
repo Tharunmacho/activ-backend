@@ -103,10 +103,11 @@ const testRealInfoOnly = () => {
         check(`${label}: nothing invented`, hits.length === 0, hits.join(', '));
     }
 
-    // The reported webinar: "👤 Name: ACTIV Office" must not appear, and the
-    // real email the editor saved must.
+    // Event queries always use the events inbox, even when an organiser saved
+    // a different address. Missing organiser names must not be invented.
     const webinar = templates.render('EVENT_BOOKING_CONFIRMED', cases[1][2]);
-    check('webinar text keeps the real organiser email', /online@activ\.org\.in/.test(webinar.whatsapp.text));
+    check('webinar text uses the events queries inbox', /events@activ\.org\.in/.test(webinar.whatsapp.text)
+        && !/online@activ\.org\.in/.test(webinar.whatsapp.text));
     check('webinar text has no Name line at all', !/Name:\*/.test(webinar.whatsapp.text));
     const chain = chainOf(webinar.whatsapp).map((s) => s.template);
     check('the 3-contact-line webinar template is skipped when the name is blank',
@@ -116,9 +117,10 @@ const testRealInfoOnly = () => {
     check('no template parameter is blank or a dash placeholder for contact',
         chainOf(webinar.whatsapp).every((s) => (s.params || []).every((p) => String(p).trim() !== '')));
 
-    // Organiser left everything blank: no contact block, no notes heading.
+    // A blank organiser still has the official events support inbox.
     const bare = templates.render('EVENT_BOOKING_CONFIRMED', baseCtx());
-    check('no contact → no "Need help" block', !/Need help/.test(bare.whatsapp.text));
+    check('no organiser contact → events support remains available', /events@activ\.org\.in/.test(bare.whatsapp.text)
+        && !/Name:\*/.test(bare.whatsapp.text));
     check('no notes → no "Before you come" advice invented', !/Before you come|Please note/.test(bare.whatsapp.text));
     check('no notes → email has no invented advice box', !/Carry|arrive/i.test(bare.email.afterHtml || ''));
     check('no reporting-time row invented', !(bare.email.facts || []).some((f) => /Reporting/.test(f.label)));
@@ -326,6 +328,14 @@ const testQuery = () => {
     const json = JSON.stringify(q);
     check('automation excludes the bot and in-app', /BOT_REPLY/.test(json) && /"email","whatsapp"/.test(json));
     const searchOr = q.$and[q.$and.length - 1].$or;
+    const eventFilter = deliveryQuery.buildLogQuery({ group: 'booking' }).$and.find(c => c.event?.$regex).event.$regex;
+    for (const event of ['EVENT_UPDATED', 'EVENT_CANCELLED', 'EVENT_PAYMENT_FAILED', 'EVENT_REGISTERED', 'EVENT_CHANNEL_REMINDER']) {
+        check(`events filter includes ${event}`, new RegExp(eventFilter).test(event));
+    }
+    const memberFilters = deliveryQuery.buildLogQuery({ group: 'membership' }).$and.filter(c => c.event).map(c => c.event);
+    for (const event of ['COMPANY_PAYMENT_CONFIRMED', 'MEMBERSHIP_PLAN_ADVANCED', 'MEMBERSHIP_STATUS_CHANGED']) {
+        check(`membership filter includes ${event}`, memberFilters.every(rule => !rule.$nin?.includes(event) && !rule.$not?.test(event)));
+    }
     check('a phone search matches the last ten digits',
         searchOr.some((c) => c.recipient && c.recipient.source === '9940100000$'),
         searchOr.map((c) => String(Object.values(c)[0])).join(' '));

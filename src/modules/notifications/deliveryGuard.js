@@ -34,6 +34,8 @@ const SWEEP_MINUTES = Math.max(2, parseInt(process.env.NOTIFICATION_RETRY_INTERV
 const HEALTH_MINUTES = 15;
 const AUTO_WINDOW_HOURS = 24;
 const MAX_AUTO_RETRIES = 3;
+const CANDIDATE_PAGE_SIZE = 50;
+const MAX_PROVIDER_ATTEMPTS_PER_RUN = 200;
 const NEVER_RETRY = ['PASSWORD_RESET', 'ADMIN_WELCOME'];
 
 /** Causes that a later attempt can succeed past. */
@@ -118,30 +120,55 @@ const rootOf = async(NotificationLog, row) => {
  * The failed rows to try again: the LATEST attempt of each message (a row that
  * has been re-sent is represented by its newer copy), healable, not mock.
  */
-const candidates = async(NotificationLog, { sinceHours, limit = 50 }) => NotificationLog.find({
-    channel: { $in: ['email', 'whatsapp'] },
-    mock: { $ne: true },
-    $or: [{ deliveryStatus: 'failed' }, { deliveryStatus: { $exists: false }, status: 'failed' }],
-    resentAs: { $exists: false },
-    event: { $nin: NEVER_RETRY },
-    createdAt: { $gte: new Date(Date.now() - sinceHours * 60 * 60 * 1000) },
-}).sort({ createdAt: 1 }).limit(limit).lean();
+async function* candidates(NotificationLog, { sinceHours }) {
+    // A fixed window makes the scan finite even while new failures arrive. A
+    // keyset, rather than offsets, remains stable as successful retries leave
+    // the failed set. Skipped old rows must not hide eligible newer failures.
+    const through = new Date();
+    const since = new Date(through.getTime() - sinceHours * 60 * 60 * 1000);
+    let cursor;
+    while (true) {
+        const rows = await NotificationLog.find({
+            channel: { $in: ['email', 'whatsapp'] },
+            mock: { $ne: true },
+            'data.autoRetryDisabled': { $ne: true },
+            $or: [{ deliveryStatus: 'failed' }, { deliveryStatus: { $exists: false }, status: 'failed' }],
+            resentAs: { $exists: false },
+            event: { $nin: NEVER_RETRY },
+            createdAt: { $gte: since, $lte: through },
+            ...(cursor ? { $and: [{ $or: [
+                { createdAt: { $gt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, _id: { $gt: cursor._id } },
+            ] }] } : {}),
+        }).sort({ createdAt: 1, _id: 1 }).limit(CANDIDATE_PAGE_SIZE).lean();
+        for (const row of rows) yield row;
+        if (rows.length < CANDIDATE_PAGE_SIZE) return;
+        const last = rows[rows.length - 1];
+        cursor = { createdAt: last.createdAt, _id: last._id };
+    }
+}
 
 /**
  * Try failed messages again.
  *   auto = true   the sweep: healable causes only, ≤ 3 tries per message, backing off.
  *   auto = false  the Super Admin's bulk button: healable causes, no try budget.
  */
-const retryFailed = async({ sinceHours = AUTO_WINDOW_HOURS, auto = false, limit = 50 } = {}) => {
+const runRetryFailed = async({ sinceHours = AUTO_WINDOW_HOURS, auto = false, limit = 50 } = {}) => {
     const NotificationLog = require('./notificationLog.model');
     const notificationService = require('./notification.service');
     const summary = { checked: 0, retried: 0, sent: 0, stillFailed: 0, skipped: 0, permanent: 0, waitingForEmail: 0 };
+    const attemptLimit = Math.min(MAX_PROVIDER_ATTEMPTS_PER_RUN, Math.max(1, Math.trunc(Number(limit)) || 50));
 
-    const rows = await candidates(NotificationLog, { sinceHours, limit });
-    for (const row of rows) {
+    for await (const row of candidates(NotificationLog, { sinceHours })) {
         summary.checked += 1;
         if (!isHealable(row)) { summary.permanent += 1; continue; }
         if (row.channel === 'email' && health.email.ok === false) { summary.waitingForEmail += 1; continue; }
+        // Deferred reply parts have not contacted the provider yet. Waiting for
+        // their accepted prefix must not spend their finite retry budget.
+        if (row.event === 'BOT_REPLY' && await require('./retryEligibility').reasonToSkip(row)) {
+            summary.skipped += 1;
+            continue;
+        }
 
         const root = await rootOf(NotificationLog, row);
         const tries = Number((root.autoRetry && root.autoRetry.count) || 0);
@@ -152,10 +179,16 @@ const retryFailed = async({ sinceHours = AUTO_WINDOW_HOURS, auto = false, limit 
             if (last && Date.now() - last < SWEEP_MINUTES * 60 * 1000 * Math.pow(3, tries - 1)) { summary.skipped += 1; continue; }
         }
 
-        await NotificationLog.updateOne(
-            { _id: root._id },
+        // Compare the count we read before claiming this attempt. If another
+        // worker claimed it first, or MongoDB cannot confirm our claim, do not
+        // contact the provider. A missing legacy count is the same as zero.
+        const claimed = await NotificationLog.updateOne(
+            { _id: root._id, ...(tries === 0
+                ? { $or: [{ 'autoRetry.count': 0 }, { 'autoRetry.count': { $exists: false } }] }
+                : { 'autoRetry.count': tries }) },
             { $set: { 'autoRetry.lastAt': new Date() }, $inc: { 'autoRetry.count': 1 } }
         ).catch(() => null);
+        if (!claimed || !claimed.matchedCount) { summary.skipped += 1; continue; }
 
         let result = null;
         try {
@@ -163,17 +196,31 @@ const retryFailed = async({ sinceHours = AUTO_WINDOW_HOURS, auto = false, limit 
         } catch (err) {
             result = { outcome: { success: false, error: err && err.message } };
         }
+        if (result && result.skipped) {
+            summary.skipped += 1;
+            continue;
+        }
         summary.retried += 1;
-        if (result && result.skipped) summary.skipped += 1;
-        else if (result && result.outcome && result.outcome.success) summary.sent += 1;
+        if (result && result.outcome && result.outcome.success) summary.sent += 1;
         else summary.stillFailed += 1;
 
         // Gentle on the providers: one message at a time.
         await new Promise((r) => setTimeout(r, 400));
+        if (summary.retried >= attemptLimit) break;
     }
 
     if (summary.retried) logger.info(auto ? 'Automatic notification retry' : 'Bulk notification retry', summary);
     return summary;
+};
+
+let automaticSweepRunning = false;
+const retryFailed = async (options = {}) => {
+    if (!options.auto) return runRetryFailed(options);
+    if (automaticSweepRunning) return { checked: 0, retried: 0, sent: 0, stillFailed: 0,
+        skipped: 0, permanent: 0, waitingForEmail: 0, alreadyRunning: true };
+    automaticSweepRunning = true;
+    try { return await runRetryFailed(options); }
+    finally { automaticSweepRunning = false; }
 };
 
 /* ---------------------------------------------------------------- schedule */

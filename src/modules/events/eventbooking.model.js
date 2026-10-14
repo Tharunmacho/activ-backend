@@ -296,6 +296,9 @@ const eventBookingSchema = new mongoose.Schema({
      */
     remindersSent: { type: [Number], default: [] },
 
+    // Saved event revisions already announced to this booking, including withdrawal.
+    eventChangesSent: { type: [String], default: [] },
+
     /**
      * When the CONFIRMATION was sent. Claimed with a conditional update before
      * sending (`announce`), so a paid booking is confirmed exactly once even

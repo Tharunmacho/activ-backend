@@ -2379,12 +2379,13 @@ class CmsService {
         // basics form does not clear an agenda entered on the detail form.
         Object.assign(update, eventDetailUpdates(payload));
 
-        const before = await Event.findById(id).select('bannerUrl').lean().catch(() => null);
+        const before = await Event.findById(id).lean().catch(() => null);
 
         const doc = await Event.findOneAndUpdate({ _id: id, archivedAt: null }, { $set: update }, { new: true, runValidators: true }).lean();
         if (!doc) throw ApiError.notFound('Event not found');
 
         if (before) await reclaim(before.bannerUrl);
+        require('../events/eventChanges.service').announceChange(before, doc);
         return doc;
     }
 

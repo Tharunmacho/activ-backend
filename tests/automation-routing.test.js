@@ -17,7 +17,17 @@ async function main() {
     assert.equal(accounts.accountFor('membership').defaultFrom, 'member@activ.org.in');
     const email = require('../src/modules/notifications/email.service');
     assert.equal(email.resolveSender(null, null, 'membership').fromEmail, 'member@activ.org.in');
-    assert.equal(email.resolveSender(null, null, 'events').fromEmail, config.email.defaultFrom);
+    assert.equal(email.resolveSender(null, null, 'events').fromEmail, 'events@activ.org.in');
+    for (const [category, inbox] of [['events', 'events@activ.org.in'], ['membership', 'member@activ.org.in']]) {
+        const sender = email.resolveSender({ replyTo: 'old-admin@example.test', fromName: 'Old office' }, 'old-support@example.test', category);
+        assert.equal(sender.replyTo, inbox);
+        assert.equal(sender.fromEmail, inbox);
+        const html = email.buildHtmlTemplate({ title: 'Test', bodyHtml: '<p>Test</p>', category,
+            contact: { nearest: { regionName: 'Old office', tierLabel: 'District' } } });
+        assert.ok(html.includes(inbox));
+        assert.ok(!html.includes('enquiry@activ.org.in'));
+        assert.ok(!html.includes('Old office'));
+    }
     const originalPassword = process.env.MEMBER_EMAIL_PASS;
     process.env.MEMBER_EMAIL_PASS = 'test-only-password';
     // Stubbed delivery must also work without a developer's local SMTP secrets.
@@ -85,7 +95,7 @@ async function main() {
     assert.ok(result.rendered.length <= 1024);
     const groupContext = {eventTitle:'Event',bookingRef:'REF',viewUrl:'https://activ.org.in/events/test',whatsappChannelUrl:'https://chat.whatsapp.com/abc123',seats:1};
     const steps = flex.flexSteps('confirmed', groupContext, flex.READABLE_NAMES.confirmed);
-    assert.equal(steps[0].template, 'activ_evt_confirmed_whatsapp_image_v2');
+    assert.equal(steps[0].template, 'activ_evt_confirmed_whatsapp_image_v4');
     assert.equal(steps[0].params.length, 12);
     assert.equal(steps[0].params[10], 'WhatsApp group');
     assert.equal(steps[0].params[11], groupContext.whatsappChannelUrl);
@@ -97,9 +107,9 @@ async function main() {
     assert.ok(pdfMessage.rendered.indexOf('Supporting PDF') > pdfMessage.rendered.indexOf('WhatsApp group'));
     assert.match(pdfMessage.rendered,/Open document:\* https:\/\/api.activ.org.in\/uploads\/agenda.pdf/);
     const pdfSteps = flex.flexSteps('confirmed',pdfContext,flex.READABLE_NAMES.confirmed);
-    assert.equal(pdfSteps[0].template,'activ_evt_confirmed_whatsapp_document_image_v3');
+    assert.equal(pdfSteps[0].template,'activ_evt_confirmed_whatsapp_document_image_v4');
     assert.equal(pdfSteps[0].params.length,14);
-    assert.equal(pdfSteps[1].template,'activ_evt_confirmed_whatsapp_image_v2');
+    assert.equal(pdfSteps[1].template,'activ_evt_confirmed_whatsapp_image_v4');
     console.log('Email account routing, membership journeys, UPI amount/encoding and group links passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

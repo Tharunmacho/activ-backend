@@ -359,15 +359,32 @@ class PlatinumService {
     async updateRequest(id, body = {}, actor = {}) {
         const row = await PlatinumRequest.findById(id);
         if (!row) throw ApiError.notFound('Request not found');
+        const previousStatus = row.status;
+        const patch = {};
         if (body.status !== undefined) {
             if (!PlatinumRequest.STATUSES.includes(body.status)) throw ApiError.badRequest('Unknown status');
-            row.status = body.status;
-            row.handledBy = String(actor.email || 'Super Admin');
-            row.handledAt = new Date();
+            patch.status = body.status;
+            patch.handledBy = String(actor.email || 'Super Admin');
+            patch.handledAt = new Date();
         }
-        if (body.notes !== undefined) row.notes = String(body.notes || '').trim().slice(0, 1000);
-        await row.save();
-        return shapeRequest(row.toObject());
+        if (body.notes !== undefined) patch.notes = String(body.notes || '').trim().slice(0, 1000);
+        if (!Object.keys(patch).length) return shapeRequest(row.toObject());
+        const updated = await PlatinumRequest.findOneAndUpdate({ _id: row._id,
+            status: previousStatus, updatedAt: row.updatedAt }, { $set: patch }, { new: true, runValidators: true });
+        if (!updated) throw ApiError.conflict('This request changed. Refresh before updating it again.');
+        if (previousStatus !== 'declined' && updated.status === 'declined') {
+            // Queue notes are for the office; they are not a member-facing reason.
+            const member = await MemberDetails.findById(updated.memberId).catch(() => null);
+            if (member && !member.deletedAt) {
+                notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
+                    changeTitle: 'Lifetime membership request declined',
+                    changeSummary: 'The ACTIV office has declined your Lifetime membership request. Your existing membership remains unchanged.',
+                    reference: String(updated._id), reason: '',
+                    data: { change: 'lifetime_request_declined', requestId: String(updated._id), status: 'declined' }
+                });
+            }
+        }
+        return shapeRequest(updated.toObject());
     }
 
     /* ================================================================ grants */
@@ -532,7 +549,7 @@ class PlatinumService {
 
     /** Undo a grant made in error: restore what they held, cancel the receipt. */
     async revoke(memberId, actor = {}) {
-        const member = await MemberDetails.findById(memberId);
+        let member = await MemberDetails.findById(memberId);
         if (!member) throw ApiError.notFound('Member not found');
         if (member.membershipTier !== 'platinum') throw ApiError.badRequest('This member is not a Lifetime member.');
 
@@ -541,15 +558,25 @@ class PlatinumService {
         if (grant.orderId) {
             await PaymentOrder.updateOne({ orderId: grant.orderId, provider: 'offline' }, { $set: { status: 'cancelled' } });
         }
-        member.membershipTier = 'standard';
-        member.membershipStatus = prev.membershipStatus || 'approved';
-        member.membershipType = prev.membershipType || 'none';
-        member.membershipExpiresAt = prev.membershipExpiresAt || null;
-        member.membershipActivatedAt = prev.membershipActivatedAt || null;
-        member.platinumGrant = undefined;
-        member.markModified('platinumGrant');
-        await member.save();
+        // Only the caller that removes this particular grant announces it.
+        // A concurrent revoke must not overwrite a later newly granted tier.
+        const restored = await MemberDetails.findOneAndUpdate({ _id: member._id, membershipTier: 'platinum',
+            'platinumGrant.orderId': grant.orderId ?? null }, { $set: {
+            membershipTier: 'standard', membershipStatus: prev.membershipStatus || 'approved',
+            membershipType: prev.membershipType || 'none', membershipExpiresAt: prev.membershipExpiresAt || null,
+            membershipActivatedAt: prev.membershipActivatedAt || null
+        }, $unset: { platinumGrant: '' } }, { new: true, runValidators: true });
+        if (!restored) throw ApiError.conflict('This Lifetime grant changed. Refresh before trying again.');
+        member = restored;
         invalidateMemberContext(member._id);
+
+        notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
+            changeTitle: 'Lifetime membership updated',
+            changeSummary: 'The ACTIV office has removed your Lifetime membership grant and restored your previous membership details. Sign in to review your current membership.',
+            reference: grant.orderId || membershipNumberFor(member), reason: '',
+            data: { change: 'lifetime_revoked', orderId: grant.orderId || '', membershipTier: member.membershipTier,
+                membershipStatus: member.membershipStatus, membershipType: member.membershipType }
+        });
 
         logger.warn('Lifetime Membership revoked', { memberId: String(member._id), by: actor.email });
         const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';

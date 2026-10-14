@@ -5,6 +5,8 @@ const mongoose = require('mongoose'); mongoose.set('bufferCommands', false);
 const Company = require('../src/modules/members/company.model');
 const Member = require('../src/modules/members/memberdetails.model');
 const Order = require('../src/modules/payment/paymentorder.model');
+const notifications = [];
+require('../src/modules/notifications/notification.service').dispatchInBackground = (...args) => notifications.push(args);
 const publishing = require('../src/modules/members/companyPublishing');
 const uid = new mongoose.Types.ObjectId().toString();
 const member = { _id: uid, email: 'fixture@example.test', membershipStatus: 'active', membershipType: 'annual', membershipExpiresAt: new Date(Date.now() + 86400000 * 200), isActive: true, paymentId: 'original-payment', paymentAmount: 5000 };
@@ -43,6 +45,9 @@ async function main() {
     const auth = await orderService.authorizeMock({ userId: uid }, { orderId: receipt.orderId });
     await assert.rejects(orderService.completePayment({ userId: uid }, { orderId: receipt.orderId, gatewayPaymentId: auth.gatewayPaymentId, signature: 'wrong' }), /signature/);
     await orderService.completePayment({ userId: uid }, { ...auth });
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0][0], 'COMPANY_PAYMENT_CONFIRMED');
+    assert.equal(notifications[0][2].data.companyId, second._id);
     assert.equal((await publishing.ownerContext(uid)).published.size, 2);
     assert.equal(member.paymentAmount, 5000); assert.equal(member.paymentId, 'original-payment');
     await assert.rejects(orderService.completePayment({ userId: uid }, { ...auth }), /already/);
@@ -52,6 +57,7 @@ async function main() {
     await payment.settleMembershipOrder(orders[0], 'MOJO-fixture');
     const paidAt = orders[0].paidAt;
     await payment.settleMembershipOrder(orders[0], 'MOJO-fixture');
+    assert.equal(notifications.length, 2, 'one company receipt for each newly paid order, no duplicate on replay');
     assert.equal(orders[0].paidAt, paidAt, 'webhook replay never adds time');
     assert.equal((await publishing.ownerContext(uid)).published.size, 2);
     const expired = [{ ...orders[0], paidAt: new Date('2000-01-01') }];

@@ -226,7 +226,7 @@ class AdminMembersService {
             { $set: { lastRenewalReminderAt: now } }
         );
         if (!res.modifiedCount) throw ApiError.badRequest('A reminder already went to this member in the last 24 hours.');
-        renewal.dispatchRenewal(member.toObject ? member.toObject() : member, now, { manual: true, by: String(actor.email || '') });
+        await renewal.dispatchRenewal(member.toObject ? member.toObject() : member, now, { manual: true, by: String(actor.email || '') });
         return { sent: true, at: now, expiresAt: periodEnd(member) };
     }
 

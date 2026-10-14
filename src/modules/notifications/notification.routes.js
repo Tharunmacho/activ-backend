@@ -1,7 +1,7 @@
 const express = require('express');
 const notificationService = require('./notification.service');
 const emailService = require('./email.service');
-const botbeeService = require('./botbee.service');
+const whatsappTemplate = require('./whatsappTemplate');
 const regionalContacts = require('./regionalContacts.service');
 const ApiResponse = require('../../core/utils/ApiResponse');
 const ApiError = require('../../core/utils/ApiError');
@@ -107,6 +107,13 @@ router.get('/delivery-summary', requireRole('super_admin'), asyncHandler(async(r
  */
 router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(req, res) => {
     const config = require('../../config');
+    const publicUrl = require('../../config/publicUrl');
+    const provider = whatsappTemplate.providerName();
+    const usingMeta = provider === 'meta';
+    const meta = config.metaCloud;
+    const botbeeWebhookUrl = `${publicUrl.publicApiBase()}/notifications/botbee/webhook`;
+    const metaWebhookUrl = `${publicUrl.publicApiBase()}/notifications/meta/webhook`;
+    const metaMessagePath = `/${meta.apiVersion}/${meta.phoneNumberId}/messages`;
 
     const emailStatus = {
         configured: emailService.isConfigured(),
@@ -124,18 +131,27 @@ router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(re
     res.json(ApiResponse.success({
         email: emailStatus,
         whatsapp: {
-            configured: botbeeService.isConfigured(),
-            baseUrl: config.botbee.baseUrl,
-            templateEndpoint: config.botbee.sendTemplatePath,
-            textEndpoint: config.botbee.sendTextPath,
-            authStyle: config.botbee.authStyle,
-            webhookConfigured: !!config.botbee.webhookVerifyToken,
-            webhookUrl: `${require('../../config/publicUrl').publicApiBase()}/notifications/botbee/webhook`,
-            // Where a Meta app's `messages` webhook can point for delivery
-            // statuses (sent / delivered / read / failed).
-            metaStatusWebhookUrl: `${require('../../config/publicUrl').publicApiBase()}/notifications/meta/webhook`,
+            configured: whatsappTemplate.isConfigured(),
+            provider,
+            providerLabel: usingMeta ? 'Meta WhatsApp Cloud API' : 'BotBee',
+            // Keep the existing response keys while describing the provider
+            // that actually sends lifecycle messages and signed bot replies.
+            baseUrl: usingMeta ? meta.baseUrl : config.botbee.baseUrl,
+            templateEndpoint: usingMeta ? metaMessagePath : config.botbee.sendTemplatePath,
+            textEndpoint: usingMeta ? metaMessagePath : config.botbee.sendTextPath,
+            authStyle: usingMeta ? 'bearer' : config.botbee.authStyle,
+            webhookConfigured: usingMeta
+                ? !!(meta.webhookVerifyToken && meta.appSecret)
+                : !!config.botbee.webhookVerifyToken,
+            webhookUrl: usingMeta ? metaWebhookUrl : botbeeWebhookUrl,
+            botbeeWebhookUrl,
+            botbeeWebhookConfigured: !!config.botbee.webhookVerifyToken,
+            // Retained for older callers; verification and signature readiness
+            // are separate so a saved verify token cannot imply live delivery.
+            metaStatusWebhookUrl: metaWebhookUrl,
             metaStatusWebhookConfigured: !!config.metaCloud.webhookVerifyToken,
-            instamojoWebhookUrl: require('../../config/publicUrl').instamojoWebhookUrl()
+            metaSignatureConfigured: !!meta.appSecret,
+            instamojoWebhookUrl: publicUrl.instamojoWebhookUrl()
         }
     }));
 }));
@@ -246,21 +262,35 @@ router.post('/test-send', requireRole('super_admin'), asyncHandler(async(req, re
     }
 
     if (channel === 'whatsapp') {
-        const result = await botbeeService.sendTextMessage(
-            target,
-            'ACTIV test message. If you are reading this, outbound WhatsApp is working.'
-        );
+        const config = require('../../config');
+        const template = String(config.botbee.templates.status || '').trim();
+        if (!template || template.toLowerCase() === 'none') {
+            throw ApiError.badRequest('Configure an approved membership status template before sending a WhatsApp test');
+        }
+        // An administrator's test may be outside the 24-hour reply window.
+        // Use the same configured, approved template/provider as real notices,
+        // with an explicit test marker and no claim that an account changed.
+        const params = [
+            'ACTIV TEST',
+            'TEST ONLY - no account change',
+            'this is your requested WhatsApp delivery check. No payment or membership action is required. Membership queries: member@activ.org.in. Event queries: events@activ.org.in'
+        ];
+        const result = await whatsappTemplate.sendTemplateMessage(target, template, params, 'en');
 
         await notificationService.log({
             user: req.user.userId,
             event: 'CUSTOM',
             channel: 'whatsapp',
             recipient: result.to || target,
-            subject: 'test-send',
+            subject: 'ACTIV TEST - WhatsApp delivery check',
+            templateId: result.template || template,
+            provider: result.provider,
             status: result.success ? 'sent' : 'failed',
+            deliveryStatus: result.mock ? undefined : (result.success ? 'accepted' : 'failed'),
             mock: !!result.mock,
             providerMessageId: result.messageId,
-            lastError: result.error
+            lastError: result.error,
+            data: { params, test: true }
         });
 
         return res.json(ApiResponse.success(result, result.success

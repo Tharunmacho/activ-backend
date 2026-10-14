@@ -732,9 +732,11 @@ const bookingText = (ctx = {}, { heading, lead, closing }) => {
 const MEMBERSHIP = require('./membershipTemplates')({
     appUrl, oneLine, clause, esc, orDash, ORG_SIGNATURE, DEFAULT_WHATSAPP_POSTER, tplOn, waLines, TPL
 });
+const WORKFLOW = require('./workflowTemplates')({ appUrl, oneLine, esc, TPL });
 
 const TEMPLATES = {
     ...MEMBERSHIP.TEMPLATES,
+    ...WORKFLOW.TEMPLATES,
 
     /* ---------------------------------------------------- event registered */
     EVENT_REGISTERED: (ctx) => ({
@@ -1205,6 +1207,18 @@ const TEMPLATES = {
  * `scripts/test-notifications.js --templates` prints both versions.
  */
 const WHATSAPP_TEMPLATES = [
+    ...WORKFLOW.WHATSAPP_TEMPLATES,
+    {
+        name: 'activ_event_channel_v2', envKey: 'BOTBEE_TPL_EVENT_CHANNEL',
+        category: 'Utility', meta: true,
+        body: '(Meta template with variables - submit bodyWithVariables below)',
+        bodyWithVariables: 'Event information for your registration\n\n'
+            + '*Event:* {{1}}\n\n*Booking ID:* {{2}}\n\n'
+            + '*WhatsApp channel for event updates:*\n{{3}}\n\n'
+            + 'For event queries, email events@activ.org.in. Please keep these details with your booking confirmation.',
+        params: ['event', 'booking ID', 'WhatsApp channel link'],
+        samples: ['Entrepreneurship Awareness Programme', 'ACTIVB-TEST-1234', 'https://whatsapp.com/channel/0029VaDdseGKLaHrWNV7ZK1X'],
+    },
     {
         name: 'activ_event_channel_v1', envKey: 'BOTBEE_TPL_EVENT_CHANNEL',
         category: 'Utility', meta: true,
@@ -1640,9 +1654,26 @@ const passesHtml = (passes = []) => `<table role="presentation" width="100%" cel
 const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER'];
 const render = (eventName, ctx = {}) => {
     ctx = { ...ctx, planName: require('../members/membershipLabels').displayPlanName(ctx.planName, ctx.planId, ctx.membershipTier) };
+    const support = /^EVENT_/.test(eventName) ? require('./eventContact') : require('./membershipContact');
+    if (/^EVENT_/.test(eventName)) {
+        ctx.contactEmail = support.email;
+        ctx.supportEmail = support.email;
+        ctx.contactLine = [oneLine(ctx.contactName, 80), prettyPhone(ctx.contactPhone), support.email].filter(Boolean).join(' · ');
+    }
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
     const out = builder(ctx);
+    // The brief fallback templates also carry the correct queries inbox.
+    for (let wa = out && out.whatsapp; wa; wa = wa.fallback) {
+        const slot = [TPL.event, TPL.bookingInPerson, TPL.bookingOnline].includes(wa.template)
+            ? 1 : wa.template === TPL.status ? 2 : -1;
+        if (slot >= 0 && wa.params && !wa.params.some(value => String(value).includes(support.email))) {
+            wa.params[slot] = `${wa.params[slot] || ''}; queries: ${support.email}`;
+        }
+    }
+    if (out && out.whatsapp && out.whatsapp.text && !out.whatsapp.text.includes(support.email)) {
+        out.whatsapp.text += `\n\nQueries: ${support.email}`;
+    }
     if (out && out.email && WITH_PASSES.includes(eventName)
         && Array.isArray(ctx.passes) && ctx.passes.length > 1) {
         out.email.passQrs = ctx.passes.map((p) => ({ cid: p.cid, url: p.url }));

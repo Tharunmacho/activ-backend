@@ -19,6 +19,13 @@ const notificationLogSchema = new mongoose.Schema({
             'PAYMENT_REQUIRED',
             'PAYMENT_SUCCESS',
             'MEMBERSHIP_ACTIVATED',
+            'MEMBERSHIP_PLAN_ADVANCED',
+            'MEMBERSHIP_STATUS_CHANGED',
+            'COMPANY_PAYMENT_CONFIRMED',
+            'PAYMENT_FAILED',
+            'EVENT_PAYMENT_FAILED',
+            'EVENT_UPDATED',
+            'EVENT_CANCELLED',
             /*
              * EVERY EVENT A TEMPLATE CAN RENDER MUST BE LISTED. An event missing
              * here fails validation on the log write, which `notification.log`
