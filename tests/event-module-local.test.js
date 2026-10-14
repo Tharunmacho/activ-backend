@@ -33,6 +33,14 @@ async function main() {
     // Announcements are the only external side effect of these booking actions.
     const notifications = [];
     bookingService.announce = (row, status) => { notifications.push({ ref: row.bookingRef, status }); };
+    // Archive notifications claim delivery metadata asynchronously. Test that
+    // dispatch separately; keep this retention snapshot independent of its
+    // eventChangesSent/updatedAt writes and all provider side effects.
+    const eventChanges = [];
+    require('../src/modules/events/eventChanges.service').announceChange = (before, after) => {
+        eventChanges.push({ before, after });
+        return Promise.resolve();
+    };
     require('../src/config/logger').silent = true;
     const app = require('../src/app');
     server = await new Promise(resolve => { const http = app.listen(0, '127.0.0.1', () => resolve(http)); });
@@ -159,6 +167,7 @@ async function main() {
     await request('/events/' + paid._id, { method: 'DELETE' }); // idempotent
     await request('/events/' + paid._id + '/bookings/' + stored.bookingRef, { method: 'DELETE', status: 409 });
     assert.deepEqual(await snapshot(), before, 'both deletion routes leave bookings, payments, registration and attendance byte-for-byte unchanged');
+    assert.equal(eventChanges.length, 2, 'both event deletion routes still dispatch cancellation updates once');
     // Simulate a record deleted by a legacy release, in this disposable DB only.
     await Event.collection.deleteOne({ _id: missing._id });
     overview = await request('/events/bookings/overview');

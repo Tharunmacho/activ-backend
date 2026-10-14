@@ -5,6 +5,7 @@ const registry = require('../src/modules/notifications/notificationTemplates');
 const flex = require('../src/modules/notifications/whatsappFlex');
 const service = require('../src/modules/notifications/notification.service');
 const sender = require('../src/modules/notifications/whatsappTemplate');
+const botbee = require('../src/modules/notifications/botbee.service');
 const config = require('../src/config');
 const { sendDocument } = require('../src/modules/events/eventDocument');
 const context = { noRegionalContact: true, name: 'Fixture member', firstName: 'Fixture', bookerName: 'Fixture booker',
@@ -53,13 +54,19 @@ async function main() {
         const out = registry.render(event, context);
         assert.ok(out.whatsapp.template && !/_standard_/.test(out.whatsapp.template), 'Existing sectioned member templates are preserved');
     }
-    config.botbee.alsoSendText = false;
+    config.botbee.alsoSendText = true;
     service.log = async row => row;
     const calls = [];
+    const textCalls = [];
     let failure = '';
+    let refuseAllTemplates = false;
+    botbee.sendTextMessage = async (to, text) => {
+        textCalls.push({ to, text });
+        return { success: true, provider: 'botbee', messageId: 'offline-text-fixture', to };
+    };
     sender.sendTemplateMessage = async (to, template, params, language, text, options) => {
         calls.push({ to, template, params, options });
-        return failure && /_standard_/.test(template)
+        return failure && (refuseAllTemplates || /_standard_/.test(template))
             ? { success: false, provider: 'meta', error: failure, template }
             : { success: true, provider: 'meta', messageId: 'offline-fixture', template };
     };
@@ -69,12 +76,21 @@ async function main() {
     const fallback = await dispatch();
     assert.ok(fallback.channels.whatsapp.success);
     assert.ok(calls.length > 1 && !/_standard_/.test(calls.at(-1).template), 'Pending new layouts fall back to the approved chain');
+    assert.equal(textCalls.length, 0, 'An accepted approved fallback does not also send text');
     for (const error of ['ETIMEDOUT', 'Token expired', '131026 Message undeliverable']) {
         calls.length = 0; failure = error;
         const result = await dispatch();
         assert.equal(result.channels.whatsapp.success, false);
         assert.equal(calls.length, 1, 'Uncertain/permanent failures do not send duplicate template attempts');
+        assert.equal(textCalls.length, 0, 'Uncertain/permanent failures do not send a second body through text rescue');
     }
+    refuseAllTemplates = true; failure = '132001 Template name does not exist'; calls.length = 0;
+    const definiteRefusal = await dispatch();
+    assert.equal(definiteRefusal.channels.whatsapp.success, false);
+    assert.ok(calls.length > 1, 'Definite refusals still walk the template fallback chain');
+    assert.equal(textCalls.length, 1, 'Definite refusals retain one configured text rescue after templates are exhausted');
+    assert.equal(definiteRefusal.rows.whatsappText.providerMessageId, 'offline-text-fixture');
+    refuseAllTemplates = false;
     const params = ['Fixture member','Agenda.pdf','Fixture workshop','23 October 2026, 10 AM IST','ACTIVB-FIXTURE'];
     const header = { link: 'https://example.invalid/agenda.pdf', filename: 'Agenda.pdf' };
     failure = ''; calls.length = 0;

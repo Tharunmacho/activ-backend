@@ -559,7 +559,10 @@ class NotificationService {
                      * a regression: nothing was ever going to reach a brand-new
                      * registrant through it.
                      */
-                    if (config.botbee.alsoSendText && rendered.whatsapp.text && !sent.success) {
+                    // A transport failure may already have delivered the template;
+                    // text rescue requires the same definite refusal as another template.
+                    if (config.botbee.alsoSendText && rendered.whatsapp.text && !sent.success
+                        && require('./templateFallback')(sent.error)) {
                         const textSent = await botbeeService.sendTextMessage(phone, rendered.whatsapp.text);
                         sessionText = textSent && textSent.success ? textSent : null;
                         /*
