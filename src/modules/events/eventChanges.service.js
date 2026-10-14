@@ -52,6 +52,17 @@ const registrationStateKey = row => digest({
     id: String(row._id), status: row.status, paymentStatus: row.payment?.status,
     registeredAt: dateKey(row.registeredAt), cancelledAt: dateKey(row.cancelledAt),
 });
+const registrationReminderKey = (startAt, hours) => {
+    const start = new Date(startAt).getTime();
+    const offset = Number(hours);
+    return Number.isFinite(start) && Number.isFinite(offset) && offset > 0 && offset <= 168
+        ? `${start}:${offset}` : '';
+};
+const currentReminderOffsets = event => {
+    const own = Array.isArray(event.reminderOffsetsHours) ? event.reminderOffsetsHours : [];
+    const fallback = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
+    return (own.length ? own : fallback.split(',')).map(Number).filter(hours => Number.isFinite(hours) && hours > 0 && hours <= 168);
+};
 
 const currentBookings = eventId => ({
     eventId, deletedAt: null,
@@ -128,7 +139,9 @@ function registrationContext(row, event, extra = {}) {
             changeSnapshotKey: extra.changeSnapshotKey || eventSnapshotKey(event),
             changeScope: extra.changeScope || 'event', cancelledScope: extra.cancelledScope || '',
             bookingStatus: row.status === 'registered' && !paid ? 'pending' : row.status,
-            registrationStateKey: registrationStateKey(row) },
+            registrationStateKey: registrationStateKey(row),
+            ...(extra.reminderKey ? { reminderKey: extra.reminderKey, reminderHours: extra.reminderHours,
+                reminderEventStartAt: extra.reminderEventStartAt } : {}) },
     };
 }
 
@@ -136,19 +149,39 @@ function registrationContext(row, event, extra = {}) {
 async function announceRegistration(row, eventOrId, requestedKind, extra = {}) {
     if (!row) return { skipped: true };
     try {
-        const event = eventOrId && typeof eventOrId === 'object'
-            ? eventOrId : await require('./event.model').findById(eventOrId || row.eventId).lean();
+        const suppliedEvent = eventOrId && typeof eventOrId === 'object'
+            && ('title' in eventOrId || 'status' in eventOrId || 'startAt' in eventOrId);
+        const event = suppliedEvent && requestedKind !== 'reminder' ? eventOrId
+            : await require('./event.model').findById(eventOrId?._id || eventOrId || row.eventId).lean();
         if (!event || isPastEvent(event) || (event.archivedAt && requestedKind !== 'event_cancelled')) return { skipped: true };
         const paid = ['paid', 'not_required'].includes(row.payment?.status);
         const kind = requestedKind || (row.status === 'waitlist' ? 'waitlist'
             : row.status === 'registered' && paid ? 'confirmed' : '');
         if (!kind) return { skipped: true };
-        if (kind === 'confirmed' && (row.status !== 'registered' || !paid)) return { skipped: true };
-        const eventName = { confirmed: 'EVENT_REGISTERED', waitlist: 'EVENT_BOOKING_WAITLISTED', updated: 'EVENT_UPDATED',
+        if (['confirmed', 'reminder'].includes(kind) && (row.status !== 'registered' || !paid)) return { skipped: true };
+        const eventName = { confirmed: 'EVENT_REGISTERED', reminder: 'EVENT_REMINDER', waitlist: 'EVENT_BOOKING_WAITLISTED', updated: 'EVENT_UPDATED',
             event_cancelled: 'EVENT_CANCELLED', cancelled: 'EVENT_CANCELLED' }[kind];
         if (!eventName) return { skipped: true };
         let changeId = extra.changeId;
-        if (!extra.claimed) {
+        if (kind === 'reminder') {
+            const start = new Date(event.startAt).getTime();
+            const hours = Number(extra.reminderHours);
+            const moment = start - hours * 60 * 60 * 1000;
+            const key = registrationReminderKey(start, hours);
+            if (!key || event.status !== 'published' || start <= Date.now() || moment > Date.now()
+                || !currentReminderOffsets(event).includes(hours)
+                || !(new Date(row.registeredAt).getTime() < moment)
+                || (extra.reminderEventStartAt && dateKey(extra.reminderEventStartAt) !== dateKey(event.startAt))
+                || (extra.reminderKey && extra.reminderKey !== key)) return { skipped: true };
+            if (!extra.claimed) {
+                const claim = await require('./eventregistration.model').updateOne({
+                    _id: row._id, status: 'registered', 'payment.status': { $in: ['paid', 'not_required'] },
+                    registeredAt: row.registeredAt, remindersSent: { $ne: key },
+                }, { $addToSet: { remindersSent: key } });
+                if (!claim?.modifiedCount) return { skipped: true };
+            }
+            extra = { ...extra, reminderKey: key, reminderHours: hours, reminderEventStartAt: dateKey(event.startAt) };
+        } else if (!extra.claimed) {
             const key = digest([String(row._id), kind, dateKey(row.registeredAt),
                 kind === 'cancelled' ? dateKey(row.cancelledAt) : kind === 'confirmed' ? dateKey(row.payment?.paidAt) : '']);
             const claim = await require('./eventregistration.model').updateOne({
@@ -160,6 +193,12 @@ async function announceRegistration(row, eventOrId, requestedKind, extra = {}) {
         const context = registrationContext(row, event, { ...extra, changeId,
             ...(!extra.claimed ? { changeScope: 'registration' } : {}),
             ...(kind === 'cancelled' ? { cancelledScope: 'registration' } : {}) });
+        if (kind === 'reminder') {
+            const reason = await reasonToSkipRegistrationNotice({ event: eventName, user: row.userId,
+                channel: row.email ? 'email' : 'whatsapp', recipient: row.email || row.phone,
+                data: { lifecycleData: context.data } });
+            if (reason) return { skipped: true, reason };
+        }
         return require('../notifications/notification.service').dispatchLifecycleEvent(eventName, {
             id: row.userId, name: row.memberName, email: row.email, phone: row.phone,
         }, context);
@@ -179,6 +218,64 @@ const phoneKey = value => {
 const recipientMatches = (row, person = {}) => row.channel === 'email'
     ? !!clean(person.email) && clean(person.email).toLowerCase() === clean(row.recipient).toLowerCase()
     : row.channel === 'whatsapp' && !!phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(row.recipient);
+
+/** Legacy receipts use their registration, never a modern booking lookup. */
+async function reasonToSkipRegistrationNotice(row = {}) {
+    if (!['EVENT_REGISTERED', 'EVENT_BOOKING_WAITLISTED', 'EVENT_REMINDER'].includes(row.event)) return '';
+    const data = row.data?.lifecycleData || row.data || {};
+    if (!data.registrationId) return 'The original event registration could not be verified.';
+    try {
+        const registration = await require('./eventregistration.model').findById(data.registrationId).lean();
+        if (!registration || registration.deletedAt) return 'The event registration no longer exists.';
+        const eventId = idOf(registration.eventId);
+        if (!eventId || idOf(data.eventId) !== eventId || (row.eventId && idOf(row.eventId) !== eventId)) {
+            return 'The message no longer matches the registered event.';
+        }
+        if (!recipientMatches(row, registration)) return 'The recipient is no longer on this registration.';
+        const ownerId = idOf(registration.userId);
+        if (!ownerId || (row.user && idOf(row.user) !== ownerId)) return 'The message no longer matches the member account.';
+        const member = await require('../members/memberdetails.model').findById(ownerId).lean();
+        if (!member || member.deletedAt || member.isActive === false
+            || clean(member.membershipStatus).toLowerCase() === 'cancelled') return 'The member account is no longer active.';
+        const paid = ['paid', 'not_required'].includes(registration.payment?.status);
+        if (row.event === 'EVENT_BOOKING_WAITLISTED') {
+            if (registration.status !== 'waitlist') return 'This registration is no longer waitlisted.';
+        } else if (registration.status !== 'registered' || !paid) {
+            return 'This registration no longer holds a paid or free confirmed seat.';
+        }
+        if (!data.registrationStateKey || data.registrationStateKey !== registrationStateKey(registration)) {
+            return 'This registration has changed since the message was created.';
+        }
+        const event = await require('./event.model').findById(eventId).lean();
+        if (!event || event.archivedAt || event.status !== 'published' || isPastEvent(event)) {
+            return 'The event is no longer current and published.';
+        }
+        if (!data.changeSnapshotKey || data.changeSnapshotKey !== eventSnapshotKey(event)) {
+            return 'Event details have changed since this message.';
+        }
+        if (row.event === 'EVENT_REMINDER') {
+            const start = new Date(event.startAt).getTime();
+            const hours = Number(data.reminderHours);
+            const moment = start - hours * 60 * 60 * 1000;
+            const key = registrationReminderKey(start, hours);
+            if (!key || start <= Date.now() || moment > Date.now()
+                || !currentReminderOffsets(event).includes(hours)
+                || dateKey(data.reminderEventStartAt) !== dateKey(event.startAt)
+                || !(new Date(registration.registeredAt).getTime() < moment)) {
+                return 'This event reminder window is no longer due.';
+            }
+            if (data.reminderKey !== key || !(registration.remindersSent || []).includes(key)) {
+                return 'The original event reminder could not be verified.';
+            }
+        } else if (!data.changeId || !(registration.eventChangesSent || []).includes(data.changeId)) {
+            return 'The original registration notice could not be verified.';
+        }
+        return '';
+    } catch {
+        return 'Current registration, event or member details could not be checked. Retry after they can be verified.';
+    }
+}
+
 const latestEventClaim = record => (record.eventChangesSent || [])
     .filter(key => /^event:\d+:[a-f0-9]{64}$/.test(key))
     .reduce((latest, key) => !latest || Number(key.split(':')[1]) >= Number(latest.split(':')[1]) ? key : latest, '');
@@ -260,4 +357,5 @@ async function reasonToSkipChange(row = {}) {
 }
 
 module.exports = { attendanceDetails, describeChange, eventChangeKey, notifyEventChange, announceChange, announceRegistration,
-    registrationContext, currentBookings, currentRegistrations, reasonToSkipChange };
+    registrationContext, currentBookings, currentRegistrations, reasonToSkipChange,
+    registrationReminderKey, reasonToSkipRegistrationNotice };

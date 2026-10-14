@@ -828,8 +828,15 @@ class NotificationService {
 
         const row = await NotificationLog.findById(logId);
         if (!row) return null;
+        const data = row.data || {};
+        const legacyRegistrationNotice = ['EVENT_REGISTERED', 'EVENT_REMINDER'].includes(row.event)
+            || (row.event === 'EVENT_BOOKING_WAITLISTED' && !!(data.lifecycleData?.registrationId || data.registrationId));
         const stateReason = await require('./retryEligibility').reasonToSkip(row);
         if (stateReason) return { row, skipped: true, reason: stateReason };
+        if (legacyRegistrationNotice) {
+            const legacyReason = await require('../events/eventChanges.service').reasonToSkipRegistrationNotice(row);
+            if (legacyReason) return { row, skipped: true, reason: legacyReason };
+        }
         if (['EVENT_UPDATED', 'EVENT_CANCELLED'].includes(row.event)) {
             const changeReason = await require('../events/eventChanges.service').reasonToSkipChange(row);
             if (changeReason) return { row, skipped: true, reason: changeReason };
@@ -841,7 +848,6 @@ class NotificationService {
             return { row, skipped: true, reason: 'In-app notifications are not re-sent' };
         }
 
-        const data = row.data || {};
         let outcome;
 
         /*
@@ -894,7 +900,7 @@ class NotificationService {
             };
         }
 
-        if (/^EVENT_(BOOKING|PARTICIPANT|DOCUMENT|CHANNEL)_/.test(String(row.event || ''))) {
+        if (!legacyRegistrationNotice && /^EVENT_(BOOKING|PARTICIPANT|DOCUMENT|CHANNEL)_/.test(String(row.event || ''))) {
             const bookingService = require('../events/eventbooking.service');
             const resent = await bookingService.resendLoggedMessage(row.toObject ? row.toObject() : row);
             /*

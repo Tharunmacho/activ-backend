@@ -11,6 +11,10 @@ const logger = require('../../config/logger');
 const { formatDateIST, csvCell: reportCsvCell } = require('../../core/utils/spreadsheet');
 const { bookingsWorkbook } = require('./eventReports');
 const bookingFilters = require('./bookingFilters');
+// A fixed rollout boundary avoids a historical reminder batch while allowing
+// legitimate post-rollout windows to recover after a later process restart.
+const legacyReminderRollout = Date.parse(process.env.EVENT_LEGACY_REMINDERS_FROM || '2026-10-14T03:00:00.000Z');
+const LEGACY_REMINDERS_FROM = Number.isFinite(legacyReminderRollout) ? legacyReminderRollout : Infinity;
 
 /**
  * Public event bookings — "Book Now", guest checkout, several participants.
@@ -2198,6 +2202,14 @@ class EventBookingService {
     }
 
     async sendDueReminders() {
+        if (this.reminderSweep) return this.reminderSweep;
+        const sweep = this.runDueReminderSweep();
+        this.reminderSweep = sweep;
+        try { return await sweep; }
+        finally { if (this.reminderSweep === sweep) this.reminderSweep = null; }
+    }
+
+    async runDueReminderSweep() {
         const now = Date.now();
         const rawDefault = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined
             ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
@@ -2235,8 +2247,29 @@ class EventBookingService {
                     ).catch(() => null);
                     if (!booking) break;
 
-                    this.announce(booking, 'reminder', { startsInLabel: startsIn(start - now) });
+                    await this.announce(booking, 'reminder', { startsInLabel: startsIn(start - now) });
                     sent += 1;
+                }
+
+                // Legacy member registrations are still a reachable API. Only
+                // windows after the fixed rollout boundary are enabled. That
+                // boundary must not move on restart or legitimate retries vanish.
+                if (moment < LEGACY_REMINDERS_FROM) continue;
+                const legacy = require('./eventChanges.service');
+                const reminderKey = legacy.registrationReminderKey(start, hours);
+                for (let guard = 0; guard < 5000; guard += 1) {
+                    const registration = await EventRegistration.findOneAndUpdate({
+                        eventId: event._id, status: 'registered',
+                        'payment.status': { $in: ['paid', 'not_required'] },
+                        registeredAt: { $lt: new Date(moment) },
+                        remindersSent: { $ne: reminderKey },
+                    }, { $addToSet: { remindersSent: reminderKey } }, { new: true }).lean();
+                    if (!registration) break;
+                    const result = await legacy.announceRegistration(registration, event._id, 'reminder', {
+                        claimed: true, reminderKey, reminderHours: hours,
+                        reminderEventStartAt: new Date(start).toISOString(), startsInLabel: startsIn(start - now),
+                    });
+                    if (!result?.skipped && !result?.failed) sent += 1;
                 }
             }
         }

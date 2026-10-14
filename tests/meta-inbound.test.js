@@ -92,7 +92,7 @@ async function main() {
     const [a, b] = await Promise.all([post(payload), post(payload)]);
     assert.ok([a, b].some(response => response.status === 200));
     assert.ok([a, b].every(response => [200, 500].includes(response.status)));
-    assert.equal([a, b].find(response => response.status === 200).headers['x-activ-bot-version'], 'conversational-v4');
+    assert.equal([a, b].find(response => response.status === 200).headers['x-activ-bot-version'], 'conversational-v5');
     assert.equal(sent.length, 2, 'concurrent duplicate deliveries send one reply per actual message');
     assert.match(sent[0].text.body, /\/register/);
     assert.match(sent[1].text.body, /Welcome to ACTIV/);
