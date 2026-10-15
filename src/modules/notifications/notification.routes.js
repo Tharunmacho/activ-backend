@@ -20,12 +20,27 @@ const router = express.Router();
 
 router.use(verifyToken);
 
+router.post('/push/devices', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./push.service').register(req.user.userId, req.body)));
+}));
+router.delete('/push/devices', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./push.service').unregister(req.user.userId, req.body?.token)));
+}));
+router.get('/push/status', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./push.service').health()));
+}));
+router.post('/push/test', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    if (!require('./push.service').isConfigured()) throw ApiError.badRequest('Firebase push is not configured yet.');
+    await notificationService.createNotification(req.user.userId, { title: 'ACTIV notification test', message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
+    res.json(ApiResponse.success({ queued: true }, 'Test queued for your signed-in devices.'));
+}));
+
 /* ------------------------------------------------------------ the member's own */
 
 router.get('/', asyncHandler(async(req, res) => {
     const { page = 1, limit = 20 } = req.query;
     const result = await notificationService.getUserNotifications(
-        req.user.userId, parseInt(page, 10), parseInt(limit, 10)
+        req.user.userId, parseInt(page, 10), parseInt(limit, 10), await require('../common/memberContext').resolveMemberContext(req)
     );
     res.json(ApiResponse.success(result));
 }));

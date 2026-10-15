@@ -186,6 +186,7 @@ const paymentOrderSchema = new mongoose.Schema({
 });
 
 paymentOrderSchema.index({ memberId: 1, status: 1 });
+paymentOrderSchema.index({ memberId: 1, orderType: 1, status: 1, paidAt: -1, createdAt: -1 });
 paymentOrderSchema.index({ createdAt: -1 });
 
 module.exports = dataLayout.model('PaymentOrder', paymentOrderSchema);

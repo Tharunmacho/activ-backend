@@ -84,7 +84,7 @@ class AuditService {
 
         const query = {};
         const category = String(filters.category || 'all').toLowerCase();
-        if (['application', 'admin', 'event'].includes(category)) query.category = category;
+        if (['application', 'admin', 'event', 'content', 'authentication'].includes(category)) query.category = category;
 
         const term = String(filters.q || '').trim();
         if (term.length >= 2) {
@@ -120,7 +120,7 @@ class AuditService {
 
     /** Counts per category, for the stream's filter pills. */
     async counts() {
-        const categories = ['application', 'admin', 'event'];
+        const categories = ['application', 'admin', 'event', 'content', 'authentication'];
         const totals = await Promise.all(
             categories.map(category => AuditLog.countDocuments({ category }).catch(() => 0))
         );

@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 const Announcement = require('./announcement.model');
 const ApiError = require('../../core/utils/ApiError');
 const auditService = require('../audit/audit.service');
-const { audienceClause, targetLabel, targetDepth } = require('../common/regionMatch');
+const { audienceClause, targetsMember, targetLabel, targetDepth } = require('../common/regionMatch');
+const { AUDIENCES, allowedAudiences, matchesAudience } = require('../common/memberAudience');
 
 const FEED_LIMIT = 50;
 const ADMIN_LIMIT = 200;
@@ -69,8 +70,8 @@ const sanitize = (payload = {}) => {
 
     if (payload.audience !== undefined) {
         const audience = str(payload.audience).toLowerCase() || 'all';
-        if (!['all', 'paid'].includes(audience)) {
-            throw ApiError.badRequest("audience must be 'all' or 'paid'");
+        if (!AUDIENCES.includes(audience)) {
+            throw ApiError.badRequest('Choose an audience: ' + AUDIENCES.join(', '));
         }
         out.audience = audience;
     }
@@ -149,8 +150,8 @@ class AnnouncementService {
 
         // An admin previewing the feed is not a paid member and must still see
         // the paid-only items, or they cannot check what they just published.
-        if (!context.isPaid && !context.isAdmin) {
-            query.audience = 'all';
+        if (!context.isAdmin) {
+            query.$and.push({ $or: [{ audience: { $in: allowedAudiences(context) } }, { audience: { $exists: false } }] });
         }
 
         if (filters.category && CATEGORIES.includes(str(filters.category).toLowerCase())) {
@@ -190,8 +191,9 @@ class AnnouncementService {
 
         if (!isAdmin) {
             if (doc.status !== 'published') throw ApiError.notFound('Update not found');
-            if (doc.audience === 'paid' && !context.isPaid) {
-                throw ApiError.forbidden('This update is for members with an active membership');
+            if (!matchesAudience(doc.audience, context) || !targetsMember(doc, context)
+                || (doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now())) {
+                throw ApiError.notFound('Update not found');
             }
         }
 

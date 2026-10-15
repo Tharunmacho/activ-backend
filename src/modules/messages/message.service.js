@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const { Conversation, Message, sortedPair, pairKeyOf } = require('./message.model');
 const MemberDetails = require('../members/memberdetails.model');
-const { isPaidStatus } = require('../common/memberContext');
+const { memberAccess, paidAudience, STUDENT_UPGRADE_MESSAGE } = require('../common/memberAudience');
 /* A delivered message raises a notification on the recipient's dashboard —
    see the note in `send`. `safeCreate` is what keeps that side-effect from
    ever failing the send itself. */
@@ -36,7 +36,7 @@ const ApiError = require('../../core/utils/ApiError');
  */
 
 /** The fields the inbox and the thread header need about the other person. */
-const MEMBER_CARD = 'fullName email profilePhoto membershipStatus block district state organizationName';
+const MEMBER_CARD = 'fullName email profilePhoto membershipStatus block district state organizationName memberType registrationType membershipType membershipTier membershipExpiresAt membershipActivatedAt paymentId isActive deletedAt';
 
 const toId = (value) => new mongoose.Types.ObjectId(String(value));
 
@@ -57,7 +57,12 @@ const assertCanMessage = async(memberId, { self = false } = {}) => {
             : ApiError.notFound('That member could not be found');
     }
 
-    if (!isPaidStatus(member.membershipStatus)) {
+    const reconciled = await require('../members/paymentReconcile').reconcileMember(member);
+    const access = memberAccess({ ...reconciled, paidAudience: await paidAudience(reconciled) });
+    if (access.isStudent) {
+        throw ApiError.forbidden(self ? STUDENT_UPGRADE_MESSAGE : 'This member has a Student membership and cannot receive business connections or messages.');
+    }
+    if (!access.canNetwork) {
         throw self
             ? ApiError.forbidden('Messaging is part of an active membership. Complete your payment to use it.')
             : ApiError.badRequest('That member does not have an active membership yet, so they cannot receive messages.');
@@ -207,6 +212,7 @@ class MessageService {
      * client renders it top-to-bottom without re-sorting.
      */
     async listMessages(conversationId, meId, { before = null, limit = 50 } = {}) {
+        await assertCanMessage(meId, { self: true });
         const conversation = await loadMine(conversationId, meId);
 
         const size = Math.min(Math.max(1, parseInt(limit, 10) || 50), 100);
@@ -347,6 +353,7 @@ class MessageService {
 
     /** Everything in this thread, read. */
     async markRead(conversationId, meId) {
+        await assertCanMessage(meId, { self: true });
         const conversation = await loadMine(conversationId, meId);
 
         await Promise.all([
@@ -367,6 +374,7 @@ class MessageService {
 
     /** For the bell: how many unread messages this member has, in total. */
     async unreadCount(meId) {
+        await assertCanMessage(meId, { self: true });
         const rows = await Conversation.find({ participants: toId(meId) })
             .select('unread').lean().catch(() => []);
 

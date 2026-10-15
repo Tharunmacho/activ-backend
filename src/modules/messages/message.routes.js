@@ -2,6 +2,7 @@ const express = require('express');
 const controller = require('./message.controller');
 const { verifyToken } = require('../../core/middleware/auth');
 const upload = require('../../core/middleware/upload');
+const { requireNetworking } = require('../common/requireNetworking');
 
 /**
  * `/messages` — member-to-member direct messages.
@@ -18,6 +19,7 @@ const upload = require('../../core/middleware/upload');
 const router = express.Router();
 
 router.use(verifyToken);
+router.use(requireNetworking);
 
 // The bell's badge. Declared before `/:id` so the literal is not eaten by the
 // parameter route — the same trap the membership routes carry a note about.

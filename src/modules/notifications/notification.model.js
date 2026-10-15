@@ -25,9 +25,22 @@ const notificationSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    deliveryKey: { type: String },
+    push: {
+        status: { type: String, enum: ['pending', 'sending', 'sent', 'skipped', 'failed'], default: 'pending' },
+        attempts: { type: Number, default: 0 },
+        nextAttemptAt: { type: Date, default: Date.now },
+        leaseUntil: Date,
+        worker: String,
+        lastError: String,
+        sentTokens: [String],
+    },
     data: mongoose.Schema.Types.Mixed
 }, {
     timestamps: true
 });
 
+notificationSchema.index({ deliveryKey: 1 }, { unique: true, sparse: true });
+notificationSchema.index({ 'push.status': 1, 'push.nextAttemptAt': 1 });
+notificationSchema.index({ user: 1, createdAt: -1 });
 module.exports = dataLayout.model('Notification', notificationSchema);

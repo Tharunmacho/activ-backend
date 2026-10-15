@@ -46,8 +46,22 @@ class NotificationService {
         }
     }
 
-    async getUserNotifications(userId, page = 1, limit = 20) {
+    async getUserNotifications(userId, page = 1, limit = 20, context) {
+        page = Math.max(1, Number(page) || 1);
+        limit = Math.min(100, Math.max(1, Number(limit) || 20));
         const skip = (page - 1) * limit;
+        const query = { user: userId };
+        if (context) {
+            const broadcast = require('./contentBroadcast');
+            const ids = await Notification.distinct('data.sourceId', { user: userId, 'data.sourceId': { $exists: true } });
+            const validIds = ids.filter(id => mongoose.isValidObjectId(id));
+            const allowed = (await Promise.all(['announcement', 'event', 'news', 'gallery', 'scheme'].map(async kind => {
+                if (!validIds.length) return [];
+                const docs = await broadcast.sourceModel(kind).find({ _id: { $in: validIds } }).select(broadcast.VISIBILITY_FIELDS).lean();
+                return docs.filter(doc => broadcast.visibleTo(kind, doc, context)).map(doc => String(doc._id));
+            }))).flat();
+            query.$or = [{ 'data.sourceId': { $exists: false } }, { 'data.sourceId': { $in: allowed } }];
+        }
 
         /*
          * THREE ROUND TRIPS BECAME ONE.
@@ -63,20 +77,21 @@ class NotificationService {
          * is work with no reader.
          */
         const [notifications, total, unread] = await Promise.all([
-            Notification.find({ user: userId })
+            Notification.find(query)
+                .select('-push -deliveryKey')
                 .skip(skip)
                 .limit(limit)
                 .sort({ createdAt: -1 })
                 .lean(),
-            Notification.countDocuments({ user: userId }),
-            Notification.countDocuments({ user: userId, isRead: false }),
+            Notification.countDocuments(query),
+            Notification.countDocuments({ ...query, isRead: false }),
         ]);
 
         return { notifications, pagination: { page, limit, total, pages: Math.ceil(total / limit) }, unread };
     }
 
     async markAsRead(userId, notificationId) {
-        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true });
+        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey');
         return notification;
     }
 

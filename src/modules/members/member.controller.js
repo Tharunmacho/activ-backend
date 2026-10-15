@@ -860,6 +860,9 @@ const getMyProfile = asyncHandler(async(req, res) => {
         orderId: paidOrder.orderId, paymentId: paidOrder.gatewayPaymentId,
         amount: paidOrder.amount, paymentMethod: paidOrder.paymentMethod || paidOrder.provider, paidAt: paidOrder.paidAt
     } : null;
+    const planAudience = paidOrder && !paidOrder.upgradeKind && !paidOrder.planAudience
+        ? await require('../common/memberAudience').paidAudience(member) : '';
+    profileData.capabilities = require('../common/memberAudience').memberAccess({ ...(member.toObject ? member.toObject() : member), paidAudience: planAudience }, paidOrder);
     profileData.currentMembership = await require('./membershipEligibility').currentMembership(member, paidOrder);
     if (paidOrder) {
         profileData.lastPaymentAmount = paidOrder.amount;

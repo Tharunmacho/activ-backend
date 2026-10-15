@@ -3,7 +3,7 @@ const controller = require('./member.controller');
 const extras = require('./memberExtras.controller');
 const directory = require('./directory.controller');
 /* The directory is a membership benefit — see the note over its routes. */
-const { requirePaidMembership } = require('../common/requirePaidMembership');
+const { requireNetworking: requirePaidMembership } = require('../common/requireNetworking');
 const validators = require('./member.validators');
 const { verifyToken } = require('../../core/middleware/auth');
 const upload = require('../../core/middleware/upload');
@@ -75,6 +75,6 @@ router.post('/profile-photo', verifyToken, upload.memberPhoto.any(), controller.
  */
 router.post('/:id/photo', verifyToken, upload.any(), controller.uploadProfilePhoto);
 
-router.get('/', verifyToken, controller.getMembers);
+router.get('/', verifyToken, requirePaidMembership, controller.getMembers);
 
 module.exports = router;

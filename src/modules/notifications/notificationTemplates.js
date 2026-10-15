@@ -634,7 +634,7 @@ const bookingFacts = (ctx = {}, { payment = true, seatsLabel = 'Seats' } = {}) =
     // never set by an organiser.)
     { label: 'Format', value: ctx.formatLabel },
     ctx.isOnline
-        ? { label: 'Registration link', value: ctx.registerUrl || (ctx.kind === 'confirmed' || ctx.kind === 'reminder'
+        ? { label: onlineLinkKind(ctx.registerUrl) === 'register' ? 'Registration link' : 'Joining link', value: ctx.registerUrl || (ctx.kind === 'confirmed' || ctx.kind === 'reminder'
             ? 'Not published by the organiser yet' : '') }
         : { label: 'Venue', value: ctx.venueLabel || 'To be announced' },
     { label: 'Topic', value: ctx.topic },
@@ -868,14 +868,15 @@ const TEMPLATES = {
                 bodyHtml: online
                     ? `<p style="margin:0;">Thank you for registering for our webinar.${settledSentence(ctx)}</p>`
                         + (ctx.registerUrl
-                            ? '<p style="margin:12px 0 0 0;"><strong>One last step:</strong> complete your registration'
+                            ? (onlineLinkKind(ctx.registerUrl) === 'register' ? '<p style="margin:12px 0 0 0;"><strong>One last step:</strong> complete your registration'
                                 + `${ctx.onlinePlatform ? ` on ${esc(ctx.onlinePlatform)}` : ''} with the button below.`
-                                + ' Your personal joining link will then be emailed to you.</p>'
-                            : '<p style="margin:12px 0 0 0;">The organiser has not published the registration link yet.</p>')
+                                + ' Follow the platform instructions to receive your personal joining link.</p>'
+                                : '<p style="margin:12px 0 0 0;">Use the button below to join at the event start time. Please keep your meeting link private.</p>')
+                            : '<p style="margin:12px 0 0 0;">The organiser has not published the joining details yet. Please check your booking again.</p>')
                     : `<p style="margin:0;">Thank you for booking.${settledSentence(ctx)} We look forward to welcoming you.</p>`,
                 facts: bookingFacts(ctx),
                 actionButton: online && ctx.registerUrl
-                    ? { label: `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}`, url: ctx.registerUrl }
+                    ? { label: onlineLinkKind(ctx.registerUrl) === 'register' ? `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}` : 'Join online event', url: ctx.registerUrl }
                     : (ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined),
                 secondaryButton: online
                     ? (ctx.registerUrl && ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined)
@@ -1046,13 +1047,13 @@ const TEMPLATES = {
                 ticketQr: ctx.ticketUrl,
                 bodyHtml: online
                     ? `<p style="margin:0;">${ctx.registerUrl
-                        ? 'Your place is reserved. Not registered on the platform yet? Do it now with the button below —'
-                            + ' your personal joining link is then emailed to you.'
-                        : 'Your place is reserved. The organiser has not published the registration link yet.'}</p>`
+                        ? (onlineLinkKind(ctx.registerUrl) === 'register' ? 'Your place is reserved. Complete the platform registration using the button below and follow its instructions to receive your joining link.'
+                            : 'Your place is reserved. Use the button below to join at the event start time.')
+                        : 'Your place is reserved. The organiser has not published the joining details yet.'}</p>`
                     : '<p style="margin:0;">Your seat is reserved — we look forward to seeing you.</p>',
                 facts: bookingFacts(ctx, { payment: false }),
                 actionButton: online && ctx.registerUrl
-                    ? { label: `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}`, url: ctx.registerUrl }
+                    ? { label: onlineLinkKind(ctx.registerUrl) === 'register' ? `Register${ctx.onlinePlatform ? ` on ${ctx.onlinePlatform}` : ' now'}` : 'Join online event', url: ctx.registerUrl }
                     : (ctx.viewUrl ? { label: 'View your booking', url: ctx.viewUrl } : undefined),
                 secondaryButton: online
                     ? undefined

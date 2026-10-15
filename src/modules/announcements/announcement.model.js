@@ -62,7 +62,7 @@ const announcementSchema = new mongoose.Schema({
      */
     audience: {
         type: String,
-        enum: ['all', 'paid'],
+        enum: ['all', 'paid', 'unpaid', 'student', 'lifetime'],
         default: 'all',
         index: true
     },
@@ -115,4 +115,5 @@ const announcementSchema = new mongoose.Schema({
 announcementSchema.index({ status: 1, pinned: -1, publishedAt: -1 });
 announcementSchema.index({ status: 1, state: 1, district: 1, block: 1 });
 
+require('../notifications/contentBroadcast').install(announcementSchema, 'announcement');
 module.exports = dataLayout.model('Announcement', announcementSchema);

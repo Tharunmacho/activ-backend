@@ -691,4 +691,5 @@ eventSchema.pre('findOneAndUpdate', async function nameUpdatedBanner() {
     fields.bannerUrl = await require('./eventBanner').nameEventBanner({ ...existing, ...fields });
 });
 
+require('../notifications/contentBroadcast').install(eventSchema, 'event');
 module.exports = dataLayout.model('Event', eventSchema);

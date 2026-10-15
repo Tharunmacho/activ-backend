@@ -89,6 +89,8 @@ const MODELS = {
 
     // ---- notifications
     Notification: ['notifications', 'notifications', A, 'notifications'],
+    PushDevice: ['notifications', 'push_devices', A, 'push_devices'],
+    ContentBroadcast: ['notifications', 'content_broadcasts', A, 'content_broadcasts'],
     NotificationLog: ['notifications', 'notification_logs', A, 'notificationlogs'],
     Announcement: ['notifications', 'announcements', A, 'announcements'],
 

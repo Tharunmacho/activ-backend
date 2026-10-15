@@ -6,6 +6,13 @@ package-lock.json
 .env
 .env.local
 .env.*.local
+.env.bak*
+
+# Firebase configuration and private service-account credentials
+google-services.json
+GoogleService-Info.plist
+**/*firebase-adminsdk*.json
+**/firebase-service-account*.json
 
 # Logs
 logs/

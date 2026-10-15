@@ -339,6 +339,7 @@ class AuthService {
 
         return {
             user: {
+                loginMethod: 'password',
                 id: memberDetails._id,
                 memberId: memberDetails._id,
                 email: memberDetails.email,
@@ -424,7 +425,7 @@ class AuthService {
      * One body for both, so the payment reconcile, the blocked check and the
      * portal check cannot drift between the two ways in.
      */
-    async memberSession(normalizedEmail, portal = '') {
+    async memberSession(normalizedEmail, portal = '', provider = 'password') {
         let memberDetails = await MemberDetails.findOne({ email: normalizedEmail });
 
         /* Sign-in decides paid vs unpaid dashboard from this record: a paid
@@ -471,8 +472,15 @@ class AuthService {
             CACHE_TTL.HOUR
         );
 
+        await require('../audit/audit.service').record({
+            action: 'auth.signed_in', category: 'authentication',
+            summary: `${memberDetails.fullName || 'Member'} signed in using ${provider}`,
+            actorId: String(memberDetails._id), actorEmail: memberDetails.email, actorName: memberDetails.fullName || 'Member',
+            actorRole: userRole, targetId: String(memberDetails._id), metadata: { provider },
+        });
         return {
             user: {
+                loginMethod: provider,
                 id: memberDetails._id,
                 memberId: memberDetails._id,
                 email: memberDetails.email,
@@ -622,6 +630,13 @@ class AuthService {
                 CACHE_TTL.HOUR
             );
 
+            adminObj.loginMethod = 'password';
+            await require('../audit/audit.service').record({
+                action: 'auth.signed_in', category: 'authentication',
+                summary: `${adminObj.fullName} signed in using password`,
+                actorId: adminObj.id, actorEmail: adminObj.email, actorName: adminObj.fullName,
+                actorRole: adminRole, targetId: adminObj.id, metadata: { provider: 'password' },
+            });
             return {
                 user: adminObj,
                 memberDetails: adminObj,

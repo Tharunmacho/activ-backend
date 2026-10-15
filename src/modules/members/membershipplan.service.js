@@ -105,8 +105,8 @@ const SEED_FEATURES = {
     ],
     student: [
         'Association updates and event invitations',
-        'Access to the member directory',
-        'Mentoring and guidance for students planning a business'
+        'Learning programmes and workshops',
+        'Upgrade to connect and chat with business members'
     ],
     platinum: [
         'Lifetime Membership — never renew',
@@ -204,7 +204,7 @@ const toPlan = (doc = {}) => ({
     minYears: Number(doc.minYears || 0),
     maxYears: doc.maxYears === null || doc.maxYears === undefined ? null : Number(doc.maxYears),
     experience: bandLabel(doc),
-    features: Array.isArray(doc.entitlements) ? doc.entitlements.filter(Boolean).map(text => doc.audience === 'platinum' ? String(text).replace(/platinum/gi, 'Lifetime') : text) : [],
+    features: Array.isArray(doc.entitlements) ? doc.entitlements.filter(Boolean).map(text => doc.audience === 'platinum' ? String(text).replace(/platinum/gi, 'Lifetime') : doc.audience === 'student' && /directory|network|connect|chat/i.test(text) ? 'Upgrade to connect and chat with business members' : text) : [],
     popular: doc.popular === true,
     active: doc.isActive !== false,
     order: Number(doc.displayOrder || 0)

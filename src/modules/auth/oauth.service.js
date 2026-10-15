@@ -337,7 +337,7 @@ const exchange = async(code) => {
             + 'Please contact the ACTIV administration if you believe this is a mistake.');
     }
 
-    const session = await authService.memberSession(claims.e, 'member');
+    const session = await authService.memberSession(claims.e, 'member', claims.p);
     if (!session) throw ApiError.unauthorized('No ACTIV member account uses that email.');
     return session;
 };

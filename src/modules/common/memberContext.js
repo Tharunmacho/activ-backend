@@ -95,12 +95,13 @@ const cachedMember = async (id) => {
     if (hit && hit.expires > Date.now()) return hit.value;
 
     let member = await MemberDetails.findById(id)
-        .select('fullName email state district block membershipStatus memberType registrationType paymentId membershipTier membershipType membershipExpiresAt membershipActivatedAt')
+        .select('fullName email state district block membershipStatus memberType registrationType paymentId membershipTier membershipType membershipExpiresAt membershipActivatedAt isActive deletedAt')
         .lean()
         .catch(() => null);
 
     /* A paid status whose payment was deleted is not paid — see paymentReconcile. */
     if (member) member = await require('../members/paymentReconcile').reconcileMember(member);
+    if (member) member.paidAudience = await require('./memberAudience').paidAudience(member);
 
     /* A miss is cached too. A member id with no profile row — an admin calling
        a member endpoint — would otherwise pay the full round trip on every
@@ -128,8 +129,7 @@ const resolveMemberContext = async (req) => {
         block: member?.block || user.block || '',
         // An admin is not a paying member, but must be able to preview what
         // members see; every caller treats `isAdmin` as the wider permission.
-        isPaid: !!member && require('../members/membershipState').membershipState(member).state === 'active',
-        memberType: String(member?.memberType || member?.registrationType || '').toLowerCase(),
+        ...require('./memberAudience').memberAccess(member || {}),
         role,
         isAdmin
     };

@@ -2643,6 +2643,10 @@ const sharePreviewSchema = new mongoose.Schema({
     updatedBy: editedBy,
 }, { timestamps: true });
 
+for (const [schema, kind] of [[newsArticleSchema, 'news'], [galleryItemSchema, 'gallery'], [schemeSchema, 'scheme']]) {
+    require('../notifications/contentBroadcast').install(schema, kind);
+}
+
 module.exports = {
     SINGLETON_KEY,
     ICON_NAMES,

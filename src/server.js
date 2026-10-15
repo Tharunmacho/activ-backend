@@ -17,6 +17,7 @@ const server = http.createServer(app);
 
 // Graceful shutdown
 const gracefulShutdown = async() => {
+    require('./modules/notifications/push.service').stop();
     logger.info('Shutting down gracefully...');
 
     server.close(async() => {
@@ -153,6 +154,8 @@ const startServer = async() => {
         } catch (error) {
             logger.warn('Delivery guard not started', { error: error && error.message });
         }
+
+        require('./modules/notifications/push.service').start();
 
         // Renewal reminders: 30 days, 7 days, and on expiry.
         // `MEMBERSHIP_RENEWAL_REMINDERS=false` turns it off.

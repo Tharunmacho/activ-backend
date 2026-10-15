@@ -69,6 +69,7 @@ async function purgeMember(id, actor = {}) {
     await drop('Message', { $or: [{ conversationId: { $in: conversations.map(row => row._id) } }, { senderId: owner }] });
     await drop('Conversation', { participants: owner });
     await drop('Connection', { $or: [{ senderId: owner }, { recipientId: owner }] });
+    await drop('PushDevice', { user: owner });
     await drop('TrustedCompany', { $or: [{ userId: owner }, { companyId: companyIds }] });
     await drop('StockMovement', { $or: [{ userId: owner }, { companyId: companyIds }] });
     await drop('Product', { $or: [{ userId: owner }, { companyId: companyIds }] });

@@ -22,11 +22,12 @@ const { publicLimiter } = require('../../core/middleware/rateLimit');
 // ---------------------------------------------------------------- directory
 
 const browseRouter = express.Router();
+const { requireNetworking } = require('../common/requireNetworking');
 
 // Signed in, like the member listing it aliases: the directory is a member
 // benefit, not public data.
-browseRouter.get('/search', verifyToken, controller.searchMembers);
-browseRouter.get('/', verifyToken, controller.browseMembers);
+browseRouter.get('/search', verifyToken, requireNetworking, controller.searchMembers);
+browseRouter.get('/', verifyToken, requireNetworking, controller.browseMembers);
 
 // ---------------------------------------------------------------- companies
 
