@@ -25,7 +25,6 @@ Financial.findOne = () => ({ lean: async() => null });
 Business.findOne = () => ({ lean: async() => null });
 const emptyIdentity = () => ({ sort() { return this; }, select() { return this; }, lean: async() => null });
 require('../src/modules/members/company.model').findOne = emptyIdentity;
-require('../src/modules/applications/application.model').findOne = emptyIdentity;
 const orderService = require('../src/modules/payment/paymentOrder.service');
 const controller = require('../src/modules/members/memberExtras.controller');
 const templates = require('../src/modules/notifications/notificationTemplates');
