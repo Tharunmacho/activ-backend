@@ -115,16 +115,16 @@ module.exports = (h) => {
             return {
                 status: 'now',
                 title: label,
-                note: deciding ? 'Reviewing — gives the final decision' : 'Reviewing'
+                note: deciding ? 'Final decision pending' : 'No review recorded'
             };
         };
         const paid = ctx.stage === 'active';
         const approved = ctx.stage === 'approved' || paid;
         return [
             { status: 'done', title: 'Application submitted', note: ctx.submittedLabel || '' },
-            tierRow('block', ctx.blockOffice || 'Block Admin review', false),
-            tierRow('district', ctx.districtOffice || 'District Admin review', false),
-            tierRow('state', ctx.stateOffice || 'State Admin review', true),
+            ...['block', 'district'].filter(tier => (ctx.region || ctx)[tier] || r[tier]?.state === 'approved' || r[tier]?.state === 'reviewed')
+                .map(tier => tierRow(tier, ctx[`${tier}Office`] || `${tier === 'block' ? 'Block' : 'District'} Admin review`, false)),
+            tierRow('state', (ctx.region || ctx).state ? (ctx.stateOffice || 'State Admin review') : 'ACTIV final review', true),
             {
                 status: paid ? 'done' : (approved ? 'now' : 'next'),
                 title: 'Membership payment',
@@ -173,7 +173,7 @@ module.exports = (h) => {
         const v = (ctx.reviews || {})[tier] || {};
         if (v.state === 'approved') return v.byLine || 'Approved';
         if (v.state === 'reviewed') return 'Reviewed';
-        return tier === 'state' ? 'Reviewing (final decision)' : 'Reviewing';
+        return tier === 'state' ? 'Final decision pending' : 'No review recorded';
     };
 
     /** A checklist card — "Your next steps", "What your membership gives you". */
@@ -206,6 +206,22 @@ module.exports = (h) => {
         'Your membership certificate and 80G donation receipt',
         'Your company page, product catalogue and reach analytics'
     ];
+    const CORE_BENEFITS = [
+        'Member events and learning opportunities available to your plan',
+        'Your membership certificate and payment documents'
+    ];
+    // Unknown entitlement data must not promise restricted networking features.
+    // Renewal describes the benefits restored by payment, including expired plans.
+    const networkBenefits = (ctx = {}) => ctx.membershipType === 'lifetime' || ctx.memberAccess?.isLifetime
+        || (ctx.memberAccess ? !ctx.memberAccess.isStudent && !!ctx.memberAccess.memberType
+            : ['business', 'aspirant'].includes(ctx.applicantKind));
+    const benefits = (ctx) => networkBenefits(ctx)
+        ? (ctx.planFeatures?.length ? ctx.planFeatures : BENEFITS) : CORE_BENEFITS;
+    // Existing approved generic template: no obsolete fixed review/benefit claims.
+    const recordUpdate = (ctx, title, detail, url) => ({
+        template: 'activ_record_update_v1',
+        params: [greet(ctx), oneLine(title, 80), oneLine(detail, 400), url, contact.email]
+    });
 
     const routes = {
         forms: appUrl('/member/forms/personal'),
@@ -224,7 +240,6 @@ module.exports = (h) => {
     const TEMPLATES = {
         /* ---------------------------------------------------- account created */
         ACCOUNT_REGISTERED: (ctx) => {
-            const [oName, oPhone, oEmail] = office(ctx);
             return {
                 inApp: {
                     title: 'Welcome to ACTIV',
@@ -250,23 +265,19 @@ module.exports = (h) => {
                     actionButton: { label: 'Start your application', url: routes.forms },
                     afterHtml: listCard('How membership works', [
                         'Fill in your personal details, business details and declaration',
-                        'Your Block, District and State Admins review your application together',
-                        'Once the State Admin approves it, pay your membership fee online',
+                        'The applicable ACTIV reviewers assess your application',
+                        'After final approval, pay your membership fee online',
                         'Your membership activates at once, with your certificates'
                     ], { numbered: true })
                 },
                 whatsapp: {
-                    ...chain2(TPL.accountWelcomeV2,
-                        [greet(ctx), orDash(ctx.email, 'Not given'), ...regionSlots(ctx), routes.forms, oName, oPhone, oEmail],
-                        TPL.accountWelcome,
-                        [greet(ctx), orDash(ctx.email, 'Not given'), orDash(regionOf(ctx), 'Not given'), routes.forms,
-                            oName, oPhone, oEmail],
-                        { template: TPL.welcome, params: [ctx.firstName || 'Member'] }),
+                    ...recordUpdate(ctx, 'Your ACTIV account has been created',
+                        'Complete your membership application to send it to the applicable ACTIV reviewers. You can track the application in your account.', routes.forms),
                     text: '🎉 *Welcome to ACTIV*\n\n'
                         + `Dear ${greet(ctx)},\nYour account has been created.\n\n`
                         + waLines([['📧', ctx.email ? `Registered email: ${ctx.email}` : ''], ...regionLines(ctx)])
                         + `\n\n📝 *Your next step*\nComplete your membership application:\n${routes.forms}\n\n`
-                        + '👥 It is then reviewed by your Block, District and State Admins.\n\n'
+                        + '👥 It is then sent to the applicable ACTIV reviewers.\n\n'
                         + `${helpText(ctx)}\n\n— ${ORG_SIGNATURE}`
                 }
             };
@@ -274,11 +285,10 @@ module.exports = (h) => {
 
         /* ------------------------------------------------ application lodged */
         APPLICATION_SUBMITTED: (ctx) => {
-            const [oName, oPhone, oEmail] = office(ctx);
             return {
                 inApp: {
                     title: 'Application submitted',
-                    message: `${ctx.reference ? `Reference ${ctx.reference}. ` : ''}Your Block, District and State Admins are reviewing it now.`,
+                    message: `${ctx.reference ? `Reference ${ctx.reference}. ` : ''}Your application has been submitted for review. Track its current status in your account.`,
                     type: 'info'
                 },
                 email: {
@@ -286,7 +296,7 @@ module.exports = (h) => {
                     title: 'We have received your application',
                     badge: 'Application received',
                     tone: 'info',
-                    preheader: 'Your Block, District and State Admins are reviewing it now.',
+                    preheader: 'Your application has been submitted for review.',
                     highlight: ctx.reference && {
                         label: 'Application reference',
                         value: ctx.reference,
@@ -294,8 +304,8 @@ module.exports = (h) => {
                     },
                     bodyHtml: `<p style="margin:0 0 12px 0;">Thank you — your ACTIV membership application has been
                         submitted.</p>
-                        <p style="margin:0;">Your Block, District and State Admins are reviewing it now, together. We will
-                        write to you as each one records a decision. There is nothing you need to do in the meantime.</p>`,
+                        <p style="margin:0;">The applicable ACTIV reviewers will assess your application. We will notify
+                        you of review progress and the final decision. You can check its current status in your account.</p>`,
                     facts: [
                         { label: 'Applicant', value: ctx.name },
                         { label: 'Applying as', value: applyingAs(ctx) },
@@ -306,17 +316,8 @@ module.exports = (h) => {
                     afterHtml: journeyHtml(ctx)
                 },
                 whatsapp: {
-                    ...chain2(TPL.applicationReceivedV2,
-                        [greet(ctx), orDash(ctx.reference, 'See your dashboard'), orDash(applyingAs(ctx), 'Membership'),
-                            ...regionSlots(ctx), orDash(ctx.submittedLabel, 'Today'), routes.status, oName, oPhone, oEmail],
-                        TPL.applicationReceived,
-                        [greet(ctx), orDash(ctx.reference, 'See your dashboard'), orDash(applyingAs(ctx), 'Membership'), orDash(regionOf(ctx), 'Not given'),
-                            orDash(ctx.submittedLabel, 'Today'), routes.status, oName, oPhone, oEmail],
-                        {
-                            template: TPL.status,
-                            params: [ctx.firstName || 'Member', 'submitted',
-                                'with your Block, District and State Admins for review']
-                        }),
+                    ...recordUpdate(ctx, 'Membership application received',
+                        `${ctx.reference ? `Reference ${ctx.reference}. ` : ''}Your application has been submitted for review. We will notify you of review progress and the final decision. Track the current status in your account.`, routes.status),
                     text: '📨 *Application received*\n\n'
                         + `Dear ${greet(ctx)},\nThank you — your ACTIV membership application has been submitted.\n\n`
                         + waLines([['🔖', ctx.reference ? `Reference: ${ctx.reference}` : ''], ['🏢', applyingAs(ctx)],
@@ -468,7 +469,7 @@ module.exports = (h) => {
                     actionButton: { label: fee ? `Pay ${fee} now` : 'Choose your plan and pay', url: routes.pay },
                     afterHtml: journeyHtml({ ...ctx, stage: 'approved' }, 'Your journey')
                         + gap + listCard('What your membership gives you',
-                        (ctx.planFeatures && ctx.planFeatures.length ? ctx.planFeatures : BENEFITS).slice(0, 6))
+                        benefits(ctx).slice(0, 6))
                 },
                 whatsapp: {
                     ...chain(TPL.membershipApproved,
@@ -549,7 +550,7 @@ module.exports = (h) => {
                     title: 'Your membership is active',
                     badge: 'Payment received · Membership active',
                     tone: 'success',
-                    preheader: 'Your certificates and every member benefit are now open to you.',
+                    preheader: 'Your membership documents and the benefits included in your plan are now available.',
                     highlight: ctx.membershipNumber ? {
                         label: 'Your Member ID',
                         value: ctx.membershipNumber,
@@ -574,7 +575,7 @@ module.exports = (h) => {
                     ],
                     actionButton: { label: 'Open your member dashboard', url: routes.dashboard },
                     secondaryButton: { label: 'Download your certificate', url: routes.certificate },
-                    afterHtml: `<p style="margin:0 0 16px;line-height:1.8;"><a href="${esc(ctx.receiptUrl || routes.receipt)}">View your payment receipt</a><br><a href="${esc(routes.taxCertificate)}">View your tax certificate</a><br><a href="${esc(routes.documents)}">Open all membership documents</a></p>` + listCard('Now open to you', BENEFITS)
+                    afterHtml: `<p style="margin:0 0 16px;line-height:1.8;"><a href="${esc(ctx.receiptUrl || routes.receipt)}">View your payment receipt</a><br><a href="${esc(routes.taxCertificate)}">View your tax certificate</a><br><a href="${esc(routes.documents)}">Open all membership documents</a></p>` + listCard('Included in your membership', benefits(ctx))
                 },
                 whatsapp: {
                     ...chain(TPL.membershipActive,
@@ -585,7 +586,7 @@ module.exports = (h) => {
                         {
                             template: TPL.status,
                             params: [ctx.firstName || 'Member', 'fully completed',
-                                'your membership and benefits are now completely active']
+                                'your membership is active with the benefits included in your plan']
                         }),
                     text: '🎉 *Your ACTIV membership is active*\n\n'
                         + `Dear ${greet(ctx)},\nThank you — your payment has been received. Welcome to ACTIV!\n\n`
@@ -602,7 +603,6 @@ module.exports = (h) => {
 
         /* ------------------------------------------ renewal due (NEW) */
         MEMBERSHIP_RENEWAL_DUE: (ctx) => {
-            const [oName, oPhone, oEmail] = office(ctx);
             const expired = ctx.daysLeft !== undefined && Number(ctx.daysLeft) <= 0;
             const when = expired ? 'has expired' : `expires ${ctx.expiresInLabel || 'soon'}`;
             return {
@@ -618,14 +618,15 @@ module.exports = (h) => {
                     title: expired ? 'Your membership has expired' : 'Time to renew your membership',
                     badge: expired ? 'Membership expired' : 'Renewal due',
                     tone: 'warning',
-                    preheader: 'Renew online in a minute to keep every member benefit.',
+                    preheader: 'Renew online to continue the benefits included in your plan.',
                     highlight: ctx.validUntilLabel ? {
                         label: expired ? 'Expired on' : 'Valid until',
                         value: ctx.validUntilLabel,
                         note: ctx.membershipNumber ? `Member ID ${ctx.membershipNumber}` : ''
                     } : null,
-                    bodyHtml: `<p style="margin:0;">Your ACTIV membership ${esc(when)}. Renew online to keep your access
-                        to the member directory, members-only events and your certificates — it takes a minute.</p>`,
+                    bodyHtml: `<p style="margin:0;">Your ACTIV membership ${esc(when)}. Renew online to continue
+                        ${networkBenefits(ctx) ? 'your member directory access, events and membership documents'
+        : 'the events, learning opportunities and membership documents included in your plan'}.</p>`,
                     facts: [
                         { label: 'Member ID', value: ctx.membershipNumber },
                         { label: 'Plan', value: ctx.planName || ctx.membershipType },
@@ -634,11 +635,8 @@ module.exports = (h) => {
                     actionButton: { label: 'Renew your membership', url: routes.plan }
                 },
                 whatsapp: {
-                    ...chain(TPL.membershipRenewal,
-                        [greet(ctx), orDash(ctx.membershipNumber, '–'), orDash(ctx.planName || ctx.membershipType, 'Membership'),
-                            orDash(ctx.validUntilLabel, 'soon'), expired ? 'has expired' : `expires ${ctx.expiresInLabel || 'soon'}`,
-                            routes.plan, oName, oPhone, oEmail],
-                        null),
+                    ...recordUpdate(ctx, expired ? 'Your membership has expired' : 'Membership renewal due',
+                        `Your ACTIV membership ${when}.${ctx.membershipNumber ? ` Member ID: ${ctx.membershipNumber}.` : ''}${ctx.validUntilLabel ? ` Valid until: ${ctx.validUntilLabel}.` : ''} Renew online to continue the benefits included in your plan.`, routes.plan),
                     text: `🔔 *${expired ? 'Your membership has expired' : 'Membership renewal due'}*\n\n`
                         + `Dear ${greet(ctx)},\nYour ACTIV membership ${when}.\n\n`
                         + waLines([['🪪', ctx.membershipNumber ? `Member ID: ${ctx.membershipNumber}` : ''],
@@ -663,7 +661,7 @@ module.exports = (h) => {
                     title: 'We have your Lifetime request',
                     badge: 'Lifetime · request received',
                     tone: 'info',
-                    preheader: 'The ACTIV office will contact you within two working days.',
+                    preheader: 'Your request has been sent to the ACTIV office for follow-up.',
                     highlight: ctx.priceLabel ? {
                         label: `${ctx.planName || 'Lifetime Membership'} · one payment`,
                         value: ctx.priceLabel,
@@ -671,7 +669,7 @@ module.exports = (h) => {
                     } : null,
                     bodyHtml: `<p style="margin:0 0 12px 0;">Thank you for your interest in <strong>Lifetime Membership</strong>.</p>
                         <p style="margin:0;">The ACTIV office will contact you by <strong>${esc(how)}</strong>${esc(when)}
-                        within two working days to explain the next steps. Nothing is charged online — Lifetime is paid at
+                        to explain the next steps. Nothing is charged online — Lifetime is paid at
                         the office and your membership is upgraded for you.</p>`,
                     facts: [
                         { label: 'Contact by', value: how },
@@ -682,11 +680,11 @@ module.exports = (h) => {
                 whatsapp: {
                     template: TPL.status,
                     params: [ctx.firstName || 'Member', 'received',
-                        'the ACTIV office will contact you about Lifetime Membership within two working days'],
+                        'the ACTIV office has received your Lifetime Membership request for follow-up'],
                     text: '👑 *Lifetime request received*\n\n'
                         + `Dear ${greet(ctx)},\nThank you for your interest in Lifetime Membership`
                         + `${ctx.priceLabel ? ` (${ctx.priceLabel}, one payment, never renew)` : ''}.\n\n`
-                        + `📞 The ACTIV office will contact you by ${how.toLowerCase()}${when} within two working days.\n\n`
+                        + `📞 Your request has been sent to the ACTIV office. Preferred contact: ${how.toLowerCase()}${when}.\n\n`
                         + `— ${ORG_SIGNATURE}`
                 }
             };

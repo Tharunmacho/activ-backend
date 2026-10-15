@@ -51,7 +51,7 @@ async function main() {
         activeEvent = event;
         const expectedEmail = /^EVENT_/.test(event) ? 'events@activ.org.in' : 'member@activ.org.in';
         const spec = templates.render(event, { ...context, ...recipient, firstName: 'Test' });
-        const result = await service.dispatchLifecycleEvent(event, recipient, context);
+        const result = await service._deliverLifecycleEvent(event, recipient, context);
         if (spec.email) {
             assert.equal(result.channels.email?.success, true, `${event}: email dispatched`);
             const mail = emailEvents.find(row => row.event === event);

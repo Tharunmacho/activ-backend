@@ -1,15 +1,76 @@
 const MemberDetails = require('../members/memberdetails.model');
 const PaymentOrder = require('../payment/paymentorder.model');
 const EventBooking = require('../events/eventbooking.model');
-const { renewalFor } = require('../members/membershipState');
+const { renewalFor, membershipState, periodEnd } = require('../members/membershipState');
 const { expiryBoundary } = require('../members/membershipDates');
+const Application = require('../applications/application.model');
+const { normalizeStatus } = require('../common/applicationStatus');
+const reviews = require('../common/tierReviews');
 
+const APPLICATION_EVENTS = new Set(['APPLICATION_SUBMITTED', 'APPLICATION_ENDORSED', 'APPLICATION_APPROVED', 'CORRECTION_REQUESTED']);
 const STATEFUL = new Set(['PAYMENT_REQUIRED', 'PAYMENT_FAILED', 'EVENT_PAYMENT_FAILED', 'MEMBERSHIP_RENEWAL_DUE',
-    'MEMBERSHIP_STATUS_CHANGED', 'MEMBERSHIP_PLAN_ADVANCED', 'BOT_REPLY']);
+    'MEMBERSHIP_STATUS_CHANGED', 'MEMBERSHIP_PLAN_ADVANCED', 'MEMBERSHIP_ACTIVATED', 'BOT_REPLY', ...APPLICATION_EVENTS]);
 const dateValue = value => value ? new Date(value).getTime() : NaN;
 const idOf = value => value && String(value._id || value);
 const memberUnavailable = member => !member || member.deletedAt || member.isActive === false
     || String(member.membershipStatus || '').toLowerCase() === 'cancelled';
+const iso = value => Number.isFinite(dateValue(value)) ? new Date(value).toISOString() : '';
+// Persist only the facts that identify the paid period, never the whole member.
+const snapshotActivation = member => ({
+    membershipType: String(member.membershipType || '').toLowerCase(),
+    membershipTier: String(member.membershipTier || 'standard').toLowerCase(),
+    activatedAt: iso(member.membershipActivatedAt),
+    expiresAt: iso(periodEnd(member)),
+    paymentId: String(member.paymentId || ''),
+    lastPaymentDate: iso(member.lastPaymentDate),
+});
+
+async function applicationReason(row, memberId, context) {
+    if (!memberId || !context.applicationId) return 'The original application could not be verified.';
+    const [application, directMember] = await Promise.all([
+        Application.findById(context.applicationId).lean(), MemberDetails.findById(memberId).lean(),
+    ]);
+    if (!application || application.deletedAt || idOf(application.userId) !== memberId) return 'The application no longer matches this member.';
+    // Older applications link the login ID through MemberDetails.userId. Keep
+    // that original ownership check; never infer the owner from an email match.
+    const member = directMember || await MemberDetails.findOne({ userId: memberId }).lean();
+    if (memberUnavailable(member)) return 'The member account is no longer active.';
+    const status = normalizeStatus(application.status);
+    if (row.event === 'APPLICATION_SUBMITTED') {
+        if (status !== 'Pending' || reviews.TIER_ORDER.some(tier => reviews.hasOwnVerdict(application, tier))) {
+            return 'Application review has progressed since this submission notice.';
+        }
+        return '';
+    }
+    const expected = row.event === 'CORRECTION_REQUESTED' ? 'Rejected' : row.event === 'APPLICATION_APPROVED' ? 'Approved' : 'Pending';
+    if (status !== expected) return 'The application decision has changed since this notification.';
+    if (row.event === 'APPLICATION_APPROVED' && ['active', 'completed'].includes(String(member.membershipStatus || '').toLowerCase())) {
+        return 'The member has already completed membership payment.';
+    }
+    const tier = row.event === 'APPLICATION_ENDORSED' ? context.tier : reviews.DECIDING_TIER;
+    if (!reviews.TIER_ORDER.includes(tier)) return 'The original review tier could not be verified.';
+    const verdict = reviews.tierVerdict(application, tier, { carried: false });
+    const decision = row.event === 'CORRECTION_REQUESTED' ? 'rejected' : 'approved';
+    if (verdict.auto || verdict.decision !== decision) return 'This review decision is no longer current.';
+    if (row.event === 'APPLICATION_ENDORSED' && reviews.TIER_ORDER.slice(reviews.TIER_ORDER.indexOf(tier) + 1)
+        .some(higher => reviews.hasOwnVerdict(application, higher) && reviews.tierVerdict(application, higher).decision === 'approved')) {
+        return 'A later review has superseded this endorsement.';
+    }
+    const decidedAt = dateValue(verdict.decidedAt);
+    const originalAt = dateValue(context.reviewDecidedAt);
+    if (Number.isFinite(originalAt)) {
+        if (decidedAt !== originalAt || (context.reviewDecision && context.reviewDecision !== verdict.decision)) {
+            return 'The application has a newer review decision.';
+        }
+    } else if (!Number.isFinite(decidedAt) || !Number.isFinite(dateValue(row.createdAt)) || decidedAt > dateValue(row.createdAt)) {
+        return 'The original review decision could not be verified.';
+    }
+    if (row.event === 'CORRECTION_REQUESTED' && context.reason
+        && String(context.reason).trim() !== String(application.rejectionReason || verdict.reason || '').trim()) {
+        return 'The application rejection reason has changed.';
+    }
+    return '';
+}
 
 const replyReasonToSkip = async (row = {}) => {
     const data = row.data || {};
@@ -65,6 +126,22 @@ const reasonToSkip = async (row = {}) => {
     const orderId = lifecycle.orderId || data.orderId;
     const memberId = idOf(row.user);
     try {
+        if (APPLICATION_EVENTS.has(row.event)) return await applicationReason(row, memberId, { ...data, ...lifecycle });
+        if (row.event === 'MEMBERSHIP_ACTIVATED') {
+            if (!memberId) return 'The member for this activation could not be verified.';
+            const member = await MemberDetails.findById(memberId).lean();
+            if (memberUnavailable(member) || membershipState(member).state !== 'active') return 'This membership activation is no longer current.';
+            const original = lifecycle.activationState || data.activationState;
+            if (!original || typeof original !== 'object') return 'The original activation period could not be verified.';
+            const current = snapshotActivation(member);
+            if (Object.keys(current).some(key => original[key] !== current[key])) return 'Membership has changed since this activation notice.';
+            if (orderId) {
+                const order = await PaymentOrder.findOne({ orderId: String(orderId) }).lean();
+                if (!order || order.status !== 'paid' || idOf(order.memberId) !== memberId
+                    || !['membership', undefined].includes(order.orderType)) return 'The original membership payment is no longer confirmed.';
+            }
+            return '';
+        }
         // These updates can refer to a deliberately cancelled receipt. Check
         // the membership/request itself before applying payment-order rules.
         if (row.event === 'MEMBERSHIP_STATUS_CHANGED' || row.event === 'MEMBERSHIP_PLAN_ADVANCED') {
@@ -153,4 +230,4 @@ const reasonToSkip = async (row = {}) => {
     }
 };
 
-module.exports = { reasonToSkip };
+module.exports = { reasonToSkip, snapshotActivation };

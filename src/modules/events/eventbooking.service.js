@@ -369,6 +369,42 @@ const cleanParticipants = (input, count, booker) => {
     });
 };
 
+const sameParticipant = (left = {}, right = {}) => str(left.name) === str(right.name)
+    && str(left.email).toLowerCase() === str(right.email).toLowerCase()
+    && phoneKey(left.phone) === phoneKey(right.phone);
+
+/** Delivery follows each contact separately: replacing an email must not cancel
+ * a seat on a phone number that still belongs to a current attendee. */
+const participantChanges = (previous = [], next = []) => {
+    const emails = new Set(next.map(person => str(person.email).toLowerCase()).filter(Boolean));
+    const phones = new Set(next.map(person => phoneKey(person.phone)).filter(Boolean));
+    return {
+        confirmed: next.map((person, index) => ({ person, index }))
+            .filter(({ person, index }) => !previous[index] || !sameParticipant(person, previous[index])),
+        removed: previous.map((person, index) => ({ index, person: {
+            name: str(person.name),
+            email: emails.has(str(person.email).toLowerCase()) ? '' : str(person.email).toLowerCase(),
+            phone: phones.has(phoneKey(person.phone)) ? '' : str(person.phone)
+        } })).filter(({ person }) => person.email || person.phone)
+    };
+};
+
+/** A nominee receives one seat and its pass, never the booking's payment,
+ * management link, or the other nominees' names and passes. */
+const participantMessageContext = (ctx, person, index) => {
+    const own = (ctx.passes || []).find(pass => pass.index === index);
+    return {
+        ...ctx,
+        ticketUrl: own ? own.url : '', registrationNo: own ? own.registrationNo : '', passes: [],
+        participantName: str(person.name), participantEmail: str(person.email), participantPhone: str(person.phone),
+        participantNames: [str(person.name)], seats: 1, seatsLabel: '1 seat',
+        bookerEmail: str(person.email), bookerPhone: '', bookedByLine: ctx.bookerName || '',
+        amountLabel: '', settledVia: '', paymentModeLabel: '', paymentLabel: '', paymentId: '',
+        viewUrl: '', manageUrl: '', manageToken: '',
+        data: { ...(ctx.data || {}), seats: 1 }
+    };
+};
+
 /** What a client is allowed to see about a booking. */
 /** The overview's running totals, zeroed. A shape, so no caller invents one. */
 const EMPTY_OVERVIEW_TOTALS = () => ({
@@ -1601,9 +1637,22 @@ class EventBookingService {
         }
 
         const next = cleanParticipants(participants, booking.noOfPersons, booking.bookedBy || {});
+        const previous = (booking.participants || []).map(person => person.toObject ? person.toObject() : { ...person });
+        if (previous.length === next.length && next.every((person, index) => sameParticipant(person, previous[index]))) {
+            return toBooking(booking.toObject ? booking.toObject() : booking);
+        }
 
-        booking.participants = next;
-        await booking.save();
+        // Only the request that replaces this exact attendee list may notify it.
+        // A concurrent edit/cancellation must not produce a second or stale pass.
+        const updated = await EventBooking.findOneAndUpdate({
+            _id: booking._id, participants: previous, status: booking.status,
+            'payment.status': booking.payment && booking.payment.status
+        }, { $set: { participants: next } }, { new: true, runValidators: true });
+        if (!updated) throw ApiError.conflict('This booking changed while you were editing. Refresh it and try again.');
+
+        // Persist every affected recipient's intent before returning; provider
+        // delivery belongs to the outbox worker and does not delay this edit.
+        await this.announceParticipantChanges(updated.toObject ? updated.toObject() : updated, previous);
 
         logger.info('Booking participants changed', {
             bookingRef: booking.bookingRef,
@@ -1611,7 +1660,41 @@ class EventBookingService {
             seats: booking.noOfPersons
         });
 
-        return toBooking(booking.toObject ? booking.toObject() : booking);
+        return toBooking(updated.toObject ? updated.toObject() : updated);
+    }
+
+    /** Nomination edits do not replay the booker's receipt or the whole group.
+     * Unpaid and waitlisted bookings have no confirmed seat to announce. */
+    announceParticipantChanges(booking, previous = []) {
+        return (async () => {
+            if (!booking || booking.status !== 'active'
+                || !['paid', 'not_required'].includes((booking.payment || {}).status)) return;
+            const changes = participantChanges(previous, booking.participants || []);
+            // Distinguish a later re-nomination from replay of the same intent.
+            const changeId = crypto.randomUUID();
+            const notificationService = require('../notifications/notification.service');
+            for (const kind of ['removed', 'confirmed']) {
+                if (!changes[kind].length) continue;
+                const removed = kind === 'removed';
+                const ctx = await this.messageContext(booking, removed ? 'cancelled' : 'confirmed', removed ? {
+                    participantRemoved: true,
+                    reason: 'The booker changed the nomination. Your seat is no longer reserved.'
+                } : {});
+                for (const { person, index } of changes[kind]) {
+                    const payload = participantMessageContext(ctx, person, index);
+                    await notificationService.dispatchInBackground(removed ? 'EVENT_PARTICIPANT_CANCELLED' : 'EVENT_PARTICIPANT_CONFIRMED', {
+                        id: '', name: str(person.name), email: str(person.email), phone: str(person.phone)
+                    }, {
+                        ...payload,
+                        data: { ...payload.data, nominationChange: { id: changeId, kind, participant: { ...person }, participantIndex: index } }
+                    }).catch(error => logger.warn('Changed participant message not sent', {
+                        bookingRef: booking.bookingRef, kind, error: error && error.message
+                    }));
+                }
+            }
+        })().catch(error => logger.warn('Changed participant messages not sent', {
+            bookingRef: booking && booking.bookingRef, error: error && error.message
+        }));
     }
 
     /** Retention guard for older clients that still offer booking deletion. */
@@ -2067,6 +2150,80 @@ class EventBookingService {
             .sort({ createdAt: -1 }).lean().catch(() => null);
     }
 
+    /** Validate a persisted delivery intent immediately before providers run.
+     * Unlike a logged-message resend, an outbox intent holds the original
+     * payload/pass: a later nomination edit must make that snapshot obsolete.
+     * A read failure deliberately throws so the worker can defer, not discard. */
+    async reasonToSkipQueuedNotification(eventName, recipient = {}, payload = {}) {
+        const match = /^EVENT_(BOOKING|PARTICIPANT)_(CONFIRMED|REMINDER|CANCELLED|WAITLISTED)$/.exec(str(eventName));
+        if (!match) return '';
+        const data = payload.data || {};
+        // Legacy one-person registrations have their own state validator.
+        if (data.registrationId && !payload.bookingRef && !data.bookingRef) return '';
+        const ref = str(payload.bookingRef || data.bookingRef).toUpperCase();
+        if (!ref) return 'The queued booking reference could not be verified.';
+        const booking = await EventBooking.findOne({ bookingRef: ref }).lean();
+        if (!booking || booking.deletedAt) return 'The queued booking no longer exists.';
+        if (data.eventId && str(data.eventId) !== str(booking.eventId)) return 'The queued event no longer matches this booking.';
+
+        const change = data.nominationChange;
+        const removed = match[1] === 'PARTICIPANT' && match[2] === 'CANCELLED' && change && change.kind === 'removed';
+        const paid = ['paid', 'not_required'].includes((booking.payment || {}).status);
+        const allowed = match[2] === 'CANCELLED'
+            ? booking.status === 'cancelled' || (removed && booking.status === 'active' && paid)
+            : match[2] === 'WAITLISTED' ? booking.status === 'waitlist' : booking.status === 'active' && paid;
+        if (!allowed) return 'The queued message no longer matches the booking status.';
+
+        const email = str(recipient.email).toLowerCase();
+        const phone = phoneKey(recipient.whatsappNumber || recipient.whatsapp || recipient.phoneNumber || recipient.phone);
+        const addressedTo = person => person && (!email || email === str(person.email).toLowerCase())
+            && (!phone || phone === phoneKey(person.phone));
+        const people = Array.isArray(booking.participants) ? booking.participants : [];
+        if (match[1] === 'BOOKING') {
+            const userId = recipient.id && str(recipient.id._id || recipient.id);
+            if ((userId && userId !== str(booking.userId)) || !addressedTo(booking.bookedBy || {})) {
+                return 'The queued recipient no longer matches the booking contact.';
+            }
+            if (Array.isArray(payload.participantNames)
+                && JSON.stringify(payload.participantNames) !== JSON.stringify(people.map(person => str(person.name)).filter(Boolean))) {
+                return 'The attendee list changed after this booking message was queued.';
+            }
+            return '';
+        }
+
+        if (!email && !phone) return 'The queued nominee has no verified delivery contact.';
+        if (removed) {
+            if (!payload.participantRemoved || !change.participant || !addressedTo(change.participant)
+                || str(recipient.name) !== str(change.participant.name)) {
+                return 'The queued recipient no longer matches the removed nomination.';
+            }
+            if (people.some(person => (email && email === str(person.email).toLowerCase())
+                || (phone && phone === phoneKey(person.phone)))) {
+                return 'This contact is on the current attendee list; the old removal notice is obsolete.';
+            }
+            return '';
+        }
+
+        const index = change ? change.participantIndex : people.findIndex(person => addressedTo(person)
+            && str(person.name) === str(payload.participantName || recipient.name));
+        const person = Number.isInteger(index) && index >= 0 ? people[index] : null;
+        if (!person || !addressedTo(person) || str(person.name) !== str(payload.participantName || recipient.name)
+            || (change && (change.kind !== 'confirmed' || !change.participant || !sameParticipant(change.participant, person)))) {
+            return 'The nominee changed after this message was queued.';
+        }
+        const eventPass = require('./eventPass');
+        if (payload.registrationNo && payload.registrationNo !== eventPass.registrationNo(booking.bookingRef, index)) {
+            return 'The nominee moved to another seat after this pass was queued.';
+        }
+        if (payload.ticketUrl) {
+            const token = eventPass.verifyPass(eventPass.extractToken(payload.ticketUrl));
+            if (!token || token.bookingId !== str(booking._id) || token.index !== index) {
+                return 'The queued entry pass does not belong to this nominee seat.';
+            }
+        }
+        return '';
+    }
+
     /**
      * RESEND ONE LOGGED BOOKING MESSAGE, built fresh from the live booking.
      *
@@ -2093,10 +2250,13 @@ class EventBookingService {
             : /CANCELLED$/.test(event) ? 'cancelled'
                 : /WAITLISTED$/.test(event) ? 'waitlist' : 'confirmed';
         const paid = ['paid', 'not_required'].includes((booking.payment && booking.payment.status) || '');
+        const nominationChange = row.data && ((row.data.lifecycleData || {}).nominationChange || row.data.nominationChange);
+        const removedNomination = event === 'EVENT_PARTICIPANT_CANCELLED'
+            && nominationChange && nominationChange.kind === 'removed';
         const allowed = {
             confirmed: booking.status === 'active' && paid,
             reminder: booking.status === 'active' && paid,
-            cancelled: booking.status === 'cancelled',
+            cancelled: booking.status === 'cancelled' || (removedNomination && booking.status === 'active' && paid),
             waitlist: booking.status === 'waitlist'
         }[kind];
         if (!allowed) {
@@ -2152,7 +2312,10 @@ class EventBookingService {
             return { row: fresh, outcome };
         }
 
-        const ctx = await this.messageContext(booking, kind);
+        const ctx = await this.messageContext(booking, kind, removedNomination ? {
+            participantRemoved: true,
+            reason: 'The booker changed the nomination. Your seat is no longer reserved.'
+        } : {});
 
         /* The booker, or the participant the row went to. */
         const recipient = str(row.recipient).toLowerCase();
@@ -2161,7 +2324,11 @@ class EventBookingService {
             : !!phoneKey(p.phone) && phoneKey(p.phone) === phoneKey(recipient));
         const participantRow = /^EVENT_PARTICIPANT_/.test(event);
         const bookedBy = booking.bookedBy || {};
-        const person = participantRow ? (booking.participants || []).find(matches) : null;
+        const person = removedNomination ? nominationChange.participant
+            : participantRow ? (booking.participants || []).find(matches) : null;
+        if (removedNomination && (!person || !matches(person) || (booking.participants || []).some(matches))) {
+            return { skipped: true, reason: 'This contact is on the current attendee list, or no longer matches the removed nomination' };
+        }
         if (participantRow && !person) {
             return { skipped: true, reason: 'That participant is no longer on the booking (names may have been changed)' };
         }
@@ -2176,22 +2343,12 @@ class EventBookingService {
             : { id: booking.userId || '', name: str(bookedBy.name), email: str(bookedBy.email), phone: str(bookedBy.phone) };
 
         const payload = person
-            ? {
-                ...ctx,
-                ...(() => {
-                    const own = (ctx.passes || []).find((p) => p.index === (booking.participants || []).indexOf(person));
-                    return { ticketUrl: own ? own.url : '', registrationNo: own ? own.registrationNo : '', passes: [] };
-                })(),
-                participantName: str(person.name),
-                participantEmail: str(person.email),
-                participantPhone: str(person.phone),
-                bookerName: str(bookedBy.name),
-                bookerEmail: str(person.email)
-            }
+            ? participantMessageContext(ctx, person, removedNomination ? -1 : (booking.participants || []).indexOf(person))
             : ctx;
 
         const result = await notificationService.dispatchLifecycleEvent(eventName, target, {
             ...payload,
+            ...(nominationChange ? { data: { ...payload.data, nominationChange } } : {}),
             onlyChannel: channel,
             resendOf: row._id
         });

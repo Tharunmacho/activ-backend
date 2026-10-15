@@ -19,8 +19,9 @@ const logger = require('../../config/logger');
  * member's own screens then treat them as unpaid, and the admin Members screen
  * files them under Expired — and (2) sends "your membership has expired, renew
  * now" twice a month, on the 1st and the 15th, while the member's
- * `renewalReminderEnabled` is on (the State Admin's switch). Each is claimed by
- * a key before it is sent, so the sweep can run as often as it likes.
+ * `renewalReminderEnabled` is on (the State Admin's switch). Each intent is
+ * queued durably, then its sweep key is recorded. The outbox identity prevents
+ * duplicate delivery if a restart occurs between those writes.
  *
  * `MEMBERSHIP_RENEWAL_REMINDERS=false` switches it off;
  * `MEMBERSHIP_RENEWAL_INTERVAL_HOURS` sets the sweep (6 by default).
@@ -83,20 +84,47 @@ const inWords = (daysLeft) => {
     return `in ${daysLeft} days`;
 };
 
-/** One renewal message, on every channel. Used by the sweep and by an admin's "send now". */
-const dispatchRenewal = async (member, now = new Date(), data = {}) => {
+const renewalNotice = (member, now, data) => {
     const expiresAt = periodEnd(member);
     const daysLeft = expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / DAY) : 0;
-    await notificationService.dispatchLifecycleEvent('MEMBERSHIP_RENEWAL_DUE',
-        membershipContext.recipientFromMember(member), {
+    return { daysLeft, recipient: membershipContext.recipientFromMember(member), payload: {
             membershipNumber: membershipContext.membershipNumberOf(member),
             membershipType: member.membershipType,
             validUntilLabel: expiresAt ? membershipContext.dateLabel(require('../members/membershipDates').lastValidDay(expiresAt)) : '',
             daysLeft,
             expiresInLabel: inWords(daysLeft),
             data: { ...data, expiresAt: expiresAt ? expiresAt.toISOString() : '' }
-        });
-    return daysLeft;
+        } };
+};
+
+/** Admin "send now" still waits for channel outcomes. */
+const dispatchRenewal = async (member, now = new Date(), data = {}) => {
+    const notice = renewalNotice(member, now, data);
+    await notificationService.dispatchLifecycleEvent('MEMBERSHIP_RENEWAL_DUE', notice.recipient, notice.payload);
+    return notice.daysLeft;
+};
+
+// Persist the intent BEFORE consuming the sweep key. A restart between these
+// writes repeats the same outbox identity instead of losing or duplicating it.
+const queueReminder = async (member, key, now, data) => {
+    const expiresAt = periodEnd(member);
+    if (!expiresAt || !Number.isFinite(expiresAt.getTime())) {
+        logger.warn('Renewal reminder skipped: membership period is unknown', { memberId: String(member._id) });
+        return false;
+    }
+    const renewalReminderKey = data.monthly ? `${key}:${expiresAt.toISOString()}` : key;
+    const notice = renewalNotice(member, now, { ...data, renewalReminderKey });
+    let outcome;
+    try {
+        outcome = await notificationService.dispatchInBackground('MEMBERSHIP_RENEWAL_DUE', notice.recipient, notice.payload);
+    } catch (error) {
+        logger.warn('Renewal reminder could not be queued', { memberId: String(member._id), error: error && error.message });
+        return false;
+    }
+    if (!outcome?.queued) return false;
+    // A period change or opt-out can still invalidate this claim. The outbox
+    // rechecks current eligibility before delivery and skips superseded jobs.
+    return !!await claimReminder(member, key, now);
 };
 
 class MembershipRenewalService {
@@ -160,21 +188,30 @@ class MembershipRenewalService {
         for await (const member of membersFor(filter)) {
             const key = monthlyReminderDue(member, { now, already: member.renewalReminders });
             if (!key) continue;
-            const claimed = await claimReminder(member, key, now);
-            if (!claimed) continue;
-            await dispatchRenewal(claimed, now, { monthly: key });
+            if (!await queueReminder(member, key, now, { monthly: key })) continue;
             sent++;
         }
-        if (sent) logger.info('Expired-membership reminders sent', { count: sent });
+        if (sent) logger.info('Expired-membership reminders queued', { count: sent });
         return sent;
     }
 
     async sendWindowReminders(now = new Date()) {
         const from = new Date(now.getTime() - 7 * DAY);
         const to = new Date(now.getTime() + 30 * DAY);
+        // Older annual memberships derive their anniversary from activation.
+        // Include a small boundary cushion for leap days; periodEnd/windowFor
+        // below still decide the exact valid reminder window.
+        const legacyFrom = new Date(from); legacyFrom.setFullYear(legacyFrom.getFullYear() - 1);
+        legacyFrom.setDate(legacyFrom.getDate() - 1);
+        const legacyTo = new Date(to); legacyTo.setFullYear(legacyTo.getFullYear() - 1);
+        legacyTo.setDate(legacyTo.getDate() + 1);
 
         const filter = {
-            membershipExpiresAt: { $gte: from, $lte: to },
+            $or: [
+                { membershipExpiresAt: { $gte: from, $lte: to } },
+                { membershipExpiresAt: null, membershipType: { $in: ['annual', 'ANNUAL'] },
+                    membershipActivatedAt: { $gte: legacyFrom, $lte: legacyTo } },
+            ],
             membershipStatus: { $in: PAID_VALUES },
             renewalReminderEnabled: { $ne: false }, isActive: { $ne: false },
         };
@@ -193,15 +230,11 @@ class MembershipRenewalService {
             // "expires in 30 days" arriving five days before expiry is wrong.
             if (already.includes(key)) continue;
 
-            // Claim the key BEFORE sending, conditionally, so two instances of
-            // the server cannot both send the same reminder.
-            const claimed = await claimReminder(member, key, now);
-            if (!claimed) continue;
-            await dispatchRenewal(claimed, now, { window });
+            if (!await queueReminder(member, key, now, { window })) continue;
             sent++;
         }
 
-        if (sent) logger.info('Membership renewal reminders sent', { count: sent });
+        if (sent) logger.info('Membership renewal reminders queued', { count: sent });
         return sent;
     }
 

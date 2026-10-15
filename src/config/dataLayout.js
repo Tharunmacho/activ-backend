@@ -91,6 +91,7 @@ const MODELS = {
     Notification: ['notifications', 'notifications', A, 'notifications'],
     PushDevice: ['notifications', 'push_devices', A, 'push_devices'],
     ContentBroadcast: ['notifications', 'content_broadcasts', A, 'content_broadcasts'],
+    LifecycleOutbox: ['notifications', 'lifecycle_outbox', A, 'lifecycle_outbox'],
     NotificationLog: ['notifications', 'notification_logs', A, 'notificationlogs'],
     Announcement: ['notifications', 'announcements', A, 'announcements'],
 

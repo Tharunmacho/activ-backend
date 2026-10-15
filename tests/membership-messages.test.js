@@ -129,7 +129,9 @@ const testWording = () => {
     check('an endorsement never claims membership', !/membership is (now )?active|you are (now )?a member/i.test(strings(endorsed).join(' ')));
 
     const received = templates.render('APPLICATION_SUBMITTED', full);
-    check('received says all three review together', /Block, District and State Admins are reviewing it now/.test(received.email.bodyHtml));
+    check('received describes applicable reviewers without claiming every tier is reviewing',
+        /applicable ACTIV reviewers/.test(received.email.bodyHtml)
+        && !/each one records a decision|reviewing it now/.test(received.email.bodyHtml));
     check('no message describes the old one-tier-at-a-time relay',
         !MEMBERSHIP_EVENTS.some((e) => /then District, then State|now with the District/.test(strings(templates.render(e, full)).join(' '))));
 
@@ -145,8 +147,12 @@ const testDecisions = async() => {
 
     const sent = [];
     notificationService.dispatchLifecycleEvent = async(event, to, payload) => { sent.push({ event, payload }); return {}; };
+    notificationService.dispatchInBackground = notificationService.dispatchLifecycleEvent;
     membershipContext.forApplication = async() => ({ ...full, business: null, region: {} });
     membershipContext.planFor = async() => ({ planName: 'Growth Member', feeLabel: '₹5,000' });
+    membershipContext.recipientForApplication = async(application) => ({
+        id: application.userId, name: application.fullName, email: application.email, phone: application.phone
+    });
 
     const app = (over = {}) => ({ _id: '64f0c0ffee000000000000a1', userId: '64f0c0ffee000000000000b2', fullName: 'Tharun',
         email: 't@example.com', status: 'Pending', reviews: {}, ...over });
@@ -246,8 +252,10 @@ const testContactAndRegion = () => {
         check(`${ev}: WhatsApp has three region lines`, /Block: Guindy/.test(r.whatsapp.text)
             && /District: Chennai/.test(r.whatsapp.text) && /State: Tamil Nadu/.test(r.whatsapp.text));
         const chain = chainOf(r.whatsapp);
-        check(`${ev}: v2 first, v1 behind it`, /_v2$/.test(chain[0].template) && /_v1$/.test((chain[1] || {}).template || ''),
-            chain.map((c) => c.template).join(' -> '));
+        check(`${ev}: approved factual template chain`, ev === 'ADMIN_NEW_APPLICATION'
+            ? /_v2$/.test(chain[0].template) && /_v1$/.test((chain[1] || {}).template || '')
+            : chain.length === 1 && chain[0].template === 'activ_record_update_v1',
+        chain.map((c) => c.template).join(' -> '));
         const spec = templates.WHATSAPP_TEMPLATES.find((s) => s.name === chain[0].template);
         check(`${ev}: v2 param count matches its spec`, spec && spec.params.length === chain[0].params.length);
     }

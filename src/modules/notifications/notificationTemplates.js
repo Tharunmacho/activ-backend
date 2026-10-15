@@ -1149,6 +1149,24 @@ const TEMPLATES = {
         const ctx = asParticipant(raw);
         const out = TEMPLATES.EVENT_BOOKING_CANCELLED({ ...ctx, settledVia: 'free' });
         delete out.inApp;
+        if (ctx.participantRemoved) {
+            const title = 'Your event nomination was removed';
+            const detail = `The booker${ctx.bookerName ? ` (${ctx.bookerName})` : ''} changed the nomination for ${ctx.eventTitle || 'this event'}. `
+                + `Your seat in booking ${ctx.bookingRef} is no longer reserved. This notice concerns your nomination.`;
+            out.email.subject = `Nomination removed: ${ctx.eventTitle || 'ACTIV event'}`;
+            out.email.title = title;
+            out.email.preheader = 'This notice concerns your nomination.';
+            out.email.highlight = { label: 'Nomination removed from booking', value: ctx.bookingRef };
+            out.email.bodyHtml = `<p style="margin:0 0 12px 0;">${esc(detail)}</p>`
+                + '<p style="margin:0;">Contact the booker or the event organiser if you have questions.</p>';
+            out.whatsapp = {
+                template: 'activ_record_update_v1',
+                params: [oneLine(ctx.name || ctx.firstName || 'Participant', 60), title,
+                    oneLine(detail, 400), ctx.eventUrl || eventLink(ctx), 'events@activ.org.in'],
+                text: `${title}\n\n${detail}\n\nQuestions: events@activ.org.in`
+            };
+            return out;
+        }
         out.email.bodyHtml = `<p style="margin:0 0 12px 0;">The booking <strong>${esc(ctx.bookingRef)}</strong> that `
             + `${ctx.bookerName ? esc(ctx.bookerName) : 'someone'} made for you has been cancelled by the organiser, `
             + 'so your seat is released.</p>'
@@ -1683,7 +1701,8 @@ const render = (eventName, ctx = {}) => {
         // A deployment's explicit custom template and disabled variants retain
         // their meaning. Only the built-in event families migrate by default.
         const custom = configured && Object.values(configured).some(value => value && !known.has(value));
-        if (!custom) out.whatsapp = STANDARD.prepend(eventName, ctx, out.whatsapp, DEFAULT_WHATSAPP_POSTER(),
+        const nominationRemoved = eventName === 'EVENT_PARTICIPANT_CANCELLED' && ctx.participantRemoved;
+        if (!custom && !nominationRemoved) out.whatsapp = STANDARD.prepend(eventName, ctx, out.whatsapp, DEFAULT_WHATSAPP_POSTER(),
             configured ? Object.entries(configured).filter(([, value]) => !!value).map(([variant]) => variant) : undefined);
     }
     // The brief fallback templates also carry the correct queries inbox.

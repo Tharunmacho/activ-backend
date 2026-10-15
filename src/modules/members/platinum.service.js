@@ -215,7 +215,7 @@ class PlatinumService {
         const priceLabel = `₹${Number(plan.price || 200000).toLocaleString('en-IN')}`;
 
         // The member: a confirmation on every channel they have.
-        notificationService.dispatchInBackground('PLATINUM_REQUESTED', {
+        await notificationService.dispatchInBackground('PLATINUM_REQUESTED', {
             id: member._id, name: member.fullName, email: member.email, phone: member.phoneNumber,
             whatsapp: member.whatsappNumber, state: member.state, district: member.district, block: member.block
         }, {
@@ -230,7 +230,7 @@ class PlatinumService {
         const watchers = await requestWatchers();
         const regionLabel = [request.block, request.district, request.state].filter(Boolean).join(', ');
         for (const w of watchers) {
-            notificationService.dispatchInBackground('ADMIN_PLATINUM_REQUEST', { name: w.name, email: w.email }, {
+            await notificationService.dispatchInBackground('ADMIN_PLATINUM_REQUEST', { name: w.name, email: w.email }, {
                 noRegionalContact: true,
                 applicantName: request.name,
                 applicantEmail: request.email,
@@ -376,7 +376,7 @@ class PlatinumService {
             // Queue notes are for the office; they are not a member-facing reason.
             const member = await MemberDetails.findById(updated.memberId).catch(() => null);
             if (member && !member.deletedAt) {
-                notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
+                await notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
                     changeTitle: 'Lifetime membership request declined',
                     changeSummary: 'The ACTIV office has declined your Lifetime membership request. Your existing membership remains unchanged.',
                     reference: String(updated._id), reason: '',
@@ -521,7 +521,7 @@ class PlatinumService {
         } catch { /* a feed entry is never worth failing a grant over */ }
 
         const ids = await require('./memberIds').idsFor(member).catch(() => ({ applicationRef: '' }));
-        notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
+        await notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
             id: member._id, name: member.fullName, email: member.email, phone: member.phoneNumber,
             whatsapp: member.whatsappNumber, state: member.state, district: member.district, block: member.block
         }, {
@@ -570,7 +570,7 @@ class PlatinumService {
         member = restored;
         invalidateMemberContext(member._id);
 
-        notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
+        await notificationService.dispatchInBackground('MEMBERSHIP_STATUS_CHANGED', membershipContext.recipientFromMember(member), {
             changeTitle: 'Lifetime membership updated',
             changeSummary: 'The ACTIV office has removed your Lifetime membership grant and restored your previous membership details. Sign in to review your current membership.',
             reference: grant.orderId || membershipNumberFor(member), reason: '',

@@ -23,6 +23,8 @@ let mongo;
     const notifications = require('../src/modules/notifications/notification.service');
     const broadcast = require('../src/modules/notifications/contentBroadcast');
     const delivery = require('../src/modules/notifications/associationUpdateDelivery');
+    const templateReview = require('../src/modules/notifications/associationTemplateReview');
+    templateReview.status = async () => ({ ready: true, checked: true, status: 'APPROVED' });
     const prefs = require('../src/modules/notifications/updatePreferences');
     const messages = require('../src/modules/notifications/associationUpdateMessage');
     const calls = [];
@@ -104,6 +106,21 @@ let mongo;
         assert.equal(calls.filter(call => call.title === item.update.title && call.channel === channel).length, 1, 'only one worker contacts each channel');
     }
 
+    item = await queued('Template awaiting approval');
+    templateReview.status = async () => ({ ready: false, checked: true, status: 'PENDING', reason: 'Waiting for Meta approval.' });
+    await delivery.processBatch();
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1);
+    assert(!calls.some(call => call.title === item.update.title && call.channel === 'whatsapp'));
+    let held = await Notification.findById(item.row._id).lean();
+    assert.equal(held.updateDelivery.whatsapp.status, 'pending');
+    assert.equal(held.updateDelivery.whatsapp.attempts, 0, 'approval waiting does not exhaust provider retries');
+    assert.equal(await Log.countDocuments({ 'data.notificationId': String(item.row._id), channel: 'whatsapp' }), 0);
+    templateReview.status = async () => ({ ready: true, checked: true, status: 'APPROVED' });
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.whatsapp.nextAttemptAt': new Date(0) } });
+    await delivery.processBatch();
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'whatsapp').length, 1, 'approval releases the original job');
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1, 'approval does not repeat email');
+
     item = await queued('Queue age expired');
     await Notification.collection.updateOne({ _id: item.row._id }, { $set: { createdAt: new Date(Date.now() - 8 * 86400000) } });
     await delivery.processBatch();
@@ -177,9 +194,18 @@ let mongo;
     assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'whatsapp').length, 2);
 
     item = await queued('Worker interrupted');
-    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.email.status': 'sending', 'updateDelivery.email.worker': 'old-worker', 'updateDelivery.email.leaseUntil': new Date(0), 'updateDelivery.whatsapp.status': 'skipped' } });
+    const uncertainLog = await Log.create({ user: members.basic._id, event: 'ASSOCIATION_UPDATE', channel: 'email',
+        recipient: members.basic.email, status: 'queued', data: { notificationId: String(item.row._id) } });
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.email.status': 'sending', 'updateDelivery.email.worker': 'old-worker',
+        'updateDelivery.email.logId': uncertainLog._id, 'updateDelivery.email.leaseUntil': new Date(0), 'updateDelivery.whatsapp.status': 'skipped' } });
     await delivery.recover('email'); await delivery.processBatch();
     assert(!calls.some(call => call.title === item.update.title), 'an unknown provider outcome is not replayed');
+
+    item = await queued('Worker stopped before provider');
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.email.status': 'sending', 'updateDelivery.email.worker': 'old-worker',
+        'updateDelivery.email.leaseUntil': new Date(0), 'updateDelivery.whatsapp.status': 'skipped' } });
+    await delivery.recover('email'); await delivery.processBatch();
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1, 'unattempted work resumes after restart');
 
     item = await queued('Transport timeout'); failures.set('email:Transport timeout', 'Timeout waiting for server reply');
     await delivery.processBatch();

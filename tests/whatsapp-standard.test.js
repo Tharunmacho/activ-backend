@@ -71,7 +71,7 @@ async function main() {
             : { success: true, provider: 'meta', messageId: 'offline-fixture', template };
     };
     const recipient = { name: 'Fixture member', phone: '919999999999' };
-    const dispatch = () => service.dispatchLifecycleEvent('EVENT_BOOKING_REMINDER', recipient, context, { only: 'whatsapp' });
+    const dispatch = () => service._deliverLifecycleEvent('EVENT_BOOKING_REMINDER', recipient, context);
     failure = '132001 Template name does not exist';
     const fallback = await dispatch();
     assert.ok(fallback.channels.whatsapp.success);

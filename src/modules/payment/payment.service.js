@@ -30,9 +30,9 @@ const failureNoticeBoundary = Number.isFinite(configuredFailureBoundary) ? confi
  * message. Same event, same collection, two different experiences, decided by
  * which client they happened to use.
  *
- * `dispatchInBackground` cannot throw and is not awaited: the money has already
- * moved by the time this runs, and a mail host that is down must not turn a
- * completed payment into a webhook failure Instamojo then retries.
+ * `dispatchInBackground` cannot throw. Await its durable queue write; provider
+ * calls run in the worker, so an unavailable mail host cannot turn a completed
+ * payment into a webhook failure Instamojo then retries.
  */
 const announceActivation = async (member, { amount, orderId, planName, paymentMode } = {}) => {
     if (!member) return;
@@ -41,7 +41,7 @@ const announceActivation = async (member, { amount, orderId, planName, paymentMo
 
     const rupees = Number(amount ?? member.paymentAmount ?? 0);
 
-    notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
+    await notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
         id: member._id,
         name: member.fullName,
         email: member.email,
@@ -108,7 +108,7 @@ class PaymentService {
         try {
             const member = await MemberDetails.findById(order.memberId);
             if (!member || member.deletedAt) return;
-            notificationService.dispatchInBackground('COMPANY_PAYMENT_CONFIRMED', membershipContext.recipientFromMember(member), {
+            await notificationService.dispatchInBackground('COMPANY_PAYMENT_CONFIRMED', membershipContext.recipientFromMember(member), {
                 companyName: company.businessName || 'Your company',
                 planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
                 reference: order.orderId, orderId: order.orderId,
@@ -493,7 +493,7 @@ class PaymentService {
         // attempts on the gateway request. A later Credit must still settle.
         const isEvent = order.orderType === 'event_booking';
         const retryUrl = `${String(config.frontendUrl || '').replace(/\/+$/, '')}/payment-success?orderId=${encodeURIComponent(order.orderId)}`;
-        notificationService.dispatchInBackground(isEvent ? 'EVENT_PAYMENT_FAILED' : 'PAYMENT_FAILED', recipient, {
+        await notificationService.dispatchInBackground(isEvent ? 'EVENT_PAYMENT_FAILED' : 'PAYMENT_FAILED', recipient, {
             orderType: order.orderType, reference: order.orderId, orderId: order.orderId,
             paymentId: String(paymentId), amountLabel: `₹${Number(order.amount || 0).toLocaleString('en-IN')}`,
             planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
@@ -948,7 +948,7 @@ class PaymentService {
             // A renewal recorded by an admin is still the member's membership
             // going live, and it is the one they are least likely to have seen
             // happen — they were not at a checkout when it did.
-            announceActivation(member, { amount: paidAmount });
+            await announceActivation(member, { amount: paidAmount });
 
             return member;
         } catch (error) {

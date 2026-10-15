@@ -217,5 +217,6 @@ notificationLogSchema.index({ status: 1, createdAt: -1 });
 notificationLogSchema.index({ channel: 1, createdAt: -1 });
 // A delivery callback names the provider's message id and nothing else.
 notificationLogSchema.index({ providerMessageId: 1 });
+notificationLogSchema.index({ 'data.outboxId': 1, channel: 1 });
 
 module.exports = dataLayout.model('NotificationLog', notificationLogSchema);

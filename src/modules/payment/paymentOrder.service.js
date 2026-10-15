@@ -228,23 +228,19 @@ class PaymentOrderService {
     /**
      * Queue the "your payment is still pending" nudge for this order.
      *
-     * Returns immediately and cannot fail the request that created the order —
-     * a reminder is worth nothing next to the order itself. The timer is
-     * `unref`'d so it never holds the process open at shutdown, and it lives in
-     * memory: a restart inside the window drops the nudge rather than sending a
-     * stale one, which is the right way round for a message whose whole claim is
-     * about what is true *now*.
+     * Await only the durable intent write. The worker checks current payment
+     * state at the due time, including after a process restart. This operation
+     * never throws into the request that already created the payment order.
      */
-    schedulePendingPaymentNotice(orderId) {
+    async schedulePendingPaymentNotice(orderId) {
         if (!orderId) return;
-
-        if (!PENDING_NOTICE_DELAY_MS) {
-            this.notifyPaymentPending(orderId);
-            return;
+        try {
+            const row = await require('../notifications/lifecycleOutbox').schedulePayment(orderId, new Date(Date.now() + PENDING_NOTICE_DELAY_MS));
+            return { queued: true, outboxId: String(row._id) };
+        } catch (error) {
+            logger.warn('Pending-payment notice could not be queued', { orderId: String(orderId), error: error.message });
+            return { queued: false, error: error.message };
         }
-
-        const timer = setTimeout(() => { this.notifyPaymentPending(orderId); }, PENDING_NOTICE_DELAY_MS);
-        if (timer && typeof timer.unref === 'function') timer.unref();
     }
 
     /**
@@ -282,11 +278,11 @@ class PaymentOrderService {
                 if (!order || order.status !== 'created' || order.failedPaymentNoticeIds?.length) return;
             }
 
-            const member = await MemberDetails.findById(order.memberId).lean().catch(() => null);
-            if (!member) return;
+            const member = await MemberDetails.findById(order.memberId).lean();
+            if (!member || member.isActive === false || member.deletedAt) return;
             if (isPaidStatus(member.membershipStatus)) return;
 
-            notificationService.dispatchInBackground('PAYMENT_REQUIRED', {
+            const queued = await notificationService.dispatchInBackground('PAYMENT_REQUIRED', {
                 id: member._id,
                 name: member.fullName,
                 email: member.email,
@@ -307,10 +303,12 @@ class PaymentOrderService {
                 planName: require('../members/membershipLabels').displayPlanName(order.planName, order.planId, order.planAudience),
                 data: { orderId: order.orderId, planId: order.planId }
             });
+            return queued;
         } catch (error) {
             logger.warn('Pending-payment notice not sent', {
                 orderId: String(orderId || ''), error: error && error.message
             });
+            return { error: error.message };
         }
     }
 

@@ -13,7 +13,8 @@ const now = new Date('2026-10-16T10:00:00+05:30');
 const DAY = 86400000;
 const id = number => number.toString(16).padStart(24, '0');
 const clone = value => structuredClone(value);
-let rows = [], scans = [], claims = [], sent = [], beforeClaim = null, beforeFlip = null, inFlight = 0, maxInFlight = 0;
+let rows = [], scans = [], claims = [], sent = [], manualSent = [], beforeClaim = null, beforeFlip = null,
+    queueFailure = '', inFlight = 0, maxInFlight = 0;
 const compare = (actual, expected) => {
     if (expected == null) return actual == null;
     if (expected && typeof expected === 'object' && !(expected instanceof Date)) {
@@ -54,7 +55,8 @@ Member.find = filter => {
     };
 };
 Member.findOneAndUpdate = (filter, patch, options) => ({ async lean() {
-    assert.equal(options.new, true, 'dispatch uses the row returned by the successful claim');
+    assert.equal(options.new, true);
+    assert(sent.some(item => item.recipient.id === filter._id), 'durable enqueue precedes consuming the reminder key');
     claims.push(clone(filter));
     if (beforeClaim) beforeClaim(filter, patch);
     const row = rows.find(value => matches(value, filter));
@@ -67,21 +69,35 @@ Member.updateOne = async (filter, patch) => {
     if (!row) return { modifiedCount: 0 };
     patchRow(row, patch); return { modifiedCount: 1 };
 };
-notifications.dispatchInBackground = () => { throw new Error('Reminder sweep must await dispatch'); };
-notifications.dispatchLifecycleEvent = async (type, recipient, payload) => {
+notifications.dispatchInBackground = async (type, recipient, payload) => {
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     await new Promise(resolve => setImmediate(resolve));
+    inFlight--;
+    if (queueFailure === 'throw') throw Error('fixture enqueue failure');
+    if (queueFailure) return { queued: false, error: 'fixture enqueue failure' };
     sent.push({ type, recipient, payload });
+    return { queued: true, outboxId: `fixture-${sent.length}` };
+};
+notifications.dispatchLifecycleEvent = async (type, recipient, payload) => {
+    inFlight++;
+    await new Promise(resolve => setImmediate(resolve));
+    manualSent.push({ type, recipient, payload });
     inFlight--;
     return { channels: { email: { success: true }, whatsapp: { success: true } } };
 };
+Member.findById = memberId => ({ lean: async() => rows.find(row => row._id === memberId) });
+const retryGuard = require('../src/modules/notifications/retryEligibility');
+const currentQueueReasons = () => Promise.all(sent.map(item => retryGuard.reasonToSkip({
+    event: item.type, user: item.recipient.id, createdAt: now, data: { lifecycleData: item.payload.data }
+})));
 const member = (number, extra = {}) => ({ _id: id(number), fullName: `Fixture ${number}`,
     email: `fixture${number}@example.test`, phoneNumber: '+919000000000',
     membershipStatus: 'active', membershipType: 'annual',
     membershipActivatedAt: new Date('2025-11-01T00:00:00+05:30'),
     membershipExpiresAt: new Date('2026-11-01T00:00:00+05:30'),
     renewalReminders: [], ...extra });
-const reset = () => { rows = []; scans = []; claims = []; sent = []; beforeClaim = null; beforeFlip = null; maxInFlight = 0; };
+const reset = () => { rows = []; scans = []; claims = []; sent = []; manualSent = []; beforeClaim = null;
+    beforeFlip = null; queueFailure = ''; maxInFlight = 0; };
 
 async function main() {
     const expires = state.periodEnd(member(1));
@@ -93,7 +109,9 @@ async function main() {
     assert.equal(scans.length, 2);
     assert.equal(scans[1]._id.$gt, id(500));
     assert.equal(maxInFlight, 1);
-    assert.equal(inFlight, 0, 'sendWindowReminders waits for delivery attempt/log completion');
+    assert.equal(inFlight, 0, 'sendWindowReminders waits for durable enqueue');
+    assert.equal(manualSent.length, 0, 'automatic sweeps do not wait on provider delivery');
+    assert.equal(sent[0].payload.data.renewalReminderKey, key30);
     assert.equal(await service.sendWindowReminders(now), 0, 'restart/repeated sweep does not repeat a claim');
 
     reset();
@@ -106,13 +124,15 @@ async function main() {
         if (filter._id === id(4)) row.fullName = 'Current contact name';
     };
     assert.equal(await service.sendWindowReminders(now), 1);
-    assert.equal(sent[0].recipient.id, id(4));
-    assert.equal(sent[0].recipient.name, 'Current contact name');
+    assert.equal(sent.length, 4, 'intent is saved before the conditional claim');
+    const reasons = await currentQueueReasons();
+    assert(reasons.slice(0, 3).every(Boolean), 'outbox eligibility skips a subsequent opt-out, renewal or lifetime grant');
+    assert.equal(reasons[3], '', 'the unchanged period remains deliverable');
     assert(claims.every(filter => filter.membershipStatus === 'active' && filter.membershipExpiresAt
         && filter.membershipActivatedAt && filter.renewalReminderEnabled.$ne === false));
-    assert.equal(rows[0].renewalReminders.length, 0, 'opt-out after scan is not consumed or sent');
-    assert.equal(rows[1].renewalReminders.length, 0, 'renewal after scan cannot receive old reminder');
-    assert.equal(rows[2].renewalReminders.length, 0, 'lifetime conversion after scan cannot receive old reminder');
+    assert.equal(rows[0].renewalReminders.length, 0, 'opt-out after scan is not claimed');
+    assert.equal(rows[1].renewalReminders.length, 0, 'renewal after scan is not claimed');
+    assert.equal(rows[2].renewalReminders.length, 0, 'lifetime conversion after scan is not claimed');
 
     reset();
     const expired = { membershipExpiresAt: new Date('2026-09-01T00:00:00+05:30') };
@@ -141,8 +161,16 @@ async function main() {
     assert.equal(await service.sendMonthlyExpired(now), 1);
     assert.equal(sent[0].recipient.id, id(1001), 'already-reminded expired rows cannot starve later pages');
     assert.equal(sent[0].payload.data.monthly, monthlyKey);
+    assert.equal(sent[0].payload.data.renewalReminderKey, `${monthlyKey}:${state.periodEnd(rows[1000]).toISOString()}`);
     assert.equal(scans.length, 3);
     assert.equal(await service.sendMonthlyExpired(now), 0);
+
+    reset();
+    rows = [member(1, { membershipStatus: 'expired', membershipExpiresAt: null, membershipActivatedAt: null }),
+        member(2, { ...expired, membershipStatus: 'expired' })];
+    assert.equal(await service.sendMonthlyExpired(now), 1, 'unknown legacy period does not abort later monthly reminders');
+    assert.deepEqual(sent.map(item => item.recipient.id), [id(2)]);
+    assert.equal(rows[0].renewalReminders.length, 0, 'unverified period is neither queued nor claimed');
 
     reset();
     rows = [member(1, { ...expired, membershipStatus: 'expired' }), member(2, { ...expired, membershipStatus: 'expired' })];
@@ -152,7 +180,8 @@ async function main() {
         else { row.membershipStatus = 'active'; row.membershipExpiresAt = new Date('2027-09-01T00:00:00+05:30'); }
     };
     assert.equal(await service.sendMonthlyExpired(now), 0, 'expired monthly claims also recheck opt-out and renewal');
-    assert.equal(sent.length, 0);
+    assert.equal(sent.length, 2, 'both intents are durable before the state changes');
+    assert((await currentQueueReasons()).every(Boolean), 'changed monthly reminders are not delivered');
 
     reset();
     rows = [member(1, { membershipExpiresAt: new Date(now.getTime() - DAY) })];
@@ -160,6 +189,49 @@ async function main() {
     assert.equal(sent.length, 1);
     assert.equal(sent[0].payload.data.window, 0);
     assert.equal(rows[0].membershipStatus, 'expired');
-    console.log('PASS: paginated pre-expiry/expiry/monthly scans, second-page delivery, opt-out/renewal/lifetime races, fresh contact data, awaited dispatch, deduplication and unchanged reminder windows.');
+
+    reset();
+    rows = [member(1, { membershipExpiresAt: null }),
+        member(2, { membershipExpiresAt: null, membershipActivatedAt: new Date('2025-10-20T00:00:00+05:30') }),
+        member(3, { membershipExpiresAt: null, membershipActivatedAt: new Date('2025-12-01T00:00:00+05:30') }),
+        member(4, { membershipExpiresAt: null, membershipType: 'lifetime' }),
+        member(5, { membershipExpiresAt: null, membershipTier: 'platinum' })];
+    assert.equal(await service.sendWindowReminders(now), 2, 'legacy annual members get advance reminders before lapse');
+    assert.deepEqual(sent.map(row => row.payload.data.window), [30, 7]);
+    assert(rows.every(row => row.membershipExpiresAt === null), 'the reminder does not rewrite paid validity');
+    assert.equal(await service.sendWindowReminders(now), 0, 'legacy reminders retain period deduplication');
+
+    reset();
+    rows = [member(1, { membershipExpiresAt: null })];
+    beforeClaim = () => { rows[0].membershipActivatedAt = new Date('2026-10-01T00:00:00+05:30'); };
+    assert.equal(await service.sendWindowReminders(now), 0, 'concurrent renewal of a legacy period invalidates the claim');
+
+    for (const failure of ['result', 'throw']) {
+        reset(); rows = [member(1)]; queueFailure = failure;
+        assert.equal(await service.sendWindowReminders(now), 0);
+        assert.equal(claims.length, 0, 'enqueue failure cannot consume a reminder key');
+        assert.equal(rows[0].renewalReminders.length, 0);
+        queueFailure = '';
+        assert.equal(await service.sendWindowReminders(now), 1, 'next sweep can recover an enqueue failure');
+    }
+    reset(); rows = [member(1, { ...expired, membershipStatus: 'expired' })]; queueFailure = 'result';
+    assert.equal(await service.sendMonthlyExpired(now), 0);
+    assert.equal(claims.length, 0, 'monthly enqueue failure also leaves its key available');
+
+    reset(); rows = [member(1)];
+    beforeClaim = () => { throw Error('fixture crash after enqueue'); };
+    await assert.rejects(service.sendWindowReminders(now), /crash after enqueue/);
+    assert.equal(rows[0].renewalReminders.length, 0);
+    const persistedKey = sent[0].payload.data.renewalReminderKey;
+    beforeClaim = null;
+    assert.equal(await service.sendWindowReminders(new Date(+now + 86400000)), 1);
+    assert.equal(sent[1].payload.data.renewalReminderKey, persistedKey, 'restart uses the same queue identity despite changed daysLeft');
+
+    reset(); rows = [member(1)];
+    await service.dispatchRenewal(rows[0], now);
+    assert.equal(sent.length, 0, 'manual reminder retains the direct awaited API');
+    assert.equal(manualSent.length, 1);
+    assert.equal(inFlight, 0, 'manual reminder waits for channel outcome');
+    console.log('PASS: paginated renewal scans, durable enqueue before claim, failed/crashed enqueue recovery, stable reminder identity, current-state race guards and awaited manual dispatch.');
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

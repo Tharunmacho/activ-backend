@@ -1,0 +1,43 @@
+// Provider approval fixtures only; no credentials, network or message sends.
+process.env.NODE_ENV = 'test';
+const assert = require('node:assert/strict');
+const axios = require('axios');
+const config = require('../src/config');
+const definition = require('../src/modules/notifications/associationUpdateMessage').templateDefinition();
+const whatsapp = require('../src/modules/notifications/whatsappTemplate');
+const review = require('../src/modules/notifications/associationTemplateReview');
+config.metaCloud.accessToken = 'fixture-token';
+process.env.META_WABA_ID = 'fixture-account';
+whatsapp.providerName = () => 'meta';
+let calls = 0, status = 'PENDING', body = definition.components[0].text, unavailable = false;
+axios.get = async (_url, options) => {
+    calls++;
+    assert.equal(options.params.name, definition.name);
+    if (unavailable) throw Error('fixture outage');
+    return { data: { data: [{ name: definition.name, language: definition.language, status, components: [{ type: 'BODY', text: body }] }] } };
+};
+(async () => {
+    assert.equal((await review.status()).ready, false);
+    await Promise.all([review.status(), review.status()]);
+    assert.equal(calls, 1, 'recipient fan-out shares the cached approval lookup');
+    status = 'APPROVED'; review.clearCache();
+    assert.equal((await review.status()).ready, true, 'approval releases delivery');
+    body = 'a different contract'; review.clearCache();
+    assert.equal((await review.status()).ready, false, 'wrong parameter contract stays held');
+    body = definition.components[0].text; status = 'REJECTED'; review.clearCache();
+    assert.equal((await review.status()).ready, false);
+    unavailable = true; review.clearCache();
+    assert.equal((await review.status()).status, 'UNKNOWN', 'outages do not assume approval');
+    delete process.env.META_WABA_ID;
+    const missingAccount = await review.status();
+    assert.equal(missingAccount.ready, false, 'Meta without a WABA cannot bypass approval verification');
+    assert.equal(missingAccount.checked, false);
+    assert.equal(missingAccount.status, 'UNKNOWN');
+    assert.match(missingAccount.reason, /META_WABA_ID/);
+    process.env.META_WABA_ID = 'fixture-account';
+    config.metaCloud.accessToken = '';
+    assert.equal((await review.status()).ready, false, 'Meta without a token also holds the queue');
+    whatsapp.providerName = () => 'botbee';
+    assert.deepEqual(await review.status(), { ready: true, checked: false }, 'non-Meta providers retain their send-time validation');
+    console.log('PASS: pending/approved/rejected/mismatched templates, cache, outage, missing Meta configuration and non-Meta provider checks.');
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -307,16 +307,14 @@ class AuthService {
         /*
          * Welcome the new account — bell, email and WhatsApp.
          *
-         * AFTER both writes have succeeded and deliberately not awaited. The
-         * registration is complete at this point and the response is what the
-         * applicant is waiting on; three network calls between the save and the
-         * redirect would be latency spent on a message they can read a second
-         * later. `dispatchInBackground` cannot throw, so a mail host that is
+         * After both writes succeed, await the durable queue write. The worker
+         * performs provider calls after registration returns.
+         * `dispatchInBackground` cannot throw, so a mail host that is
          * down cannot turn a created account into a failed registration — the
          * rollback above would not even fire, and the applicant would be told to
          * register again for an address that now exists.
          */
-        notificationService.dispatchInBackground('ACCOUNT_REGISTERED', {
+        await notificationService.dispatchInBackground('ACCOUNT_REGISTERED', {
             id: memberDetails._id,
             name: memberDetails.fullName,
             email: memberDetails.email,

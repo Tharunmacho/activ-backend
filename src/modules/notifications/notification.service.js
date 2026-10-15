@@ -14,7 +14,10 @@ const logger = require('../../config/logger');
 const config = require('../../config');
 
 class NotificationService {
-    async createNotification(userId, { title, message, type = 'info', data }) {
+    async createNotification(userId, { title, message, type = 'info', data, deliveryKey }) {
+        if (deliveryKey) return Notification.findOneAndUpdate({ deliveryKey }, { $setOnInsert: {
+            user: userId, title, message, type, data, deliveryKey,
+        } }, { upsert: true, new: true });
         const notification = new Notification({ user: userId, title, message, type, data });
         await notification.save();
         return notification;
@@ -29,13 +32,13 @@ class NotificationService {
      * database resolves to `null` and is logged, rather than turning a completed
      * approval into a 500 the admin will retry against a now-terminal state.
      */
-    async safeCreate(userId, { title, message, type = 'info', data } = {}) {
+    async safeCreate(userId, { title, message, type = 'info', data, deliveryKey } = {}) {
         try {
             const id = userId && userId._id ? userId._id : userId;
             if (!id || !mongoose.Types.ObjectId.isValid(String(id))) return null;
             if (!title || !message) return null;
 
-            return await this.createNotification(id, { title, message, type, data });
+            return await this.createNotification(id, { title, message, type, data, deliveryKey });
         } catch (error) {
             logger.warn('Notification not created', {
                 userId: String(userId || ''),
@@ -187,7 +190,31 @@ class NotificationService {
      * @param {object} payload    event-specific values (reference, reason, amount…)
      * @returns {Promise<{ event, channels, contact }>} always resolves
      */
+    async prepareLifecyclePayload(eventName, recipient, payload) {
+        if (!['MEMBERSHIP_ACTIVATED', 'MEMBERSHIP_RENEWAL_DUE'].includes(eventName) || !recipient.id) return payload;
+        const id = recipient.id._id || recipient.id;
+        const member = await require('../members/memberdetails.model').findById(id).lean();
+        if (!member) return payload;
+        return { ...payload, ...await require('./membershipContext').benefitsForMember(member),
+            data: { ...payload.data, ...(eventName === 'MEMBERSHIP_ACTIVATED' && !payload.data?.activationState
+                ? { activationState: require('./retryEligibility').snapshotActivation(member) } : {}) } };
+    }
+
     async dispatchLifecycleEvent(eventName, recipient = {}, payload = {}) {
+        // Logged-failure retries already own their attempt. Ordinary callers
+        // still await actual channel outcomes after the intent is persisted.
+        if (payload.onlyChannel) return this._deliverLifecycleEvent(eventName, recipient, payload);
+        try {
+            const outbox = require('./lifecycleOutbox');
+            const row = await outbox.enqueue(eventName, recipient, await this.prepareLifecyclePayload(eventName, recipient, payload));
+            return await outbox.processOne(row._id);
+        } catch (error) {
+            logger.error('Lifecycle intent could not be queued', { event: eventName, error: error.message });
+            return { event: eventName, channels: { in_app: null, email: null, whatsapp: null }, rows: {}, contact: null, error: error.message };
+        }
+    }
+
+    async _deliverLifecycleEvent(eventName, recipient = {}, payload = {}, outbox) {
         const result = {
             event: eventName,
             channels: { in_app: null, email: null, whatsapp: null },
@@ -197,6 +224,11 @@ class NotificationService {
         };
 
         try {
+            const writeLog = entry => this.log({ ...entry, data: { ...entry.data,
+                ...(outbox ? { outboxId: outbox.id } : {}),
+                ...(entry.status === 'failed' && require('./lifecycleOutbox').uncertain({ error: entry.lastError })
+                    ? { autoRetryDisabled: true, outcomeUnknown: true } : {}),
+            } });
             const name = String(recipient.name || '').trim();
             const firstName = name.split(/\s+/).filter(Boolean)[0] || '';
             const email = String(recipient.email || '').trim();
@@ -311,17 +343,20 @@ class NotificationService {
             const only = payload.onlyChannel || '';
 
             /* ------------------------------------------------------- the bell */
-            if (rendered.inApp && userId && !only) {
+            if (rendered.inApp && userId && (!only || only === 'in_app')) {
                 jobs.push((async() => {
+                    if (outbox && !await outbox.beforeSend('in_app')) return;
                     const created = await this.safeCreate(userId, {
                         title: rendered.inApp.title,
                         message: rendered.inApp.message,
                         type: rendered.inApp.type,
-                        data: { event: eventName, ...(payload.data || {}) }
+                        data: { event: eventName, ...(payload.data || {}) },
+                        deliveryKey: outbox?.bellKey,
                     });
 
                     result.channels.in_app = { success: !!created };
-                    await this.log({
+                    if (outbox) await outbox.afterSend('in_app', result.channels.in_app);
+                    result.rows.in_app = await writeLog({
                         user: userId,
                         event: eventName,
                         channel: 'in_app',
@@ -397,6 +432,7 @@ class NotificationService {
                         contact
                     });
 
+                    if (outbox && !await outbox.beforeSend('email')) return;
                     const sent = await emailService.sendEmail({
                         category: require('./emailAccounts').categoryForEvent(eventName),
                         to: email,
@@ -408,7 +444,8 @@ class NotificationService {
                     });
 
                     result.channels.email = sent;
-                    result.rows.email = await this.log({
+                    if (outbox) await outbox.afterSend('email', sent);
+                    result.rows.email = await writeLog({
                         user: userId,
                         event: eventName,
                         channel: 'email',
@@ -479,6 +516,7 @@ class NotificationService {
                      * the day substitution starts working.
                      */
                     let sessionText = null;
+                    if (outbox && !await outbox.beforeSend('whatsapp')) return;
                     let sent = await whatsappTemplate.sendTemplateMessage(
                         phone,
                         rendered.whatsapp.template,
@@ -587,7 +625,7 @@ class NotificationService {
                          * webhook could never match its id, so the Super Admin
                          * could not tell whether the rescue itself worked.
                          */
-                        result.rows.whatsappText = await this.log({
+                        result.rows.whatsappText = await writeLog({
                             user: userId,
                             event: eventName,
                             channel: 'whatsapp',
@@ -605,7 +643,8 @@ class NotificationService {
                     }
 
                     result.channels.whatsapp = sent;
-                    result.rows.whatsapp = await this.log({
+                    if (outbox) await outbox.afterSend('whatsapp', sessionText?.success ? sessionText : sent);
+                    result.rows.whatsapp = await writeLog({
                         user: userId,
                         event: eventName,
                         channel: 'whatsapp',
@@ -651,7 +690,9 @@ class NotificationService {
                 })());
             }
 
-            await Promise.allSettled(jobs);
+            const settled = await Promise.allSettled(jobs);
+            const rejected = settled.find(item => item.status === 'rejected');
+            if (rejected) result.dispatchError = String(rejected.reason?.message || rejected.reason);
             return result;
         } catch (error) {
             // The guarantee in the doc comment above. Nothing escapes.
@@ -660,25 +701,24 @@ class NotificationService {
                 error: error && error.message,
                 stack: error && error.stack
             });
+            result.dispatchError = String(error?.message || error);
             return result;
         }
     }
 
     /**
-     * Fire and forget, for a caller that must not even wait.
-     *
-     * `dispatchLifecycleEvent` already cannot throw, so this exists only to drop
-     * the latency: three network calls should not sit between a member pressing
-     * Pay and seeing their receipt. The `.catch` is belt and braces — there is
-     * no path that rejects, and an unhandled rejection would take the process
-     * down under Node's default policy, which is not a risk worth carrying for
-     * a notification.
+     * Persist before returning to the caller. Provider delivery runs in the
+     * background worker; restarting that process does not lose queued intent.
      */
-    dispatchInBackground(eventName, recipient = {}, payload = {}) {
-        this.dispatchLifecycleEvent(eventName, recipient, payload)
-            .catch((error) => logger.error('Background notification dispatch failed', {
-                event: eventName, error: error && error.message
-            }));
+    async dispatchInBackground(eventName, recipient = {}, payload = {}) {
+        // Await persistence at the callsite; the worker owns provider latency.
+        try {
+            const row = await require('./lifecycleOutbox').enqueue(eventName, recipient, await this.prepareLifecyclePayload(eventName, recipient, payload));
+            return { queued: true, outboxId: String(row._id) };
+        } catch (error) {
+            logger.error('Background notification intent not saved', { event: eventName, error: error.message });
+            return { queued: false, error: error.message };
+        }
     }
 
     // ======================================================================
@@ -848,6 +888,7 @@ class NotificationService {
         if (!row) return null;
         if (row.event === 'ASSOCIATION_UPDATE') return require('./associationUpdateDelivery').retryLog(row);
         const data = row.data || {};
+        if (data.outcomeUnknown) return { row, skipped: true, reason: 'Provider outcome is unknown; review provider history before sending a new notice.' };
         const legacyRegistrationNotice = ['EVENT_REGISTERED', 'EVENT_REMINDER'].includes(row.event)
             || (row.event === 'EVENT_BOOKING_WAITLISTED' && !!(data.lifecycleData?.registrationId || data.registrationId));
         const stateReason = await require('./retryEligibility').reasonToSkip(row);

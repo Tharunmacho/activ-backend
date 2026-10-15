@@ -1330,10 +1330,9 @@ class ApplicationService {
         // this method — one place to keep correct instead of several that can
         // drift apart.
         //
-        // NOT AWAITED. It sends an email and a WhatsApp message, and the admin
-        // pressing Approve had to wait for both before their screen answered.
-        // `notifyApplicant` cannot throw; the decision is already saved.
-        this.notifyApplicant(application, tier, action, extra).catch(() => null);
+        // Await durable enqueue before answering the review request. Delivery
+        // runs in the background, so the admin does not wait on either provider.
+        await this.notifyApplicant(application, tier, action, extra).catch(() => null);
     }
 
     /**
@@ -1374,15 +1373,7 @@ class ApplicationService {
              * admin's real inbox; `application` rides along so legacy rows with
              * their region only inside `data` still resolve.
              */
-            const to = {
-                id: recipient,
-                name: application.fullName,
-                email: application.email,
-                phone: application.phone,
-                state: application.state,
-                district: application.district,
-                block: application.block
-            };
+            const to = await membershipContext.recipientForApplication(application);
 
             const base = await membershipContext.forApplication(application);
             const office = (t) => (t === 'super' ? 'ACTIV Head Office' : base[`${t}Office`] || 'State Admin');
@@ -1392,7 +1383,11 @@ class ApplicationService {
                 application,
                 decidedBy: office(tier),
                 decidedLabel: membershipContext.dateLabel(decided.decidedAt || new Date()),
-                data: { applicationId: String(application._id || ''), tier }
+                data: {
+                    applicationId: String(application._id || ''), tier,
+                    reviewDecision: decided.decision || '',
+                    reviewDecidedAt: decided.decidedAt ? new Date(decided.decidedAt).toISOString() : ''
+                }
             };
 
             if (!decides) {
@@ -1406,7 +1401,7 @@ class ApplicationService {
                 if (above.some((t) => tierReviews.hasOwnVerdict(application, t)
                     && tierReviews.tierVerdict(application, t).decision === 'approved')) return;
 
-                await notificationService.dispatchLifecycleEvent('APPLICATION_ENDORSED', to, {
+                await notificationService.dispatchInBackground('APPLICATION_ENDORSED', to, {
                     ...common,
                     endorsedBy: office(tier),
                     endorsedTierLabel: tier === 'district' ? 'District' : 'Block'
@@ -1416,7 +1411,7 @@ class ApplicationService {
 
             if (action === 'reject') {
                 const reason = String(extra.reason || application?.rejectionReason || '').trim();
-                await notificationService.dispatchLifecycleEvent('CORRECTION_REQUESTED', to, {
+                await notificationService.dispatchInBackground('CORRECTION_REQUESTED', to, {
                     ...common,
                     reason,
                     data: { ...common.data, reason }
@@ -1426,7 +1421,7 @@ class ApplicationService {
 
             if (status === 'Approved') {
                 const plan = await membershipContext.planFor(application, base.business);
-                await notificationService.dispatchLifecycleEvent('APPLICATION_APPROVED', to, {
+                await notificationService.dispatchInBackground('APPLICATION_APPROVED', to, {
                     ...common,
                     ...plan,
                     stage: 'approved'
@@ -1452,15 +1447,8 @@ class ApplicationService {
         try {
             const base = await membershipContext.forApplication(application);
 
-            await notificationService.dispatchLifecycleEvent('APPLICATION_SUBMITTED', {
-                id: application.userId,
-                name: application.fullName,
-                email: application.email,
-                phone: (userDetails && userDetails.whatsappNumber) || application.phone,
-                state: application.state,
-                district: application.district,
-                block: application.block
-            }, {
+            await notificationService.dispatchLifecycleEvent('APPLICATION_SUBMITTED',
+                await membershipContext.recipientForApplication(application, userDetails || undefined), {
                 ...base,
                 application,
                 data: { applicationId: String(application._id) }
@@ -1482,7 +1470,7 @@ class ApplicationService {
 
             for (const { tier, admin } of admins) {
                 const adminRegion = [admin.block, admin.district, admin.state].filter(Boolean).join(', ');
-                notificationService.dispatchInBackground('ADMIN_NEW_APPLICATION', {
+                await notificationService.dispatchInBackground('ADMIN_NEW_APPLICATION', {
                     name: admin.fullName || `${tier === 'super' ? 'Super' : regionalContacts.TIER_LABEL[tier]} Admin`,
                     // Block admin addresses are sign-in ids, not mailboxes: they get
                     // WhatsApp and the bell, never email. District/State are real inboxes.

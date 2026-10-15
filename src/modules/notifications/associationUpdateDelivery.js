@@ -70,6 +70,17 @@ async function run(row, channel, worker, resendOf) {
             return { skipped: true, reason: resolved.reason };
         }
         const { member, update, recipient } = resolved;
+        if (channel === 'whatsapp') {
+            const review = await require('./associationTemplateReview').status();
+            if (!review.ready) {
+                // A provider review is not a send attempt. Keep the same job
+                // until approval, subject to its original seven-day expiry.
+                await finish(row, channel, worker, { status: 'pending', lastError: review.reason,
+                    attempts: Math.max(0, Number(row.updateDelivery?.[channel]?.attempts || 1) - 1),
+                    nextAttemptAt: new Date(Date.now() + 5 * 60000) });
+                return { waiting: true, reason: review.reason };
+            }
+        }
         const rendered = messages.render(update, member);
         const path = `updateDelivery.${channel}`;
         log = await Log.create({ user: row.user, event: 'ASSOCIATION_UPDATE', channel, recipient,
@@ -141,6 +152,13 @@ async function recover(channel) {
     const path = `updateDelivery.${channel}`;
     const rows = await Notification.find({ [`${path}.status`]: 'sending', [`${path}.leaseUntil`]: { $lt: new Date() } }).limit(10).lean();
     for (const row of rows) {
+        if (!row.updateDelivery?.[channel]?.logId) {
+            // No audit link means this worker never reached the provider call.
+            await finish(row, channel, row.updateDelivery[channel].worker, { status: 'pending',
+                lastError: '', nextAttemptAt: new Date(),
+                attempts: Math.max(0, Number(row.updateDelivery[channel].attempts || 1) - 1) });
+            continue;
+        }
         const log = row.updateDelivery?.[channel]?.logId ? await Log.findById(row.updateDelivery[channel].logId).lean() : null;
         const accepted = log && ['accepted', 'sent', 'delivered', 'read'].includes(log.deliveryStatus);
         const rejected = log?.deliveryStatus === 'failed';

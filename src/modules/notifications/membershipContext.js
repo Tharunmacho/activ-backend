@@ -116,6 +116,7 @@ const forApplication = async(application = {}) => {
         reference: referenceOf(application),
         applicantName: clean(application.fullName),
         businessName: clean(business && business.organizationName),
+        applicantKind: applicantKind(application, business),
         memberTypeLabel: memberTypeLabel(application, business),
         regionLabel: [region.block, region.district, region.state].filter(Boolean).join(', '),
         submittedLabel: dateLabel(application.createdAt || application.submittedAt || new Date()),
@@ -148,6 +149,7 @@ const planFor = async(application = {}, business = undefined) => {
         if (!plan) return {};
         return {
             planName: clean(plan.name),
+            applicantKind: clean(plan.audience) || applicantKind(application, record),
             feeLabel: rupees(plan.price),
             planBand: clean(plan.experience),
             planFeatures: Array.isArray(plan.features) ? plan.features.filter(Boolean) : []
@@ -174,6 +176,47 @@ const recipientFromMember = (member = {}) => ({
     block: member.block
 });
 
+/** Paid-plan entitlements, not an editable profile label. Safe copy on lookup failure. */
+const benefitsForMember = async(member) => {
+    if (!member) return { memberAccess: null };
+    const record = typeof member.toObject === 'function' ? member.toObject() : member;
+    const audience = require('../common/memberAudience');
+    try {
+        // Lifetime supersedes an earlier student receipt and needs no receipt lookup.
+        const lifetime = audience.memberAccess(record);
+        const paid = lifetime.isLifetime ? {} : await audience.paidMembership(record);
+        return { memberAccess: audience.memberAccess({ ...record, ...paid }) };
+    } catch (error) {
+        logger.warn('Membership benefits not read for a message', { error: error && error.message });
+        return { memberAccess: null };
+    }
+};
+
+/** Keep the application identity; resolve its linked member's current WhatsApp contact. */
+const recipientForApplication = async(application = {}, member) => {
+    const id = application.userId && application.userId._id || application.userId;
+    let current = member;
+    if (current === undefined && id) {
+        try {
+            const MemberDetails = require('../members/memberdetails.model');
+            current = await MemberDetails.findById(id).select('phoneNumber whatsappNumber').lean();
+            if (!current) current = await MemberDetails.findOne({ userId: id }).select('phoneNumber whatsappNumber').lean();
+        } catch (error) {
+            logger.warn('Applicant contact not read for a message', { error: error && error.message });
+        }
+    }
+    return {
+        id,
+        name: application.fullName,
+        email: application.email,
+        phone: clean(current && current.phoneNumber) || application.phone,
+        whatsapp: clean(current && current.whatsappNumber),
+        state: application.state,
+        district: application.district,
+        block: application.block
+    };
+};
+
 module.exports = {
     dateLabel,
     rupees,
@@ -183,5 +226,7 @@ module.exports = {
     forApplication,
     planFor,
     membershipNumberOf,
-    recipientFromMember
+    recipientFromMember,
+    recipientForApplication,
+    benefitsForMember
 };

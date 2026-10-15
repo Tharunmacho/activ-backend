@@ -18,6 +18,7 @@ const server = http.createServer(app);
 // Graceful shutdown
 const gracefulShutdown = async() => {
     require('./modules/notifications/push.service').stop();
+    require('./modules/notifications/lifecycleOutbox').stop();
     logger.info('Shutting down gracefully...');
 
     server.close(async() => {
@@ -156,6 +157,7 @@ const startServer = async() => {
         }
 
         require('./modules/notifications/push.service').start();
+        require('./modules/notifications/lifecycleOutbox').start();
 
         // Renewal reminders: 30 days, 7 days, and on expiry.
         // `MEMBERSHIP_RENEWAL_REMINDERS=false` turns it off.

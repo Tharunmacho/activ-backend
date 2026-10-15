@@ -304,7 +304,7 @@ router.post('/create-request', optionalAuth, asyncHandler(async(req, res) => {
         expiresAt: new Date(Date.now() + 30 * 60 * 1000)
     });
 
-    if (orderType === 'membership') orderService.schedulePendingPaymentNotice(orderId);
+    if (orderType === 'membership') await orderService.schedulePendingPaymentNotice(orderId);
 
     /*
      * `orderId` and `amount` ride back with the gateway's own fields.
@@ -430,7 +430,7 @@ router.post('/order', verifyToken, asyncHandler(async(req, res) => {
      * stays quiet when the payment has landed. See the note on
      * PENDING_NOTICE_DELAY_MS.
      */
-    orderService.schedulePendingPaymentNotice(receipt.orderId);
+    await orderService.schedulePendingPaymentNotice(receipt.orderId);
 
     res.status(201).json(ApiResponse.created(receipt, 'Payment order created'));
 }));
@@ -495,8 +495,8 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
      * Bell, email and WhatsApp — one call, and it cannot fail this request.
      *
      * The money has already moved and the membership is already active by the
-     * time this line runs. `dispatchInBackground` never throws and is not
-     * awaited, so neither an unreachable mail host nor a WhatsApp outage can
+     * time this line runs. Await the durable queue write; `dispatchInBackground`
+     * never throws, and provider calls happen in the worker. A provider outage cannot
      * turn a completed payment into an error the member sees — which would send
      * them to pay a second time for a membership they already hold.
      *
@@ -506,7 +506,7 @@ router.post('/complete', verifyToken, asyncHandler(async(req, res) => {
     // Member ID and application reference exactly as the dashboard prints them.
     const ids = await require('../members/memberIds').idsFor(member);
 
-    notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
+    await notificationService.dispatchInBackground('MEMBERSHIP_ACTIVATED', {
         id: member._id,
         name: member.fullName,
         email: member.email,
