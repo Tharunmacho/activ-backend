@@ -146,3 +146,53 @@ After applying the configuration and rebuilding/deploying:
 Local automated coverage lives in `backend/tests/audience-push-local.test.js`, the OAuth provider tests, `frontend/__tests__/eventAudienceFilters.test.ts`, existing mobile booking/public/certificate tests and `website/tests/event-booking-browser.test.mjs`. Those tests use disposable data and mocked providers; they do not send messages to real members or prove live FCM/APNs delivery.
 
 Validation passed locally: Android debug assembly with the Firebase native modules, mobile and website TypeScript checks, the website production build, audience/networking/online-booking backend checks, consent checks, and responsive booking-history/filter browser checks. The publication queue test covers 510 recipients over multiple batches with replay deduplication. This is not a production load test or an iOS build.
+
+## 10. Association update email and WhatsApp delivery
+
+Publishing or materially revising an Association Update now also queues **email and WhatsApp** alongside its in-app/push notification. The same selected audience, paid plan and region rules determine recipients. Drafts do not send. Each channel checks the current member, paid receipt, region, publication revision, expiry and preferences immediately before contacting its provider. If the member upgrades, changes region, opts out, or the update is withdrawn or replaced while queued, the old delivery is skipped. Messages already accepted by an external provider cannot be recalled.
+
+**Account Settings → Association updates** lets members enable or disable each channel. Email starts enabled. WhatsApp requires explicit opt-in and records the consent time and normalized number; changing that number requires fresh consent. A phone number or general agreement to membership terms is not treated as WhatsApp permission. These controls apply to association updates; essential account, payment and booking messages retain their existing rules. The member API is `GET/PATCH /notifications/update-preferences`, with `{ email: boolean, whatsapp: boolean }` and `whatsappNumber` in the response.
+
+Email uses the existing membership SMTP account, with ACTIV branding, a personal greeting, readable paragraphs, optional full poster/document button, and links to the signed-in update and notification settings. WhatsApp uses a dedicated approved template with the member's name, update title, short summary, signed-in link and a thank-you. It does not try free-form session messages as a fallback. The poster and document remain available from the full update.
+
+### Activate the WhatsApp template
+
+The existing Meta account and token are reused. No Firebase Auth, new WhatsApp subscription or billing change is required by this integration. The template defaults are below; set them explicitly on the backend host if desired:
+
+```text
+ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE=activ_association_update_v1
+ASSOCIATION_UPDATE_WHATSAPP_LANGUAGE=en_US
+```
+
+The queue starts with the backend API. Leave `NOTIFICATION_WORKER_ENABLED` unset or `true`; `false` pauses the notification worker. Email and WhatsApp do not require Firebase configuration and continue to work with `PUSH_ENABLED=false`. They still require the existing membership SMTP and WhatsApp provider credentials.
+
+Run from the backend directory:
+
+```text
+node scripts/association-update-template.js
+node scripts/association-update-template.js --status
+node scripts/association-update-template.js --submit
+```
+
+The first command prints the complete template for review. `--status` is read-only. `--submit` creates only that template if missing; it sends no messages. It requires the existing `META_ACCESS_TOKEN` plus `META_WABA_ID`, with WhatsApp business-management permission. Wait for `APPROVED` and `contractMatches: true`; pending/rejected templates cannot deliver. Broad association announcements use the **MARKETING** category rather than pretending to be a transaction notice. The dedicated template was submitted on 15 October 2026; check its live status using the command above.
+
+**Costs:** Firebase Cloud Messaging itself remains free. WhatsApp Business Platform template messages are not generally free; Meta charges based on delivered message category and recipient market, with any existing provider charges separate. SMTP quotas and prices depend on the current mail provider. This code does not enable billing or promise free unlimited mail/WhatsApp at lakh-user scale. See [official WhatsApp pricing](https://business.whatsapp.com/products/platform-pricing) and [WhatsApp opt-in/template policy](https://business.whatsapp.com/policy).
+
+### Delivery records, retries and safe testing
+
+Super Admin notification logs record these messages as `ASSOCIATION_UPDATE`, separately for email and WhatsApp. `accepted` means the SMTP/WhatsApp provider accepted the request. WhatsApp's existing signed webhook can advance it to sent, delivered, read or failed; email acceptance does not prove inbox delivery. Use the existing retry action after resolving a failed template/sender configuration. Retries repeat all eligibility and consent checks and do not replay old stored content to an ineligible recipient.
+
+The persistent queue uses a claim per recipient/channel, a five-minute lease, bounded sends and backoff for known temporary provider failures. Email and WhatsApp fail independently. Interrupted sends whose outcome is unknown are held for review instead of being automatically duplicated; confirmed acceptance in the audit record is recovered without replay. Old update deliveries expire after seven days. Large campaigns still depend on provider throughput, approved WhatsApp limits and SMTP capacity; this is not a lakh-recipient load-test claim.
+
+```text
+node tests/association-update-delivery-local.test.js
+node scripts/test-association-update-delivery.js
+node scripts/test-association-update-delivery.js --send-email
+node scripts/test-association-update-delivery.js --send-whatsapp
+```
+
+The automated test uses disposable loopback MongoDB and stubbed providers. It covers audience/plan/region selection, preference changes, drafts, old queued messages, concurrent workers, channel retries and interrupted delivery recovery. Broken connections with an uncertain provider result are held for review; a queue-write failure after acceptance is recorded must not erase that acceptance or repeat the send.
+
+The preview command sends nothing. The two explicit send flags are hard-coded to the user-authorized test email `tharunroobika@gmail.com` and WhatsApp `+919092317264`; no other recipient can be supplied. Test email disables office archive CC/BCC and checks the final SMTP envelope. The script never connects to a member database or publishes an update. It writes an HTML preview and a small acceptance report under `artifacts/` beside the backend directory.
+
+Verification on 15 October 2026: the authorized test email was accepted by SMTP. The read-only Meta check still reports `PENDING`, category `MARKETING`, with `contractMatches: true`; no WhatsApp test has been sent. The current record is `artifacts/association-update-live-test.json`. Wait for template approval before the WhatsApp send check, and do not repeat the already accepted email merely because the laptop or worker restarted.

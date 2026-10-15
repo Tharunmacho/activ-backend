@@ -1,5 +1,14 @@
 const mongoose = require('mongoose');
 const dataLayout = require('../../config/dataLayout');
+const updateDeliverySchema = new mongoose.Schema({
+    status: { type: String, enum: ['pending', 'sending', 'sent', 'skipped', 'failed'], default: 'pending' },
+    attempts: { type: Number, default: 0 },
+    nextAttemptAt: { type: Date, default: Date.now },
+    leaseUntil: Date,
+    worker: String,
+    lastError: String,
+    logId: mongoose.Schema.Types.ObjectId,
+}, { _id: false });
 
 const notificationSchema = new mongoose.Schema({
     user: {
@@ -35,6 +44,12 @@ const notificationSchema = new mongoose.Schema({
         lastError: String,
         sentTokens: [String],
     },
+    // Present only for newly published association updates; no historical
+    // lifecycle messages or existing notifications are backfilled into a send.
+    updateDelivery: {
+        email: { type: updateDeliverySchema, default: undefined },
+        whatsapp: { type: updateDeliverySchema, default: undefined },
+    },
     data: mongoose.Schema.Types.Mixed
 }, {
     timestamps: true
@@ -42,5 +57,7 @@ const notificationSchema = new mongoose.Schema({
 
 notificationSchema.index({ deliveryKey: 1 }, { unique: true, sparse: true });
 notificationSchema.index({ 'push.status': 1, 'push.nextAttemptAt': 1 });
+notificationSchema.index({ 'updateDelivery.email.status': 1, 'updateDelivery.email.nextAttemptAt': 1 });
+notificationSchema.index({ 'updateDelivery.whatsapp.status': 1, 'updateDelivery.whatsapp.nextAttemptAt': 1 });
 notificationSchema.index({ user: 1, createdAt: -1 });
 module.exports = dataLayout.model('Notification', notificationSchema);

@@ -117,7 +117,7 @@ async function processPushBatch() {
 async function tick() {
     if (running) return;
     running = true;
-    try { await Promise.all([Broadcast.processBatch(), processPushBatch()]); }
+    try { await Promise.all([Broadcast.processBatch(), processPushBatch(), require('./associationUpdateDelivery').processBatch()]); }
     catch (error) { logger.warn('Notification worker failed', { code: error.code || 'worker/unavailable' }); }
     finally { running = false; }
 }

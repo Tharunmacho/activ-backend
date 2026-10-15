@@ -78,7 +78,7 @@ class NotificationService {
          */
         const [notifications, total, unread] = await Promise.all([
             Notification.find(query)
-                .select('-push -deliveryKey')
+                .select('-push -deliveryKey -updateDelivery')
                 .skip(skip)
                 .limit(limit)
                 .sort({ createdAt: -1 })
@@ -91,7 +91,7 @@ class NotificationService {
     }
 
     async markAsRead(userId, notificationId) {
-        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey');
+        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey -updateDelivery');
         return notification;
     }
 
@@ -846,6 +846,7 @@ class NotificationService {
 
         const row = await NotificationLog.findById(logId);
         if (!row) return null;
+        if (row.event === 'ASSOCIATION_UPDATE') return require('./associationUpdateDelivery').retryLog(row);
         const data = row.data || {};
         const legacyRegistrationNotice = ['EVENT_REGISTERED', 'EVENT_REMINDER'].includes(row.event)
             || (row.event === 'EVENT_BOOKING_WAITLISTED' && !!(data.lifecycleData?.registrationId || data.registrationId));

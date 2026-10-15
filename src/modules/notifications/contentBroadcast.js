@@ -59,7 +59,8 @@ function notice(job, doc, user) {
     return { user: user._id, deliveryKey: `${job._id}:${user._id}`, title: 'ACTIV · ' + labels[kind],
         message: `Dear member, there is a new or revised ${labels[kind]} for you. Thank you for being part of ACTIV.`,
         type: 'info', isRead: false,
-        data: { kind, sourceId: String(doc._id), ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
+        ...(kind === 'announcement' ? { updateDelivery: { email: {}, whatsapp: {} } } : {}),
+        data: { kind, sourceId: String(doc._id), ...(kind === 'announcement' ? { broadcastKey: job.key } : {}), ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
             ...(kind === 'announcement' ? { announcementId: String(doc._id) } : {}), slug: doc.slug || '' },
         push: { status: 'pending', attempts: 0, nextAttemptAt: new Date() } };
 }

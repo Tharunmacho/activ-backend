@@ -20,6 +20,13 @@ const router = express.Router();
 
 router.use(verifyToken);
 
+router.get('/update-preferences', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./updatePreferences').get(req.user.userId)));
+}));
+router.patch('/update-preferences', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./updatePreferences').update(req.user.userId, req.body)));
+}));
+
 router.post('/push/devices', asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./push.service').register(req.user.userId, req.body)));
 }));

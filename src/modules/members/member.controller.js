@@ -16,6 +16,7 @@ const asyncHandler = require('../../core/utils/asyncHandler');
 const bcrypt = require('bcrypt');
 const { internationalFromPhone, validateMobile } = require('../common/phoneNumber');
 const { ALL_SOCIAL_CATEGORIES, GENDERS } = require('./demographicOptions');
+const { PERSONAL_FIELDS, personalFrom, normalizePersonal, missingPersonalFields, assertCompletePersonal } = require('./personalDetails');
 
 /**
  * The short names every client actually sends, mapped to the schema's names.
@@ -142,6 +143,24 @@ const updateMember = asyncHandler(async(req, res) => {
             profileData.city = place;
         }
     }
+
+    const personalInput = personalFrom(member, existingPersonalInfo);
+    for (const key of PERSONAL_FIELDS) if (Object.hasOwn(profileData, key)) personalInput[key] = profileData[key];
+    if (email !== undefined) personalInput.email = email;
+    // Business/declaration/photo/account updates are not a completed Personal
+    // Details form. Actual personal edits must validate the merged record before
+    // ANY writes, including changes to the login email or contact numbers.
+    const editsPersonal = ['fullName', 'state', 'district', 'block', 'city', 'place', 'religion', 'socialCategory', 'gender']
+        .some(key => Object.hasOwn(profileData, key));
+    const normalizedPersonal = editsPersonal
+        ? assertCompletePersonal(personalInput, { international: abroad.international })
+        : normalizePersonal(personalInput);
+    const personalComplete = missingPersonalFields(normalizedPersonal, { international: abroad.international }).length === 0;
+    if (editsPersonal) {
+        profileData.religion = normalizedPersonal.religion;
+        profileData.socialCategory = normalizedPersonal.socialCategory;
+        profileData.gender = normalizedPersonal.gender;
+    }
     
     // Store original email before any updates (needed for finding auth record)
     const originalEmail = member.email;
@@ -227,7 +246,7 @@ const updateMember = asyncHandler(async(req, res) => {
             religion: profileData.religion || personalInfo.religion,
             socialCategory: profileData.socialCategory || personalInfo.socialCategory,
             gender: safeGender !== undefined ? safeGender : personalInfo.gender,
-            isLocked: true, // Lock the form after save
+            isLocked: personalComplete,
             updatedAt: new Date()
         });
     } else {
@@ -246,7 +265,7 @@ const updateMember = asyncHandler(async(req, res) => {
             religion: profileData.religion || personalFallback.religion,
             socialCategory: profileData.socialCategory || personalFallback.socialCategory,
             gender: safeGender !== undefined ? safeGender : personalFallback.gender,
-            isLocked: true // Lock the form after first save
+            isLocked: personalComplete
         });
     }
     
@@ -307,7 +326,7 @@ const updateMember = asyncHandler(async(req, res) => {
     }
 
     if (coreChanged) {
-        member.profileCompleted = true;
+        member.profileCompleted = personalComplete;
         await member.save();
     }
 
@@ -630,11 +649,13 @@ const updateMember = asyncHandler(async(req, res) => {
         district: personalInfo.district,
         block: personalInfo.block,
         city: personalInfo.city,
-        religion: personalInfo.religion,
-        socialCategory: personalInfo.socialCategory,
+        religion: personalInfo.religion || member.religion || '',
+        socialCategory: personalInfo.socialCategory || member.socialCategory || '',
         gender: personalInfo.gender || member.gender || '',
         email: member.email,
-        isLocked: personalInfo.isLocked
+        isLocked: personalInfo.isLocked && personalComplete,
+        personalDetailsComplete: personalComplete,
+        missingPersonalFields: missingPersonalFields(normalizedPersonal, { international: abroad.international }),
     };
     
     /* The member context caches the region and the membership status for
@@ -681,8 +702,8 @@ const getMyProfile = asyncHandler(async(req, res) => {
         isInternational: member.isInternational === true,
         country: member.country || '',
         place: member.place || '',
-        religion: personalInfo.religion,
-        socialCategory: personalInfo.socialCategory,
+        religion: personalInfo.religion || member.religion || '',
+        socialCategory: personalInfo.socialCategory || member.socialCategory || '',
         /* `personalInfo` predates this field for every member who filled the
            form in before it was asked; their answer, if any, is on the member
            record. */
@@ -848,6 +869,14 @@ const getMyProfile = asyncHandler(async(req, res) => {
         paymentMethod: member.paymentMethod || '',
         isLocked: false
     };
+
+    profileData.missingPersonalFields = missingPersonalFields(profileData, {
+        international: member.isInternational === true || internationalFromPhone(member.phoneNumber).international,
+    });
+    profileData.personalDetailsComplete = profileData.missingPersonalFields.length === 0;
+    // Old saves locked Form 1 when only Form 2/3 was posted. Let those members
+    // supply their missing answers instead of trapping them behind a disabled form.
+    profileData.isLocked = profileData.isLocked && profileData.personalDetailsComplete;
     
     // Paid-plan identity comes from the receipt, rather than an old application
     // or a profile edit that has not yet been paid for.

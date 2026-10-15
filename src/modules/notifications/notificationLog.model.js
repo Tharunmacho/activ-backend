@@ -12,6 +12,7 @@ const notificationLogSchema = new mongoose.Schema({
         required: true,
         enum: [
             'ACCOUNT_REGISTERED',
+            'ASSOCIATION_UPDATE',
             'APPLICATION_SUBMITTED',
             'STAGE_CHANGED',
             'CORRECTION_REQUESTED',

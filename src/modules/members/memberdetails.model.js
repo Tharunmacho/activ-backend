@@ -360,6 +360,13 @@ const memberDetailsSchema = new mongoose.Schema({
         }, { _id: false }),
         default: undefined
     },
+    associationUpdatePreferences: {
+        email: { type: Boolean, default: true },
+        whatsapp: { type: Boolean, default: false },
+        whatsappConsentAt: Date,
+        whatsappConsentNumber: String,
+        updatedAt: Date,
+    },
     profilePhoto: {
         type: String,
         trim: true

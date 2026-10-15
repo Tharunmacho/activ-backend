@@ -78,7 +78,9 @@ const applicationSchema = new mongoose.Schema({
     },
     block: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredForDevelopmentDistrict() {
+            return this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
+        },
         trim: true,
         index: true
     },

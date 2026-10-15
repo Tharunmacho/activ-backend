@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const Application = require('./application.model');
 const MemberAuth = require('../auth/auth.model');
 const MemberDetails = require('../members/memberdetails.model');
+const PersonalInfo1 = require('../members/personalinfo1.model');
+const { PERSONAL_FIELDS, personalFrom, assertCompletePersonal } = require('../members/personalDetails');
 const BusinessInfo = require('../members/businessinfo.model');
 const MemberFinancialInfo = require('../members/memberfinancialinfo.model');
 const MemberDeclaration = require('../members/memberdeclaration.model');
@@ -102,6 +104,25 @@ class ApplicationService {
         }
 
         const appData = applicationData.data || applicationData;
+        if (!appData || typeof appData !== 'object' || Array.isArray(appData)) {
+            throw ApiError.badRequest('Application details must be an object.');
+        }
+        const submittedPersonal = appData.personalDetails ?? appData.personal ?? {};
+        if (!submittedPersonal || typeof submittedPersonal !== 'object' || Array.isArray(submittedPersonal)) {
+            throw ApiError.badRequest('Personal details must be an object.');
+        }
+        const savedPersonal = await PersonalInfo1.findOne({ userId }).lean();
+        // Omitted fields can come from the applicant's own saved form. Explicit
+        // blanks are rejected; they must not silently fall back to an old answer.
+        const personalInput = personalFrom(userDetails, savedPersonal);
+        for (const source of [applicationData, submittedPersonal]) {
+            for (const key of PERSONAL_FIELDS) if (Object.hasOwn(source, key)) personalInput[key] = source[key];
+            if (!Object.hasOwn(source, 'phoneNumber') && Object.hasOwn(source, 'phone')) personalInput.phoneNumber = source.phone;
+            if (!Object.hasOwn(source, 'fullName') && Object.hasOwn(source, 'name')) personalInput.fullName = source.name;
+        }
+        const storedAbroad = userDetails?.isInternational === true
+            || internationalFromPhone(userDetails?.phoneNumber || userDetails?.phone).international;
+        const personal = assertCompletePersonal(personalInput, { international: storedAbroad });
         const bizInfo = appData.businessInfo || {};
         const declares = (value) => [
             appData.registrationType, appData.memberType,
@@ -142,6 +163,14 @@ class ApplicationService {
             data: appData,
             role: derivedRole,
             ...applicationData,
+            fullName: personal.fullName,
+            email: personal.email,
+            phone: personal.phoneNumber,
+            state: personal.state || '',
+            district: personal.district || '',
+            block: personal.block || '',
+            place: personal.place || '',
+            data: { ...appData, personalDetails: { ...submittedPersonal, ...personal, phone: personal.phoneNumber } },
             // After the spread: the derived kind wins over a client's older label.
             memberType: kind,
             registrationType: kind
@@ -167,7 +196,7 @@ class ApplicationService {
          */
         const abroad = (userDetails && userDetails.isInternational === true)
             ? { international: true, country: userDetails.country || '' }
-            : internationalFromPhone(payload.phone);
+            : internationalFromPhone(userDetails?.phoneNumber || userDetails?.phone);
 
         if (abroad.international) {
             payload.state = '';
@@ -176,7 +205,7 @@ class ApplicationService {
             payload.isInternational = true;
             payload.country = abroad.country || (userDetails && userDetails.country) || '';
             payload.place = String(
-                applicationData.place || (userDetails && (userDetails.place || userDetails.city)) || '',
+                personal.place || (userDetails && (userDetails.place || userDetails.city)) || '',
             ).trim().slice(0, 200);
 
             /* `buildGeoFilter` also matches the region inside the submitted form
@@ -209,6 +238,12 @@ class ApplicationService {
             }
             payload.isInternational = false;
         }
+
+        // Keep the snapshot and routing fields identical after canonicalisation.
+        Object.assign(payload.data.personalDetails, {
+            state: payload.state, district: payload.district, block: payload.block,
+            isInternational: payload.isInternational, place: payload.place || '',
+        });
 
         const application = new Application({
             userId: userId,
@@ -345,12 +380,14 @@ class ApplicationService {
                 return String(v).trim() !== '';
             }).length === 0;
 
-        const personalEmpty = isEmpty(data.personalDetails || data.personal);
+        const snapshotPersonal = data.personalDetails || data.personal || {};
+        const personalIncomplete = ['fullName', 'email', 'phoneNumber', 'religion', 'socialCategory', 'gender']
+            .some(key => !String(snapshotPersonal[key] || '').trim());
         const businessEmpty = isEmpty(data.businessInfo || data.business);
         const financialEmpty = isEmpty(data.financialInfo || data.financial);
         const declarationEmpty = isEmpty(data.declaration);
 
-        if (!personalEmpty && !businessEmpty && !financialEmpty && !declarationEmpty) return plain;
+        if (!personalIncomplete && !businessEmpty && !financialEmpty && !declarationEmpty) return plain;
 
         /**
          * Resolve the member first, and do not trust `application.userId`.
@@ -377,7 +414,7 @@ class ApplicationService {
 
         const memberId = member._id;
 
-        const [business, financial, declaration] = await Promise.all([
+        const [business, financial, declaration, savedPersonal] = await Promise.all([
             businessEmpty ? BusinessInfo.findOne({ userId: memberId }).lean().catch(() => null) : null,
             // `+panNumber` because the field is `select: false` on the schema.
             financialEmpty ? MemberFinancialInfo.findOne({ memberId })
@@ -385,6 +422,7 @@ class ApplicationService {
             declarationEmpty ? MemberDeclaration.findOne({
                 $or: [{ userId: memberId }, { memberId }]
             }).lean().catch(() => null) : null,
+            personalIncomplete ? PersonalInfo1.findOne({ userId: memberId }).lean().catch(() => null) : null,
         ]);
 
         const strip = (doc) => {
@@ -394,9 +432,9 @@ class ApplicationService {
         };
 
         plain.data = { ...data };
-        if (personalEmpty && member) {
+        if (personalIncomplete && member) {
             plain.data.personalDetails = {
-                ...(data.personalDetails || {}),
+                ...snapshotPersonal,
                 fullName: member.fullName,
                 email: member.email,
                 phone: member.phoneNumber,
@@ -410,6 +448,9 @@ class ApplicationService {
                 gender: member.gender,
                 dateOfBirth: member.dateOfBirth,
                 aadhaarNumber: member.aadhaarNumber,
+                // Fill only gaps from saved answers. An existing application
+                // answer always wins, including older spellings of demographics.
+                ...personalFrom(member, savedPersonal, snapshotPersonal),
             };
         }
         if (businessEmpty && business) plain.data.businessInfo = { ...(data.businessInfo || {}), ...strip(business) };

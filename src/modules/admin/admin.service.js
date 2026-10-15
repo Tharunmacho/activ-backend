@@ -467,6 +467,7 @@ const buildApplicant = (application, member = {}, index = 0, level = LEVELS.BLOC
             aadhaarNumber: firstOf(personal.aadhaarNumber, personal.aadhaar, member.aadhaarNumber),
             streetName: firstOf(personal.streetName, personal.street, personal.addressLine1, member.streetName),
             education: firstOf(personal.education, personal.educationalQualification, member.educationalQualification),
+            gender: firstOf(personal.gender, member.gender),
             religion: firstOf(personal.religion, member.religion),
             socialCategory: firstOf(personal.socialCategory, member.socialCategory)
         },
