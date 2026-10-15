@@ -3,7 +3,7 @@ const Announcement = require('./announcement.model');
 const ApiError = require('../../core/utils/ApiError');
 const auditService = require('../audit/audit.service');
 const { audienceClause, targetsMember, targetLabel, targetDepth } = require('../common/regionMatch');
-const { AUDIENCES, allowedAudiences, matchesAudience } = require('../common/memberAudience');
+const { AUDIENCES, announcementAudienceClause, matchesAudience } = require('../common/memberAudience');
 
 const FEED_LIMIT = 50;
 const ADMIN_LIMIT = 200;
@@ -36,6 +36,7 @@ const toAnnouncement = (doc = {}) => ({
     /** "Tamil Nadu › Sivaganga", or empty when it went to everyone. */
     targetLabel: targetLabel(doc),
     audience: doc.audience || 'all',
+    planKeys: doc.planKeys || [],
     bannerUrl: doc.bannerUrl || '',
     bannerAlt: doc.bannerAlt || '',
     attachmentUrl: doc.attachmentUrl || '',
@@ -59,6 +60,33 @@ const sanitize = (payload = {}) => {
     ].forEach((key) => {
         if (payload[key] !== undefined) out[key] = str(payload[key]);
     });
+
+    for (const key of ['bannerUrl', 'attachmentUrl']) {
+        if (!out[key]) continue;
+        const value = out[key];
+        const uploaded = /^\/uploads\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/.test(value)
+            && !value.split('/').some(part => part === '..' || part === '.');
+        let external = false;
+        try {
+            const url = new URL(value);
+            external = /^https?:\/\//i.test(value) && ['https:', 'http:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password;
+        } catch (_) { /* Only an uploaded file path or a complete web URL is valid. */ }
+        if ((!uploaded && !external) || /[\s\\]/.test(value)) {
+            throw ApiError.badRequest(key === 'bannerUrl' ? 'Upload a valid update image.' : 'Upload a valid attachment.');
+        }
+    }
+
+    if (payload.planKeys !== undefined) {
+        let keys = payload.planKeys;
+        if (typeof keys === 'string') {
+            try { keys = JSON.parse(keys); } catch (_) { throw ApiError.badRequest('Select membership plans from the list.'); }
+        }
+        if (!Array.isArray(keys) || keys.length > 100 || keys.some(key => typeof key !== 'string' || !key.trim())) {
+            throw ApiError.badRequest('Select membership plans from the list.');
+        }
+        out.planKeys = keys.map(key => key.trim().toLowerCase());
+        if (new Set(out.planKeys).size !== out.planKeys.length) throw ApiError.badRequest('Each membership plan can be selected only once.');
+    }
 
     if (payload.category !== undefined) {
         const category = str(payload.category).toLowerCase() || 'general';
@@ -99,6 +127,31 @@ const sanitize = (payload = {}) => {
     }
 
     return out;
+};
+
+/** Validate the resulting document, including edits that omit status/audience. */
+const validateDocument = async (data, current = {}) => {
+    const merged = { ...current, ...data };
+    if (!str(merged.title)) throw ApiError.badRequest('An update needs a title');
+    if (merged.district && !merged.state) throw ApiError.badRequest('Choose a state before choosing a district.');
+    if (merged.block && !merged.district) throw ApiError.badRequest('Choose a district before choosing a block.');
+    if (merged.audience === 'plans') {
+        const keys = merged.planKeys || [];
+        if (!keys.length) throw ApiError.badRequest('Select at least one membership plan.');
+        // Retired plans remain valid: members may still hold paid memberships.
+        const known = await require('../members/membershipplan.model').countDocuments({ key: { $in: keys } });
+        if (known !== keys.length) throw ApiError.badRequest('One or more selected membership plans no longer exist. Refresh the plan list.');
+    } else {
+        data.planKeys = [];
+    }
+    if (merged.status === 'published') {
+        if (!excerpt(merged.body) && !str(merged.summary) && !merged.bannerUrl && !merged.attachmentUrl) {
+            throw ApiError.badRequest('Add a message, image or attachment before publishing this update.');
+        }
+        if (merged.expiresAt && new Date(merged.expiresAt).getTime() <= Date.now()) {
+            throw ApiError.badRequest('Choose a future expiry date before publishing this update.');
+        }
+    }
 };
 
 const requireId = (id) => {
@@ -151,7 +204,7 @@ class AnnouncementService {
         // An admin previewing the feed is not a paid member and must still see
         // the paid-only items, or they cannot check what they just published.
         if (!context.isAdmin) {
-            query.$and.push({ $or: [{ audience: { $in: allowedAudiences(context) } }, { audience: { $exists: false } }] });
+            query.$and.push(announcementAudienceClause(context));
         }
 
         if (filters.category && CATEGORIES.includes(str(filters.category).toLowerCase())) {
@@ -191,7 +244,7 @@ class AnnouncementService {
 
         if (!isAdmin) {
             if (doc.status !== 'published') throw ApiError.notFound('Update not found');
-            if (!matchesAudience(doc.audience, context) || !targetsMember(doc, context)
+            if (!matchesAudience(doc.audience, context, doc.planKeys) || !targetsMember(doc, context)
                 || (doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now())) {
                 throw ApiError.notFound('Update not found');
             }
@@ -222,8 +275,7 @@ class AnnouncementService {
     async create(payload = {}, actor = {}) {
         const data = sanitize(payload);
 
-        if (!data.title) throw ApiError.badRequest('An update needs a title');
-        if (!data.body && !data.summary) throw ApiError.badRequest('An update needs something to say');
+        await validateDocument(data);
 
         const created = await Announcement.create(withPublishStamp({
             ...data,
@@ -241,7 +293,7 @@ class AnnouncementService {
             targetId: announcement.id,
             targetLabel: announcement.title,
             state: announcement.state,
-            metadata: { status: announcement.status, audience: announcement.audience }
+            metadata: { status: announcement.status, audience: announcement.audience, planKeys: announcement.planKeys }
         });
 
         return announcement;
@@ -253,8 +305,9 @@ class AnnouncementService {
         const data = sanitize(payload);
         if (data.title !== undefined && !data.title) throw ApiError.badRequest('Title cannot be empty');
 
-        const current = await Announcement.findById(id).select('publishedAt').lean().catch(() => null);
+        const current = await Announcement.findById(id).lean().catch(() => null);
         if (!current) throw ApiError.notFound('Update not found');
+        await validateDocument(data, current);
 
         const updated = await Announcement.findByIdAndUpdate(
             id,

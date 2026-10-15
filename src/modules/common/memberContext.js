@@ -101,7 +101,7 @@ const cachedMember = async (id) => {
 
     /* A paid status whose payment was deleted is not paid — see paymentReconcile. */
     if (member) member = await require('../members/paymentReconcile').reconcileMember(member);
-    if (member) member.paidAudience = await require('./memberAudience').paidAudience(member);
+    if (member) Object.assign(member, await require('./memberAudience').paidMembership(member));
 
     /* A miss is cached too. A member id with no profile row — an admin calling
        a member endpoint — would otherwise pay the full round trip on every

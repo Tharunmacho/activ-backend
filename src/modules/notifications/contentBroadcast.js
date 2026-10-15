@@ -3,10 +3,10 @@ const { memberAccess, matchesAudience } = require('../common/memberAudience');
 const { targetsMember, multiTargetsViewer } = require('../common/regionMatch');
 const { isPastEvent } = require('../events/eventLifecycle');
 const logger = require('../../config/logger');
-const VISIBILITY_FIELDS = 'slug status visible audience state district block tier targets reachEveryone expiresAt startAt endAt days archivedAt deletedAt';
+const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district block tier targets reachEveryone expiresAt startAt endAt days archivedAt deletedAt';
 const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets',
     'startAt', 'endAt', 'days', 'mode', 'venue', 'venueAddress', 'venueMapUrl', 'onlinePlatform', 'onlineUrl', 'language', 'category', 'topic',
-    'content', 'image', 'images', 'media', 'photos', 'attachments', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
+    'content', 'image', 'images', 'media', 'photos', 'attachments', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
     'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote'];
 
 function published(kind, doc) {
@@ -23,7 +23,7 @@ function sourceModel(kind) {
     return { news: cms.NewsArticle, gallery: cms.GalleryItem, scheme: cms.Scheme }[kind];
 }
 function visibleTo(kind, doc, context) {
-    if (!published(kind, doc) || !matchesAudience(doc.audience, context)) return false;
+    if (!published(kind, doc) || !matchesAudience(doc.audience, context, kind === 'announcement' ? doc.planKeys : [])) return false;
     if (kind === 'event') return doc.reachEveryone === true || multiTargetsViewer(doc, context);
     if (kind === 'scheme' && ['central', 'national'].includes(doc.tier)) return true;
     return targetsMember(doc, context);

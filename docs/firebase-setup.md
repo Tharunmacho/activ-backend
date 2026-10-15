@@ -100,11 +100,17 @@ Test each provider on website and phone using an already-registered ACTIV email.
 | --- | --- |
 | All members | Signed-in member accounts, paid or unpaid |
 | Paid members | Active, unexpired paid memberships, including Student and Lifetime |
+| Paid members excluding students | Active paid memberships except Student plans, including Business, Aspirant and Lifetime |
 | Unpaid members | Accounts without active membership, including expired memberships |
-| Student members | Student-plan accounts; a paid upgrade moves them out of this segment |
+| Business members | Active memberships whose paid plan is for business members |
+| Aspirant members | Active memberships whose paid plan is for aspirants |
+| Student members | Active paid Student memberships; expired memberships and members who have paid for an upgrade are excluded |
 | Lifetime members | Active lifetime members |
+| Specific membership plans | Active members holding any selected plan from the membership catalogue, including retired plans with existing holders. Annual plans match the latest paid membership receipt; authoritative lifetime grants match Platinum |
 
-Region targeting applies in addition to membership targeting. The backend enforces this on both lists and direct detail URLs. Student members can attend eligible events and learning programmes; the private directory and direct chat show an upgrade prompt. Profile edits cannot upgrade the paid plan. A confirmed paid upgrade unlocks networking.
+To compose an update, enter a title and message, then optionally upload an image/poster or a document. Uploaded files have a preview or document link and can be replaced or removed; no pasted file URL is required. Choose the audience, select membership plans when needed, and optionally restrict the region. Review the content and recipients before publishing. **Save draft** keeps the update private and permits a title-only draft; **Publish update** requires a title plus a message, summary, image or document. Publishing or revising published content queues notifications for eligible members. Moving it back to draft removes it from member feeds.
+
+Region targeting intersects with membership targeting: a member must match both. The backend applies the same rules to feeds, direct detail URLs, notification recipients, notification reads and the check immediately before push delivery. Selected plans come from the actual paid receipt rather than editable profile fields; pending payments do not qualify. Student members can attend eligible events and learning programmes; the private directory and direct chat show an upgrade prompt. Profile edits cannot upgrade the paid plan. A confirmed paid upgrade unlocks networking.
 
 Published events, association updates, news, galleries and schemes enqueue recipient jobs. Existing membership, approval, payment, booking and message notifications use the same push queue when an in-app notification is created. Drafts and operational changes such as event seat counts do not broadcast. Deleting an event retains its booking records under **Old**; it does not leave a new public event notification.
 

@@ -37,7 +37,7 @@ let mongo;
   }
   const context = async kind => contextService.resolveMemberContext({ user: { userId: String(fixtures[kind]._id), role: 'member' } });
   assert.deepEqual(allowedAudiences(await context('student')), ['all', 'paid', 'student']);
-  assert.deepEqual(allowedAudiences(await context('lifetime')), ['all', 'paid', 'lifetime']);
+  assert.deepEqual(allowedAudiences(await context('lifetime')), ['all', 'paid', 'lifetime', 'paid_non_student']);
   assert.equal(memberAccess(fixtures.expired).canNetwork, false);
   const notices = {};
   for (const audience of ['all', 'paid', 'unpaid', 'student', 'lifetime']) {

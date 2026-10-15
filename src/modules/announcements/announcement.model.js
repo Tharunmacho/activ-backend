@@ -62,10 +62,13 @@ const announcementSchema = new mongoose.Schema({
      */
     audience: {
         type: String,
-        enum: ['all', 'paid', 'unpaid', 'student', 'lifetime'],
+        enum: require('../common/memberAudience').AUDIENCES,
         default: 'all',
         index: true
     },
+
+    // Stable catalogue keys, matched against the latest paid membership receipt.
+    planKeys: { type: [String], default: [] },
 
     bannerUrl: { type: String, trim: true, default: '' },
     bannerAlt: { type: String, trim: true, default: '' },
@@ -114,6 +117,7 @@ const announcementSchema = new mongoose.Schema({
 
 announcementSchema.index({ status: 1, pinned: -1, publishedAt: -1 });
 announcementSchema.index({ status: 1, state: 1, district: 1, block: 1 });
+announcementSchema.index({ status: 1, audience: 1, planKeys: 1 });
 
 require('../notifications/contentBroadcast').install(announcementSchema, 'announcement');
 module.exports = dataLayout.model('Announcement', announcementSchema);
