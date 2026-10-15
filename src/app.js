@@ -23,6 +23,7 @@ app.set('trust proxy', 1);
 // deployed container is after every deploy. See `core/storage/uploadStore.js`.
 // `?w=800` asks for a resized WebP of the same upload — see `imageVariants`.
 // First, so a sized request never downloads the full original.
+app.use('/uploads', require('./modules/messages/messageAttachments').blockPublicFiles);
 app.use('/uploads', makeVariantMiddleware({
     uploadsDir: uploadStore.UPLOADS_DIR,
     objectStore: uploadStore.objectStore,

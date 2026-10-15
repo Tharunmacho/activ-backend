@@ -1,7 +1,7 @@
 const express = require('express');
 const controller = require('./message.controller');
 const { verifyToken } = require('../../core/middleware/auth');
-const upload = require('../../core/middleware/upload');
+const attachments = require('./messageAttachments');
 const { requireNetworking } = require('../common/requireNetworking');
 
 /**
@@ -32,7 +32,8 @@ router.get('/', controller.listConversations);
  * same reason `/unread-count` is: a literal behind a parameter route is a
  * literal the parameter captures.
  */
-router.post('/attachment', upload.single('image'), controller.uploadAttachment);
+router.post('/attachment', attachments.receive, controller.uploadAttachment);
+router.get('/attachments/:attachmentId', controller.downloadAttachment);
 
 /** Open or start the thread with one member, from their directory profile. */
 router.post('/with/:memberId', controller.openWith);

@@ -151,6 +151,13 @@ const messageSchema = new mongoose.Schema({
      * a five-megabyte field in a collection that is paged by the thread.
      */
     attachmentUrl: { type: String, default: '', trim: true },
+    attachment: {
+        type: new mongoose.Schema({
+            id: String, url: String, name: String, mimeType: String, size: Number,
+            kind: { type: String, enum: ['image', 'file'] }, storageName: String,
+        }, { _id: false }),
+        default: undefined,
+    },
 
     /** When the OTHER participant read it. Null until they do. */
     readAt: { type: Date, default: null },
@@ -174,6 +181,7 @@ messageSchema.pre('validate', function guardEmpty(next) {
 
 // Paging a thread: newest first, within one conversation.
 messageSchema.index({ conversationId: 1, createdAt: -1 });
+messageSchema.index({ 'attachment.id': 1, conversationId: 1 });
 
 /**
  * The canonical participant ordering. THE ONLY PLACE IT IS DECIDED.

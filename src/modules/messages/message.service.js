@@ -7,6 +7,7 @@ const { memberAccess, paidAudience, STUDENT_UPGRADE_MESSAGE } = require('../comm
    ever failing the send itself. */
 const notificationService = require('../notifications/notification.service');
 const ApiError = require('../../core/utils/ApiError');
+const attachments = require('./messageAttachments');
 
 /**
  * Direct messages between members.
@@ -242,6 +243,7 @@ class MessageService {
                 /* Always present, empty when there is none — a client that has
                    to test for `undefined` as well as `''` gets it wrong once. */
                 attachmentUrl: m.attachmentUrl || '',
+                attachment: attachments.publicMetadata(m.attachment),
                 mine: String(m.senderId) === String(meId),
                 at: m.createdAt,
                 readAt: m.readAt || null,
@@ -252,9 +254,10 @@ class MessageService {
     /**
      * Send. Re-checks BOTH memberships — see the note at the top of the file.
      */
-    async send(conversationId, meId, body, attachmentUrl = '') {
+    async send(conversationId, meId, body, attachmentUrl = '', uploadedAttachment = null) {
         const text = String(body || '').trim();
-        const image = String(attachmentUrl || '').trim();
+        const attachment = attachments.forMessage(meId, attachmentUrl, uploadedAttachment);
+        const image = attachment?.url || '';
         /* TEXT OR A PICTURE. A photograph with no caption is an ordinary
            message; a message with neither is nothing at all. */
         if (!text && !image) throw ApiError.badRequest('A message cannot be empty');
@@ -271,6 +274,7 @@ class MessageService {
             senderId: toId(meId),
             body: text,
             attachmentUrl: image,
+            ...(attachment?.id ? { attachment } : {}),
         });
 
         /*
@@ -291,7 +295,7 @@ class MessageService {
                       row with nothing in it — indistinguishable from one that
                       failed to load.
                     */
-                    lastMessageText: (text || 'Photograph').slice(0, 200),
+                    lastMessageText: (text || (attachment?.kind === 'file' ? `Document: ${attachment.name}` : 'Photograph')).slice(0, 200),
                     lastMessageBy: toId(meId),
                     [`unread.${String(meId)}`]: 0,
                 },
@@ -345,10 +349,26 @@ class MessageService {
             id: String(message._id),
             body: message.body || '',
             attachmentUrl: message.attachmentUrl || '',
+            attachment: attachments.publicMetadata(message.attachment),
             mine: true,
             at: message.createdAt,
             readAt: null,
         };
+    }
+
+    /** Everything in this thread, read. */
+    async assertCanUpload(meId) {
+        return assertCanMessage(meId, { self: true });
+    }
+
+    async attachmentForDownload(id, meId) {
+        if (!attachments.FILE_ID.test(String(id || ''))) throw ApiError.notFound('Attachment not found');
+        await assertCanMessage(meId, { self: true });
+        const conversations = await Conversation.find({ participants: toId(meId) }).select('_id').lean();
+        const message = await Message.findOne({ 'attachment.id': id,
+            conversationId: { $in: conversations.map(row => row._id) } }).select('attachment').lean();
+        if (!message?.attachment?.id) throw ApiError.notFound('Attachment not found');
+        return message.attachment;
     }
 
     /** Everything in this thread, read. */

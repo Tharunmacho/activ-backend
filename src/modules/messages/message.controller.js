@@ -43,6 +43,7 @@ const send = asyncHandler(async(req, res) => {
         requireCaller(req),
         req.body?.body,
         req.body?.attachmentUrl,
+        req.body?.attachment,
     );
     res.status(201).json(ApiResponse.success(message, 'Message sent'));
 });
@@ -59,12 +60,17 @@ const send = asyncHandler(async(req, res) => {
  * megabytes, and a filename the client does not choose.
  */
 const uploadAttachment = asyncHandler(async(req, res) => {
-    requireCaller(req);
-    if (!req.file) throw ApiError.badRequest('No picture was uploaded');
+    const owner = requireCaller(req);
+    await messageService.assertCanUpload(owner);
     res.status(201).json(ApiResponse.success(
-        { url: `/uploads/${req.file.filename}` },
-        'Picture uploaded',
+        await require('./messageAttachments').storeUpload(req, owner),
+        'Attachment ready to send',
     ));
+});
+
+const downloadAttachment = asyncHandler(async(req, res) => {
+    const attachment = await messageService.attachmentForDownload(req.params.attachmentId, requireCaller(req));
+    await require('./messageAttachments').download(attachment, res);
 });
 
 const markRead = asyncHandler(async(req, res) => {
@@ -82,6 +88,7 @@ module.exports = {
     listMessages,
     send,
     uploadAttachment,
+    downloadAttachment,
     markRead,
     unreadCount,
 };
