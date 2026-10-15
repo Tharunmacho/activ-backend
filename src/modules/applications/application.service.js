@@ -93,10 +93,6 @@ class ApplicationService {
             status: { $in: PENDING_STORED_STATUSES }
         });
 
-        if (existingApplication) {
-            return existingApplication;
-        }
-
         // Fetch user profile details to ensure required schema fields exist
         let userDetails = await MemberDetails.findOne({ $or: [{ userId }, { _id: userId }, { memberId: userId }] });
         if (!userDetails) {
@@ -123,6 +119,22 @@ class ApplicationService {
         const storedAbroad = userDetails?.isInternational === true
             || internationalFromPhone(userDetails?.phoneNumber || userDetails?.phone).international;
         const personal = assertCompletePersonal(personalInput, { international: storedAbroad });
+        if (existingApplication) {
+            // The pending lookup is scoped to this authenticated owner. A retry
+            // can repair their old snapshot using the complete answers just
+            // validated, without requiring a separate profile-save request.
+            existingApplication.data = {
+                ...(existingApplication.data || {}),
+                personalDetails: {
+                    ...(existingApplication.data?.personalDetails || existingApplication.data?.personal || {}),
+                    ...submittedPersonal, ...personal, phone: personal.phoneNumber,
+                },
+            };
+            await this.completeApplicationPersonal(existingApplication);
+            await existingApplication.save();
+            await this.invalidateReviewCaches(existingApplication);
+            return existingApplication;
+        }
         const bizInfo = appData.businessInfo || {};
         const declares = (value) => [
             appData.registrationType, appData.memberType,
@@ -381,8 +393,10 @@ class ApplicationService {
             }).length === 0;
 
         const snapshotPersonal = data.personalDetails || data.personal || {};
-        const personalIncomplete = ['fullName', 'email', 'phoneNumber', 'religion', 'socialCategory', 'gender']
-            .some(key => !String(snapshotPersonal[key] || '').trim());
+        const personalIncomplete = require('../members/personalDetails').missingPersonalFields(
+            personalFrom(plain, snapshotPersonal), { international: plain.isInternational === true
+                || internationalFromPhone(plain.phone).international },
+        ).length > 0;
         const businessEmpty = isEmpty(data.businessInfo || data.business);
         const financialEmpty = isEmpty(data.financialInfo || data.financial);
         const declarationEmpty = isEmpty(data.declaration);
@@ -458,6 +472,21 @@ class ApplicationService {
         if (declarationEmpty && declaration) plain.data.declaration = { ...(data.declaration || {}), ...strip(declaration) };
 
         return plain;
+    }
+
+    async completeApplicationPersonal(application) {
+        const ownerId = application.userId?._id || application.userId;
+        const member = ownerId ? await MemberDetails.findOne({ $or: [{ _id: ownerId }, { userId: ownerId }] }).lean() : null;
+        const saved = member ? await PersonalInfo1.findOne({ userId: member._id }).lean() : null;
+        const snapshot = application.data?.personalDetails || application.data?.personal || {};
+        // Approval must never fill demographics from an unrelated row sharing
+        // the application's display email. Only its stored owner can supply gaps.
+        const personal = assertCompletePersonal(personalFrom(member, saved, application, snapshot), {
+            international: application.isInternational === true || internationalFromPhone(application.phone).international,
+        });
+        application.data = { ...(application.data || {}), personalDetails: { ...snapshot, ...personal, phone: personal.phoneNumber } };
+        application.markModified('data');
+        return personal;
     }
 
     async getApplicationById(id) {
@@ -578,6 +607,7 @@ class ApplicationService {
             );
         }
 
+        if (status === 'Approved') await this.completeApplicationPersonal(application);
         application.status = status;
 
         // `notes` is the schema's audit array — the previously referenced
@@ -751,6 +781,10 @@ class ApplicationService {
         const actor = TIER_ACTOR[tier] || 'BlockAdmin';
         const label = TIER_LABEL[tier] || 'Block';
         const approving = action === 'approve';
+        // Do this before changing any review slot or creating a member profile.
+        // Legacy incomplete files remain reviewable/rejectable, but their own
+        // member must provide the missing answers before they can be approved.
+        if (approving) await this.completeApplicationPersonal(application);
 
         /*
          * Which slot this signs. A Super Admin signs the deciding seat, because
@@ -1087,23 +1121,13 @@ class ApplicationService {
      */
     async createMemberProfile(application, approvedByAdminId, session = null, track = null) {
         const formData = application.data || {};
-        const personalDetails = formData.personalDetails || formData.personal || formData;
+        const suppliedPersonal = formData.personalDetails || formData.personal || formData;
+        const personalDetails = { ...suppliedPersonal, ...assertCompletePersonal(personalFrom(application, suppliedPersonal), {
+            international: application.isInternational === true || internationalFromPhone(application.phone).international,
+        }) };
         const businessInfo = formData.businessInfo || formData.business || formData;
         const financialInfo = formData.financialInfo || formData.financial || formData;
         const declarationData = formData.declaration || formData;
-
-        // `socialCategory` is enum-constrained on MemberDetails but arrives as
-        // free text from legacy records and imports. An unrecognised value must
-        // not block an otherwise valid approval, so fall back to unset.
-        const SOCIAL_CATEGORIES = ['Christian ST', 'Christian SC', 'ST', 'SC', 'Others', ''];
-        const rawCategory = personalDetails.socialCategory || '';
-        const socialCategory = SOCIAL_CATEGORIES.includes(rawCategory) ? rawCategory : '';
-        if (rawCategory && socialCategory !== rawCategory) {
-            logger.warn('Unrecognised socialCategory on application; storing as unset', {
-                applicationId: application._id,
-                received: rawCategory
-            });
-        }
 
         // Single save path so every document joins the transaction (or gets
         // tracked for rollback) without repeating the plumbing four times.
@@ -1141,7 +1165,8 @@ class ApplicationService {
                 aadhaarNumber: personalDetails.aadhaarNumber,
                 educationalQualification: personalDetails.education,
                 religion: personalDetails.religion,
-                socialCategory,
+                socialCategory: personalDetails.socialCategory,
+                gender: personalDetails.gender,
                 profileCompleted: true,
                 approvedBy: approvedByAdminId,
                 approvedBlock: application.block,

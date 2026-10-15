@@ -25,6 +25,13 @@ let mongo;
     app.use((error, req, res, next) => res.status(error.statusCode || 500).json({ message: error.message }));
     const base = { fullName: 'Local Applicant', phoneNumber: '9123456780', state: 'Tamil Nadu', district: 'Krishnagiri', block: 'Hosur', city: 'Hosur' };
     const demographics = { socialCategory: 'SC', religion: 'Hinduism', gender: 'Male' };
+    const { assertCompletePersonal } = require('../src/modules/members/personalDetails');
+    const complete = { ...base, ...demographics, email: 'complete@example.test' };
+    const requiredFields = ['fullName', 'email', 'phoneNumber', 'state', 'district', 'block', 'city', 'religion', 'socialCategory', 'gender'];
+    for (const field of requiredFields) {
+        for (const empty of ['', '   ', null, undefined]) assert.throws(() => assertCompletePersonal({ ...complete, [field]: empty }), /personal details/);
+    }
+    assert.throws(() => assertCompletePersonal({ ...complete, place: '' }, { international: true }), /Place/);
     let seq = 0;
     const fixture = async extra => {
         const email = `personal-${++seq}@example.test`;
@@ -50,6 +57,7 @@ let mongo;
         { ...demographics, religion: '' }, { ...demographics, religion: null },
         { ...demographics, socialCategory: 'made-up' }, { ...demographics, gender: {} },
         { ...demographics, religion: 'Christian' }, { ...demographics, city: '   ' },
+        { ...demographics, name: '   ' },
     ]) {
         const result = await f.api('put')('/members/profile').send(body);
         assert.equal(result.status, 400, JSON.stringify(result.body));
@@ -61,6 +69,10 @@ let mongo;
         assert.equal(result.status, 400, JSON.stringify(result.body));
     }
     assert.equal(await Application.countDocuments({ userId: f.member._id }), 0);
+    for (const field of requiredFields) {
+        const result = await f.api('post')('/applications/submit').send({ data: { personalDetails: { ...demographics, [field]: '' } } });
+        assert.equal(result.status, 400, `Missing ${field}: ${JSON.stringify(result.body)}`);
+    }
     const saved = await f.api('put')('/members/profile').send({ ...demographics });
     assert.equal(saved.status, 200, JSON.stringify(saved.body));
     assert.equal(saved.body.data.personalDetailsComplete, true);
@@ -75,6 +87,8 @@ let mongo;
     assert.equal(submitted.body.data.data.personalDetails.socialCategory, 'SC');
     assert.equal(submitted.body.data.data.personalDetails.gender, 'Male');
     assert.equal(submitted.body.data.memberType, 'aspirant');
+    const badRetry = await f.api('post')('/applications/submit').send({ data: { personalDetails: { gender: '' } } });
+    assert.equal(badRetry.status, 400, 'an existing pending file does not bypass explicit required fields');
 
     for (const kind of ['business', 'student']) {
         const next = await fixture({});
@@ -94,6 +108,68 @@ let mongo;
     hydrated = await service.hydrateApplicationSections({ userId: missing.member._id, email: missing.member.email, data: { personalDetails: { fullName: base.fullName } } });
     assert(!hydrated.data.personalDetails.religion, 'never invent a missing religion');
     assert(!hydrated.data.personalDetails.socialCategory, 'never invent a missing category');
+
+    const pending = await fixture({});
+    const pendingApp = await Application.create({ ...base, email: pending.member.email, phone: base.phoneNumber,
+        userId: pending.member._id, data: { personalDetails: { ...base, email: pending.member.email } }, status: 'Pending' });
+    await Personal.create({ ...base, name: base.fullName, userId: pending.member._id, isLocked: true });
+    const pendingProfile = await pending.api('get')('/members/my-profile');
+    assert.equal(pendingProfile.body.data.isLocked, false, 'a pending legacy member can supply their own missing answers');
+    assert.equal(pendingProfile.body.data.personalDetailsBlockRequired, true);
+    const legacyRetry = await pending.api('post')('/applications/submit').send({});
+    assert.equal(legacyRetry.status, 400, 'legacy pending applications cannot report successful submission while incomplete');
+    const reviewer = new mongoose.Types.ObjectId();
+    for (const tier of ['block', 'district', 'state', 'super']) {
+        await assert.rejects(() => service.decide(pendingApp._id, 'approve', tier, reviewer), /personal details/);
+    }
+    await assert.rejects(() => service.updateApplicationStatus(pendingApp._id, 'Approved', '', reviewer), /personal details/);
+    assert.equal((await Application.findById(pendingApp._id)).status, 'Pending');
+    assert.equal((await Application.findById(pendingApp._id)).reviews.state.decision, 'pending');
+
+    // An unrelated profile with the same display email must not fill this
+    // applicant's missing demographic answers during approval.
+    const other = await fixture({ ...demographics });
+    const foreignEmailApp = await Application.create({ ...base, email: other.member.email, phone: base.phoneNumber,
+        userId: pending.member._id, data: {}, status: 'Pending' });
+    await assert.rejects(() => service.completeApplicationPersonal(foreignEmailApp), /personal details/);
+
+    const repaired = await pending.api('put')('/members/profile').send({ ...demographics, name: 'Answered Applicant' });
+    assert.equal(repaired.status, 200, JSON.stringify(repaired.body));
+    assert.equal((await Member.findById(pending.member._id)).fullName, 'Answered Applicant', 'legacy name aliases are saved and validated');
+    const resubmitted = await pending.api('post')('/applications/submit').send({});
+    assert.equal(resubmitted.status, 201, JSON.stringify(resubmitted.body));
+    assert.equal(resubmitted.body.data._id, String(pendingApp._id));
+    assert.equal(resubmitted.body.data.data.personalDetails.gender, 'Male');
+    assert.equal((await Application.findById(pendingApp._id)).data.personalDetails.socialCategory, 'SC');
+
+    const direct = await fixture({});
+    const directSubmit = await direct.api('post')('/applications').send({ registrationType: 'aspirant', data: {
+        personalDetails: { ...demographics, gender: 'Female' }, businessInfo: { doingBusiness: false },
+    } });
+    assert.equal(directSubmit.status, 201, JSON.stringify(directSubmit.body));
+    assert.equal((await Member.findById(direct.member._id)).gender, '', 'fixture starts without a saved gender');
+    const directApp = await Application.findById(directSubmit.body.data._id);
+    await service.createMemberProfile(directApp, reviewer);
+    const approvedProfile = await Member.findById(direct.member._id);
+    assert.equal(approvedProfile.gender, 'Female', 'approval persists the applicant-supplied gender');
+    assert.equal(approvedProfile.religion, 'Hindu');
+    assert.equal(approvedProfile.socialCategory, 'SC');
+
+    // A complete retry body can repair the owner's legacy pending application
+    // directly, even when no separate profile save has supplied demographics.
+    const retryOwner = await fixture({});
+    const retryPending = await Application.create({ ...base, email: retryOwner.member.email, phone: base.phoneNumber,
+        userId: retryOwner.member._id, data: { personalDetails: { ...base, email: retryOwner.member.email } }, status: 'Pending' });
+    const directRetry = await retryOwner.api('post')('/applications/submit').send({ data: {
+        personalDetails: { ...demographics, gender: 'Female' },
+    } });
+    assert.equal(directRetry.status, 201, JSON.stringify(directRetry.body));
+    assert.equal(directRetry.body.data._id, String(retryPending._id));
+    assert.equal(directRetry.body.data.data.personalDetails.gender, 'Female');
+    assert.equal(directRetry.body.data.data.personalDetails.religion, 'Hindu');
+    assert.equal((await Application.findById(retryPending._id)).data.personalDetails.socialCategory, 'SC');
+    assert.equal(await Application.countDocuments({ userId: retryOwner.member._id }), 1);
+    assert.equal((await Member.findById(retryOwner.member._id)).gender, '', 'Retry does not modify a different collection as a side effect');
 
     const abroad = await fixture({ phoneNumber: '+447911123456', isInternational: true, country: 'United Kingdom', state: '', district: '', block: '', place: 'London', ...demographics });
     const international = await abroad.api('post')('/applications').send({ registrationType: 'student', data: { personalDetails: { place: 'Manchester' } } });

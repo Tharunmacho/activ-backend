@@ -118,6 +118,7 @@ router.get('/:id/registrations', requireRole(...BOOKING_VIEWERS), controller.lis
  * the literal `bookings` segment sits between the two parameters.
  */
 router.get('/:id/bookings', requireRole(...BOOKING_VIEWERS), controller.listBookings);
+router.delete('/:id/bookings/history', requireRole('super_admin'), controller.deleteArchivedBookingHistory);
 /*
  * The spreadsheet, and the door list.
  *

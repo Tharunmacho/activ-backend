@@ -35,6 +35,7 @@ router.get('/super/admins', requireRole('super_admin'), controller.listAdmins);
  */
 router.get('/super/membership/plans', requireRole('super_admin'), controller.listMembershipPlans);
 const membershipDashboard = require('./adminMembershipDashboard.controller');
+router.delete('/super/membership/payments/:paymentId/archived', requireRole('super_admin'), membershipDashboard.removeArchivedPayment);
 const membershipIds = require('./membershipIdRegister.controller');
 router.get('/super/membership/ids', requireRole('super_admin'), membershipIds.list);
 router.get('/super/membership/ids/:memberId', requireRole('super_admin'), membershipIds.detail);

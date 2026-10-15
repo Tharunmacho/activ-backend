@@ -98,6 +98,10 @@ const updateMember = asyncHandler(async(req, res) => {
 
     // Before anything reads the body: see `FIELD_ALIASES` above.
     const profileData = normalizeProfileAliases(rawProfileData);
+    // The website profile editor still posts name/phone. Preserve explicit
+    // empty canonical values so an alias cannot hide an attempted erasure.
+    if (!Object.hasOwn(profileData, 'fullName') && Object.hasOwn(profileData, 'name')) profileData.fullName = profileData.name;
+    if (!Object.hasOwn(profileData, 'phoneNumber') && Object.hasOwn(profileData, 'phone')) profileData.phoneNumber = profileData.phone;
     
     /*
      * THE TWO READS GO OUT TOGETHER.
@@ -649,12 +653,17 @@ const updateMember = asyncHandler(async(req, res) => {
         district: personalInfo.district,
         block: personalInfo.block,
         city: personalInfo.city,
+        isInternational: abroad.international,
+        country: member.country || abroad.country || '',
+        place: member.place || personalInfo.place || '',
         religion: personalInfo.religion || member.religion || '',
         socialCategory: personalInfo.socialCategory || member.socialCategory || '',
         gender: personalInfo.gender || member.gender || '',
         email: member.email,
         isLocked: personalInfo.isLocked && personalComplete,
         personalDetailsComplete: personalComplete,
+        personalDetailsBlockRequired: !abroad.international
+            && require('../regions/geography').requiresBlock(normalizedPersonal.state, normalizedPersonal.district),
         missingPersonalFields: missingPersonalFields(normalizedPersonal, { international: abroad.international }),
     };
     
@@ -690,6 +699,15 @@ const getMyProfile = asyncHandler(async(req, res) => {
         }
     }
     
+    // Legacy accounts may predate the stored international flag. Return the
+    // same country classification used for validation so clients ask for place
+    // rather than an Indian region the server will discard.
+    const phoneCountry = internationalFromPhone(member.phoneNumber);
+    const abroad = {
+        international: member.isInternational === true || phoneCountry.international,
+        country: member.country || phoneCountry.country || '',
+    };
+
     // If PersonalInfo1 has data, use it; otherwise fallback to web users data
     const profileData = personalInfo ? {
         fullName: personalInfo.name,
@@ -699,9 +717,9 @@ const getMyProfile = asyncHandler(async(req, res) => {
         block: personalInfo.block,
         city: personalInfo.city,
         /* Members outside India: no region, a place instead — see `internationalFromPhone`. */
-        isInternational: member.isInternational === true,
-        country: member.country || '',
-        place: member.place || '',
+        isInternational: abroad.international,
+        country: abroad.country,
+        place: member.place || personalInfo.place || '',
         religion: personalInfo.religion || member.religion || '',
         socialCategory: personalInfo.socialCategory || member.socialCategory || '',
         /* `personalInfo` predates this field for every member who filled the
@@ -789,8 +807,8 @@ const getMyProfile = asyncHandler(async(req, res) => {
         block: member.block,
         city: member.city,
         /* Members outside India: no region, a place instead — see `internationalFromPhone`. */
-        isInternational: member.isInternational === true,
-        country: member.country || '',
+        isInternational: abroad.international,
+        country: abroad.country,
         place: member.place || '',
         religion: member.religion,
         socialCategory: member.socialCategory,
@@ -871,9 +889,11 @@ const getMyProfile = asyncHandler(async(req, res) => {
     };
 
     profileData.missingPersonalFields = missingPersonalFields(profileData, {
-        international: member.isInternational === true || internationalFromPhone(member.phoneNumber).international,
+        international: abroad.international,
     });
     profileData.personalDetailsComplete = profileData.missingPersonalFields.length === 0;
+    profileData.personalDetailsBlockRequired = !abroad.international
+        && require('../regions/geography').requiresBlock(profileData.state, profileData.district);
     // Old saves locked Form 1 when only Form 2/3 was posted. Let those members
     // supply their missing answers instead of trapping them behind a disabled form.
     profileData.isLocked = profileData.isLocked && profileData.personalDetailsComplete;

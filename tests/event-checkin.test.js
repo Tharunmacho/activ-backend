@@ -237,12 +237,19 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
         const express = require('express');
         const jwt = require('jsonwebtoken');
         const config = require('../src/config');
+        const Member = require('../src/modules/members/memberdetails.model');
+        const originalFindMember = Member.findById;
+        const memberId = String(id());
+        // verifyToken now checks that a member still exists before role gating.
+        // Supply a real active-member fixture locally; never connect to Mongo.
+        Member.findById = value => ({ select() { return this; }, lean: async () =>
+            String(value) === memberId ? { _id: memberId, isActive: true } : null });
         const { errorHandler } = require('../src/core/middleware/errorHandler');
         const app = express();
         app.use(express.json());
         app.use('/event-checkin', require('../src/modules/events/eventcheckin.routes'));
         app.use(errorHandler);
-        const as = (role) => `Bearer ${jwt.sign({ userId: String(id()), email: 'x@y.z', role }, config.jwt.secret)}`;
+        const as = (role) => `Bearer ${jwt.sign({ userId: role === 'member' ? memberId : String(id()), email: 'x@y.z', role }, config.jwt.secret)}`;
         // Something that is not a pass: the service answers 400 before any query.
         const body = { token: 'not-a-pass' };
         const r0 = await request(app).post('/event-checkin/lookup').send(body);
@@ -251,6 +258,9 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
             const r = await request(app).post('/event-checkin/admit').set('Authorization', as(role)).send(body);
             check(`${role} -> 403`, r.status === 403, String(r.status));
         }
+        const deletedToken = `Bearer ${jwt.sign({ userId: String(id()), email: 'deleted@example.test', role: 'member' }, config.jwt.secret)}`;
+        const deletedMember = await request(app).post('/event-checkin/admit').set('Authorization', deletedToken).send(body);
+        check('deleted member -> 401 before role gate', deletedMember.status === 401, String(deletedMember.status));
         for (const role of ['events_admin', 'super_admin']) {
             const r = await request(app).post('/event-checkin/lookup').set('Authorization', as(role)).send(body);
             check(`${role} passes the gate`, r.status === 400, String(r.status));
@@ -259,6 +269,7 @@ const STAFF = { userId: String(id()), email: 'event@gmail.com', role: 'events_ad
         check('QR image only for a genuine pass', png.status === 404);
         const img = await request(app).get(`/event-checkin/qr/${tok}.png`);
         check('QR image for a genuine pass', img.status === 200 && /image\/png/.test(img.headers['content-type']));
+        Member.findById = originalFindMember;
     }
 
     console.log(`\n${passed} passed, ${failed} failed`);

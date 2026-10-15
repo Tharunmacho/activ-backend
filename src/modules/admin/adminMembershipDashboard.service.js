@@ -178,6 +178,10 @@ class MembershipDashboardService {
     async remove(id, actor) {
         return require('../members/memberDeletion.service').remove(id, actor);
     }
+
+    async removeArchivedPayment(id, body, actor) {
+        return require('./archivedRecordDeletion.service').deleteMembershipPayment(id, body, actor);
+    }
 }
 module.exports = new MembershipDashboardService();
 module.exports.memberRow = memberRow;

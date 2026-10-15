@@ -1698,6 +1698,11 @@ class EventBookingService {
     }
 
     /** Retention guard for older clients that still offer booking deletion. */
+    async deleteArchivedHistory(eventId, body, actor) {
+        return require('../admin/archivedRecordDeletion.service').deleteEventHistory(eventId, body, actor);
+    }
+
+    /** Individual booking deletion remains disabled for older clients. */
     async deleteBooking(eventId, bookingRef, actor = {}) {
         if (actor.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can delete bookings.');
         if (!mongoose.isValidObjectId(eventId)) throw ApiError.badRequest('A valid event id is required');

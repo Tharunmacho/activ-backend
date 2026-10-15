@@ -172,6 +172,11 @@ const deleteBooking = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await bookingService.deleteBooking(req.params.id, req.params.ref, req.user), 'Booking deleted; payment records retained'));
 });
 
+const deleteArchivedBookingHistory = asyncHandler(async(req, res) => {
+    const data = await bookingService.deleteArchivedHistory(req.params.id, req.body || {}, req.user);
+    res.json(ApiResponse.success(data, 'Archived event and its booking, payment and attendance history permanently deleted'));
+});
+
 /* ==================================================== the organiser's overview */
 
 /**
@@ -310,6 +315,7 @@ module.exports = {
     recordBookingPayment,
     cancelBooking,
     deleteBooking,
+    deleteArchivedBookingHistory,
     bookingOverview,
     exportFilteredBookings,
     listBookingPeople,
