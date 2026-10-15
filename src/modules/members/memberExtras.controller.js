@@ -507,29 +507,16 @@ const getCertificate = asyncHandler(async(req, res) => {
     const MemberFinancialInfo = require('./memberfinancialinfo.model');
     const PaymentOrder = require('../payment/paymentorder.model');
     const id = String(owner);
-    const [financial, business, orders] = await Promise.all([
+    const [financial, business, orders, company] = await Promise.all([
         MemberFinancialInfo.findOne({ $or: [{ memberId: id }, { userId: id }] }).lean().catch(() => null),
-        BusinessInfo.findOne({ userId: id }).lean(),
+        BusinessInfo.findOne({ userId: id }).lean().catch(() => null),
         mongoose.Types.ObjectId.isValid(id)
             ? PaymentOrder.find({ memberId: id, status: 'paid', orderType: 'membership' })
-                .sort({ paidAt: 1 }).limit(12).lean()
+                .sort({ paidAt: 1 }).limit(12).lean().catch(() => [])
             : [],
+        Company.findOne({ userId: id, isActive: { $ne: false } }).sort({ createdAt: 1, _id: 1 }).select('businessName businessType').lean(),
     ]);
-    const { certificateIdentity, certificateCompanyCutoff } = require('./certificateIdentity');
-    const companyCutoff = certificateCompanyCutoff(member, orders);
-    // isActive controls publishing: a company saved before payment is false.
-    // Exclude legacy deleted accounts by status, and exclude later listings so
-    // a lifetime member's additional companies cannot replace this identity.
-    const company = companyCutoff ? await Company.findOne({ userId: id, status: { $ne: 'inactive' },
-        createdAt: { $lte: companyCutoff }, businessName: { $type: 'string', $regex: /\S/ } })
-        .sort({ createdAt: 1, _id: 1 }).select('businessName businessType').lean() : null;
-    // Use only the caller's approved registration when neither their initial
-    // company nor normalized enrollment record has a name.
-    const application = certificateIdentity(business, company).companyName ? null
-        : await require('../applications/application.model').findOne({ userId: id, status: /^approved$/i })
-            .sort({ 'approvedBy.approvedAt': -1, createdAt: -1, _id: -1 })
-            .select('status data').lean();
-    const companyIdentity = certificateIdentity(business, company, application);
+    const companyIdentity = require('./certificateIdentity').certificateIdentity(business, company);
     const clean = (v) => String(v === null || v === undefined ? '' : v).trim();
     const MODE = { upi: 'UPI', card: 'Card', netbanking: 'Net banking', wallet: 'Wallet', neft: 'NEFT', cash: 'Cash', cheque: 'Cheque' };
     const modeOf = (m) => MODE[clean(m).toLowerCase()] || (clean(m) ? clean(m).replace(/\b\w/g, (c) => c.toUpperCase()) : 'Online');
