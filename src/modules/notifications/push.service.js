@@ -28,7 +28,7 @@ function validToken(value) {
 }
 async function register(user, body = {}) {
     const token = validToken(body.token);
-    if (!['android', 'ios'].includes(body.platform)) throw ApiError.badRequest('Choose Android or iOS.');
+    if (!['android', 'ios', 'web'].includes(body.platform)) throw ApiError.badRequest('Choose Android, iOS or web.');
     // A shared phone belongs to its currently signed-in account only.
     await Device.findOneAndUpdate({ token }, { $set: { user, token, platform: body.platform, enabled: body.enabled !== false, lastSeenAt: new Date() } }, { upsert: true });
     const older = await Device.find({ user }).sort({ lastSeenAt: -1 }).skip(20).select('_id').lean();
@@ -45,6 +45,10 @@ function payload(notification, device) {
     for (const key of ['kind', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'orderId', 'bookingRef', 'slug']) {
         if (notification.data?.[key]) data[key] = String(notification.data[key]).slice(0, 300);
     }
+    // Data-only web messages let the worker check the current account before display.
+    // A notification payload would be displayed automatically, even after logout.
+    if (device.platform === 'web') return { token: device.token, data,
+        webpush: { headers: { TTL: '86400', Urgency: 'high' } } };
     return { token: device.token, notification: { title: 'ACTIV', body: 'Dear member, you have an update from ACTIV. Open the app to view it.' }, data,
         android: { priority: 'high', ttl: 86400000, notification: { channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notification._id), visibility: 'private' } },
         apns: { headers: { 'apns-priority': '10', 'apns-collapse-id': String(notification._id), 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) },

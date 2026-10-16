@@ -59,6 +59,38 @@ Never put the service-account JSON or private key in `google-services.json`, a `
 
 ## 5. Website Google Analytics
 
+### Website browser push
+
+The website now uses the Firebase JavaScript SDK and a bundled, same-origin
+`/firebase-messaging-sw.js` service worker. Copy the public settings from
+`website/.env.push.example` into the website's build environment. The web app,
+VAPID public key and backend service account must belong to the same Firebase
+project. Do not put Admin SDK credentials into any `VITE_` variable.
+
+In Dokploy, supply these `VITE_FIREBASE_*` variables to the website **build**,
+then rebuild it; runtime-only environment changes cannot update a Vite bundle.
+On the backend, privately supply `FIREBASE_SERVICE_ACCOUNT_JSON` (the complete
+JSON, preserving escaped newlines), `FIREBASE_PROJECT_ID`, `PUSH_ENABLED=true`
+and `NOTIFICATION_WORKER_ENABLED=true`. Remove the local Windows
+`GOOGLE_APPLICATION_CREDENTIALS` setting from the container environment unless
+you replace it with a real mounted secret path. Deploy the updated backend,
+which accepts the `web` platform, before the website.
+
+Members enable browser notifications in Account Settings. Super Admin can use
+Notifications → Delivery → Browser notifications, then “Send test to my devices”.
+The test includes registered browsers and phones belonging to that admin only.
+Test permission denial, foreground alerts, background alerts, notification clicks,
+logout and switching accounts. HTTPS is required in production; localhost is
+supported for development. iPhone web push requires a supported Home Screen web app.
+
+Web payloads contain generic text and identifiers rather than private content.
+The page/worker checks a persisted account ID and session expiry before displaying
+or opening an alert. Logout clears that association, closes displayed notifications
+and attempts to remove the server registration. Explicit opt-out also deletes the
+FCM token. Browser registration refreshes on page load, focus and hourly while open.
+FCM authentication alone does not prove delivery: a real browser test remains
+necessary after deployment. No Firebase Authentication migration is required.
+
 1. In the GA4 property linked to Firebase, add a **Web data stream** for `https://activ.org.in`.
 2. Copy its measurement ID, starting with `G-`, into **`VITE_GA_MEASUREMENT_ID`** in the website build environment. `website/.env.analytics.example` is the template.
 3. Turn off **Enhanced measurement** for this stream, including automatic history-based page views, form interactions and site-search collection. ACTIV emits its own sanitised page events; avoid collecting raw URLs containing booking references, return tokens or member information.
