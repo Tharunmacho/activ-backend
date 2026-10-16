@@ -2,9 +2,9 @@ const config = require('../../config');
 const email = require('./email.service');
 
 const line = (value, max) => email.htmlToText(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
-const templateName = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE || 'activ_association_update_v1';
+const templateName = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE || 'activ_association_update_v2';
 const templateLanguage = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_LANGUAGE || 'en_US';
-const templateBody = 'Dear *{{1}}*,\n\n*ACTIV association update*\n\n*{{2}}*\n{{3}}\n\nRead the full update and any poster or document after signing in:\n{{4}}\n\nThank you for being part of ACTIV. You can manage update messages in your ACTIV notification settings.';
+const templateBody = 'Dear *{{1}}*,\n\n*ACTIV association news and updates*\n\n*{{2}}*\n{{3}}\n\nSign in to read the full update and view any poster or document:\n{{4}}\n\nYou can manage WhatsApp association updates in your ACTIV notification settings.';
 
 // Public uploads are already validated by the update editor. Do not let a
 // legacy data:/javascript: URL become an image or button in a mail client.

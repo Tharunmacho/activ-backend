@@ -38,7 +38,7 @@ let mongo;
     require('../src/modules/notifications/email.service').sendEmail = async payload => send('email', payload.to, payload.subject.replace(/^ACTIV update: /, ''));
     require('../src/modules/notifications/whatsappTemplate').isConfigured = () => true;
     require('../src/modules/notifications/whatsappTemplate').sendTemplateMessage = async (to, template, params) => {
-        assert.equal(template, 'activ_association_update_v1'); assert.equal(params.length, 4);
+        assert.equal(template, 'activ_association_update_v2'); assert.equal(params.length, 4);
         assert.match(params[3], /^https:\/\/activ\.org\.in\/member\/updates\//);
         return send('whatsapp', to, params[1]);
     };
