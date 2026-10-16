@@ -41,5 +41,7 @@ router.post('/with/:memberId', controller.openWith);
 router.get('/:id', controller.listMessages);
 router.post('/:id', controller.send);
 router.post('/:id/read', controller.markRead);
+router.post('/:id/message-status', controller.messageStatus);
+router.delete('/:id/messages/:messageId', controller.remove);
 
 module.exports = router;

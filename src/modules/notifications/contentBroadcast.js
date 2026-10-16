@@ -7,7 +7,7 @@ const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district 
 const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets',
     'startAt', 'endAt', 'days', 'mode', 'venue', 'venueAddress', 'venueMapUrl', 'onlinePlatform', 'onlineUrl', 'language', 'category', 'topic',
     'content', 'image', 'images', 'media', 'photos', 'attachments', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
-    'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote'];
+    'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote', 'includeVisitors', 'channel', 'showOnOnboarding'];
 
 function published(kind, doc) {
     if (!doc || doc.archivedAt || doc.deletedAt) return false;
@@ -25,6 +25,7 @@ function sourceModel(kind) {
 function visibleTo(kind, doc, context) {
     if (!published(kind, doc) || !matchesAudience(doc.audience, context, kind === 'announcement' ? doc.planKeys : [])) return false;
     if (kind === 'event') return doc.reachEveryone === true || multiTargetsViewer(doc, context);
+    if (kind === 'announcement') return multiTargetsViewer(doc, context);
     if (kind === 'scheme' && ['central', 'national'].includes(doc.tier)) return true;
     return targetsMember(doc, context);
 }
@@ -36,6 +37,7 @@ async function enqueue(kind, doc) {
     if (!published(kind, doc)) return;
     const key = sourceKey(kind, doc);
     await require('./broadcast.model').updateOne({ key }, { $setOnInsert: { key, kind, sourceId: doc._id } }, { upsert: true });
+    await require('./visitorPush.service').enqueue(kind, doc);
 }
 // Register before compiling the schema. Covers both CMS and admin write paths.
 function install(schema, kind) {

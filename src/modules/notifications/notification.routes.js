@@ -20,6 +20,14 @@ const router = express.Router();
 
 router.use(verifyToken);
 
+router.get('/reports', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./deliveryReport').report(req.query)));
+}));
+
+router.patch('/:id/open', asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./deliveryReport').recordOpen(req.user.userId, req.params.id, req.body?.channel)));
+}));
+
 router.get('/update-preferences', asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./updatePreferences').get(req.user.userId)));
 }));

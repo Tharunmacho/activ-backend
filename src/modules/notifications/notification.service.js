@@ -94,12 +94,13 @@ class NotificationService {
     }
 
     async markAsRead(userId, notificationId) {
+        await Notification.updateOne({ _id: notificationId, user: userId, readAt: null }, { $set: { readAt: new Date() } });
         const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey -updateDelivery');
         return notification;
     }
 
     async markAllAsRead(userId) {
-        await Notification.updateMany({ user: userId, isRead: false }, { isRead: true });
+        await Notification.updateMany({ user: userId, isRead: false }, { $set: { isRead: true, readAt: new Date() } });
         return true;
     }
 

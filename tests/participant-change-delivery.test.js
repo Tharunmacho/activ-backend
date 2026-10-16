@@ -14,7 +14,7 @@ const anu = { name: 'Anu', email: 'anu@example.test', phone: '9345678901' };
 let booking, sent, jobs, writes, online = false, failWrite = false, failEnqueue = false;
 const old = { find: Booking.findOne, update: Booking.findOneAndUpdate, event: Event.findById,
     dispatch: notifications.dispatchLifecycleEvent, enqueue: notifications.dispatchInBackground, announce: service.announceParticipantChanges,
-    lookup: service.bookingForLogRow };
+    lookup: service.bookingForLogRow, lock: service.withEventLock, duplicate: service.assertNotAlreadyBooked };
 
 function reset(participants = [priya, ravi], overrides = {}) {
     booking = { _id: '0123456789abcdef01234567', bookingRef: 'ACTIVB-TEST-1234', eventId: '1123456789abcdef01234567',
@@ -44,6 +44,10 @@ function assertPrivate(row) {
 }
 
 async function main() {
+    // This suite exercises recipient delivery; real locking and attendee
+    // uniqueness are covered against disposable Mongo in booking-friends-local.
+    service.withEventLock = async (_eventId, work) => work();
+    service.assertNotAlreadyBooked = async () => {};
     Booking.findOne = () => {
         const snapshot = clone(booking);
         return { select: async () => snapshot, lean: async () => snapshot };
@@ -281,4 +285,5 @@ main().catch(error => { console.error(error); process.exitCode = 1; }).finally((
     notifications.dispatchLifecycleEvent = old.dispatch; notifications.dispatchInBackground = old.enqueue;
     service.announceParticipantChanges = old.announce;
     service.bookingForLogRow = old.lookup;
+    service.withEventLock = old.lock; service.assertNotAlreadyBooked = old.duplicate;
 });

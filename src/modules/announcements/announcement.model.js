@@ -51,6 +51,13 @@ const announcementSchema = new mongoose.Schema({
     state: { type: String, trim: true, default: '', index: true },
     district: { type: String, trim: true, default: '' },
     block: { type: String, trim: true, default: '' },
+    targets: { type: [new mongoose.Schema({
+        state: { type: String, trim: true, required: true },
+        district: { type: String, trim: true, default: '' },
+        block: { type: String, trim: true, default: '' },
+    }, { _id: false })], default: [] },
+    // Public visitors are a deliberate opt-in, never implied by audience=all.
+    includeVisitors: { type: Boolean, default: false },
 
     /**
      * Who may read it.

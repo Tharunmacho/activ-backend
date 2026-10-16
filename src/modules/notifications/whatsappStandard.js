@@ -35,7 +35,7 @@ function define(key, title, lead, fields, { image = false, close = 'Keep this me
     specs.set(key, spec);
     for (const variant of names) definitions.push({
         name: `activ_${key}_standard_${variant}_v1`, category: 'Utility', meta: true, standard: true,
-        ...(variant === 'image' ? { header: 'IMAGE' } : {}), footer: 'ACTIV',
+        ...(variant === 'image' ? { header: 'IMAGE' } : {}), footer: require('./organizationBrand').FOOTER,
         bodyWithVariables: body, params: all.map(item => item.label), samples: all.map(item => item.sample),
     });
 }

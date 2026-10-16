@@ -40,6 +40,7 @@ let announcements = 0;
         assert.throws(() => buildResponses(fields, { ...answers, [key]: value }), error => !!error.fields[`responses.${key}`]);
     }
     assert.throws(() => buildResponses(fields, {}), error => error.statusCode === 400 && !!error.fields['responses.meal']);
+    service.withEventLock = async (_id, work) => work();
     service.resolveEvent = async () => event;
     service.seatsFor = async () => ({ capacity: 100, seatsTaken: 0, seatsLeft: 100 });
     service.assertNotAlreadyBooked = async () => {};

@@ -82,6 +82,14 @@ const unreadCount = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success({ unread: count }));
 });
 
+const remove = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await messageService.remove(req.params.id, req.params.messageId, requireCaller(req), req.body?.scope)));
+});
+
+const messageStatus = asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await messageService.messageStatus(req.params.id, requireCaller(req), req.body?.ids)));
+});
+
 module.exports = {
     listConversations,
     openWith,
@@ -91,4 +99,6 @@ module.exports = {
     downloadAttachment,
     markRead,
     unreadCount,
+    remove,
+    messageStatus,
 };

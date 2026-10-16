@@ -1,5 +1,6 @@
 const config = require('../../config');
 const email = require('./email.service');
+const { personalizeUpdate, recipientName } = require('../common/recipientPersonalization');
 
 const line = (value, max) => email.htmlToText(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 const templateName = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE || 'activ_association_update_v2';
@@ -16,7 +17,8 @@ function mediaUrl(value) {
 }
 
 function render(update, member) {
-    const name = line(member?.fullName, 60) || 'Member';
+    update = personalizeUpdate(update, member);
+    const name = line(recipientName(member), 60) || 'ACTIVian';
     const title = line(update?.title, 200) || 'Association update';
     const text = email.htmlToText(update?.body || update?.summary || 'Please open the update to view the poster or document.');
     const summary = line(update?.summary || text, 350) || 'Please open the update to view the poster or document.';
@@ -46,7 +48,7 @@ function templateDefinition() {
         { type: 'BODY', text: templateBody, example: { body_text: [['Tharun', 'Member learning programme',
             'Dear member, please join our upcoming learning programme. Open this update for the schedule and registration details.',
             'https://activ.org.in/member/updates/507f1f77bcf86cd799439011']] } },
-        { type: 'FOOTER', text: 'ACTIV · Connect. Empower. Grow.' },
+        { type: 'FOOTER', text: require('./organizationBrand').FOOTER },
     ] };
 }
 module.exports = { render, templateName, templateLanguage, templateDefinition, mediaUrl };

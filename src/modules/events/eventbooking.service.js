@@ -280,10 +280,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
  *
  * `required` distinguishes the BOOKER from a participant, and the difference is
  * real rather than lenience. The booker's email and mobile are where the
- * receipt and the WhatsApp confirmation go, so a booking without them is a
- * booking nobody can be told about. A participant is a name on a door list: an
- * office manager booking two colleagues may genuinely not have their addresses,
- * and refusing the booking over it would send them away.
+ * receipt and the WhatsApp confirmation go. Each attendee also needs complete
+ * details so their ticket and per-event email uniqueness identify a real seat.
  */
 const cleanPerson = (input = {}, { label = '', required = false, fieldPrefix = '' } = {}) => {
     const name = str(input.name);
@@ -346,25 +344,23 @@ const cleanPerson = (input = {}, { label = '', required = false, fieldPrefix = '
 
 /** Every reserved seat needs a complete attendee. A wholly omitted first row
  * uses the booking contact for older clients and single-person bookings. */
-const cleanParticipants = (input, count, booker) => {
+const cleanParticipants = (input, count, booker, useBookerForFirstParticipant = true) => {
     const sent = Array.isArray(input) ? input : [];
     const emails = new Set();
-    const phones = new Set();
     return Array.from({ length: count }, (_, index) => {
         const row = sent[index] || {};
         const isEmpty = ![row.name, row.email, row.phone, row.mobile].some(value => str(value));
-        const person = cleanPerson(index === 0 && isEmpty ? booker : row, {
+        const person = cleanPerson(useBookerForFirstParticipant && index === 0 && isEmpty ? booker : row, {
             label: `Participant ${index + 1}`, required: true, fieldPrefix: `participants.${index}.`
         });
         const fields = {};
         if (emails.has(person.email)) fields[`participants.${index}.email`] = 'Use another email';
-        if (phones.has(phoneKey(person.phone))) fields[`participants.${index}.phone`] = 'Use another mobile number';
         if (Object.keys(fields).length) {
-            const error = ApiError.conflict('Each participant needs their own email and mobile number.');
+            const error = ApiError.conflict('Each participant needs their own email address.');
             error.fields = fields;
             throw error;
         }
-        emails.add(person.email); phones.add(phoneKey(person.phone));
+        emails.add(person.email);
         return person;
     });
 };
@@ -513,7 +509,9 @@ const bookingAsRegistration = (b = {}) => {
             amount: Number(b.totalAmount || 0),
             reference: payment.reference || '',
             method: payment.mode || '',
-            paidAt: payment.paidAt || null
+            paidAt: payment.paidAt || null,
+            reconciliationRequired: !!payment.reconciliationRequired,
+            reconciliationReason: payment.reconciliationReason || ''
         },
         responses: Array.isArray(b.responses) ? b.responses : [],
         memberName: bookedBy.name || '',
@@ -577,7 +575,9 @@ const toBooking = (doc = {}, joining = null) => ({
         status: (doc.payment && doc.payment.status) || 'pending',
         mode: (doc.payment && doc.payment.mode) || '',
         reference: (doc.payment && doc.payment.reference) || '',
-        paidAt: (doc.payment && doc.payment.paidAt) || null
+        paidAt: (doc.payment && doc.payment.paidAt) || null,
+        reconciliationRequired: !!(doc.payment && doc.payment.reconciliationRequired),
+        reconciliationReason: (doc.payment && doc.payment.reconciliationReason) || ''
     },
 
     status: doc.status || 'active',
@@ -726,7 +726,6 @@ class EventBookingService {
      */
     async getBookableEvent(eventId, context = null) {
         const event = await this.resolveEvent(eventId, context);
-
         if (!event.registrationEnabled) {
             throw ApiError.badRequest('This event is not taking bookings');
         }
@@ -1008,84 +1007,49 @@ class EventBookingService {
     /**
      * ONE PLACE PER PERSON PER EVENT.
      *
-     * An email or mobile number that already holds a place in THIS event — as
-     * the booker or as a participant, on a confirmed or waitlisted booking —
-     * cannot be booked again. An unpaid hold that was abandoned at the payment
-     * step does not count, so somebody can retry after a failed payment.
+     * An attendee email already on a confirmed, waitlisted or unexpired pending
+     * booking cannot hold another place. The same booking contact may book
+     * more friends; shared phone numbers do not make them the same attendee.
+     * Expired payment holds are released before this check.
      *
      * Refused with a 409 carrying `fields`, so the form can say which box:
-     *   { email | phone | 'participants.N.email' | 'participants.N.phone': message }
+     *   { 'participants.N.email': message }
      */
-    async assertNotAlreadyBooked(event, bookedBy, participants = []) {
+    async assertNotAlreadyBooked(event, bookedBy, participants = [], excludeId = null) {
         const existing = await EventBooking.find({
             eventId: event._id || event.id,
+            ...(excludeId ? { _id: { $ne: excludeId } } : {}),
             $or: [
                 { status: 'waitlist' },
-                { status: 'active', 'payment.status': { $in: ['paid', 'not_required'] } }
+                { status: 'active', 'payment.status': { $in: ['paid', 'not_required'] } },
+                { status: 'active', 'payment.status': 'pending', expiresAt: { $gt: new Date() } }
             ]
-        }).select('bookingRef bookedBy participants').lean();
-
-        const emails = new Set();
-        const phones = new Set();
-        existing.forEach((b) => [b.bookedBy, ...(b.participants || [])].forEach((p) => {
-            if (p && p.email) emails.add(str(p.email).toLowerCase());
-            if (p && phoneKey(p.phone).length === 10) phones.add(phoneKey(p.phone));
-        }));
-
-        const fields = {};
-        const check = (person, emailKey, phoneKeyName, who) => {
-            const email = str(person && person.email).toLowerCase();
-            const phone = phoneKey(person && person.phone);
-            if (email && emails.has(email)) {
-                fields[emailKey] = 'Email already registered';
-            }
-            if (phone.length === 10 && phones.has(phone)) {
-                fields[phoneKeyName] = 'Mobile number already registered';
-            }
-        };
-        check(bookedBy, 'email', 'phone', 'This');
-
-        /*
-         * PARTICIPANTS MAY NOT REPEAT EACH OTHER. The booker and a participant
-         * may share details (booking for yourself is the normal case); two
-         * participant rows with the same email or mobile may not.
-         */
-        const bookerEmail = str(bookedBy && bookedBy.email).toLowerCase();
-        const bookerPhone = phoneKey(bookedBy && bookedBy.phone);
-        const seenEmail = new Set();
-        const seenPhone = new Set();
-
-        participants.forEach((p, i) => {
-            const email = str(p && p.email).toLowerCase();
-            const phone = phoneKey(p && p.phone);
-
-            // A row carrying the booker's own details was reported on the booker's boxes.
-            const isBooker = (!email || email === bookerEmail) && (!phone || phone === bookerPhone);
-            if (!isBooker) check(p, `participants.${i}.email`, `participants.${i}.phone`, `Participant ${i + 1}'s`);
-
-            if (email && !fields[`participants.${i}.email`] && seenEmail.has(email)) {
-                fields[`participants.${i}.email`] = 'Use another email';
-            }
-            if (phone.length === 10 && !fields[`participants.${i}.phone`] && seenPhone.has(phone)) {
-                fields[`participants.${i}.phone`] = 'Use another mobile number';
-            }
-            if (email) seenEmail.add(email);
-            if (phone.length === 10) seenPhone.add(phone);
+        }).select('participants bookedBy').lean();
+        // The booker receives the receipt but does not necessarily occupy a seat.
+        const emails = new Set(existing.flatMap(b => b.participants?.length ? b.participants : [b.bookedBy])
+            .map(p => str(p?.email).toLowerCase()).filter(Boolean));
+        const fields = {}, seen = new Set();
+        (participants.length ? participants : [bookedBy]).forEach((person, i) => {
+            const email = str(person?.email).toLowerCase();
+            if (email && (emails.has(email) || seen.has(email))) fields[`participants.${i}.email`] =
+                emails.has(email) ? 'Email already registered or held for this event' : 'Use another email';
+            if (email) seen.add(email);
         });
-
         if (Object.keys(fields).length) {
-            const err = ApiError.conflict(
-                fields.email || fields.phone
-                    ? 'You are already registered for this event with this email or mobile number.'
-                    : 'Each person can hold only one seat for this event — please check the highlighted boxes.'
-            );
-            err.fields = fields;
-            throw err;
+            const error = ApiError.conflict('Each attendee can be booked once for this event. Check the highlighted email addresses.');
+            error.fields = fields;
+            throw error;
         }
     }
 
+    withEventLock(eventId, work) { return require('./bookingLock').withBookingLock(eventId, work); }
+
     async createBooking(eventId, payload = {}, context = null, meta = {}) {
         const event = await this.resolveEvent(eventId, context);
+        return this.withEventLock(event._id || event.id, () => this.createBookingLocked(event, payload, context, meta));
+    }
+
+    async createBookingLocked(event, payload = {}, context = null, meta = {}) {
 
         if (!event.registrationEnabled) {
             throw ApiError.badRequest('This event is not taking bookings');
@@ -1138,10 +1102,10 @@ class EventBookingService {
          * participant nobody paid for. Slicing to the count makes the number
          * that was PRICED the number that is stored, always.
          */
-        const participants = cleanParticipants(payload.participants, requested, bookedBy);
+        if (payload.useBookerForFirstParticipant !== undefined && typeof payload.useBookerForFirstParticipant !== 'boolean') throw ApiError.badRequest('Choose whether the booking contact is attending.');
+        const participants = cleanParticipants(payload.participants, requested, bookedBy, payload.useBookerForFirstParticipant !== false);
 
         const responses = require('./eventRegistrationFields').buildResponses(event.registrationFields, payload.responses);
-        await this.assertNotAlreadyBooked(event, bookedBy, participants);
 
         // ---------------------------------------------------------- seats
 
@@ -1209,6 +1173,9 @@ class EventBookingService {
             eventId: event.id || event._id,
             'bookedBy.email': bookedBy.email,
             noOfPersons: requested,
+            participants,
+            responses,
+            userId: (context && String(context.id || '')) || '',
             status: { $in: ['active', 'waitlist'] },
             createdAt: { $gt: new Date(Date.now() - 30 * 1000) }
         }).lean().catch(() => null);
@@ -1219,6 +1186,8 @@ class EventBookingService {
             });
             return { ...toBooking(recent), duplicate: true };
         }
+
+        await this.assertNotAlreadyBooked(event, bookedBy, participants);
 
         const base = {
             eventId: event.id || event._id,
@@ -1410,6 +1379,32 @@ class EventBookingService {
      * hands back, and they are checked before anything is written.
      */
     async completePayment(bookingRef, { gatewayPaymentId, signature, mode } = {}) {
+        const original = await EventBooking.findOne({ bookingRef: str(bookingRef).toUpperCase() }).select('eventId');
+        if (!original) throw ApiError.notFound('No such booking');
+        return this.withEventLock(original.eventId, () => this.completePaymentLocked(bookingRef, { gatewayPaymentId, signature, mode }));
+    }
+
+    // Called only while holding the same event lock used by booking/editing.
+    // An expired hold cannot reclaim somebody else's attendee email or seat.
+    async paymentConfirmationIssue(booking) {
+        try {
+            await this.assertNotAlreadyBooked({ _id: booking.eventId }, booking.bookedBy, booking.participants || [], booking._id);
+        } catch (error) {
+            if (error.statusCode !== 409) throw error;
+            return 'An attendee email is already registered or held on another booking.';
+        }
+        const holdingSeats = booking.status === 'active' && booking.payment?.status === 'pending'
+            && booking.expiresAt && new Date(booking.expiresAt).getTime() > Date.now();
+        if (!holdingSeats) {
+            const event = await Event.findById(booking.eventId).lean();
+            if (!event || event.archivedAt) return 'The event is no longer available for confirmation.';
+            const { capacity, seatsLeft } = await this.seatsFor(event);
+            if (capacity > 0 && seatsLeft < Number(booking.noOfPersons || 1)) return 'The released seats are no longer available.';
+        }
+        return '';
+    }
+
+    async completePaymentLocked(bookingRef, { gatewayPaymentId, signature, mode } = {}) {
         if (!gatewayPaymentId) throw ApiError.badRequest('A gatewayPaymentId is required');
         if (!signature) throw ApiError.badRequest('A payment signature is required');
         if (!signingSecret()) {
@@ -1438,16 +1433,10 @@ class EventBookingService {
          * `payment.status: 'pending'` means whichever loses the race matches
          * nothing and is told the booking is already paid — which is true.
          */
-        /*
-         * `failed` is claimable too, and the booking is put back to `active`.
-         *
-         * A hold lapses after thirty minutes and the sweep marks it
-         * `expired` / `failed`. A buyer who took thirty-one minutes on the
-         * gateway's page has still PAID — Instamojo has the money — and
-         * leaving the booking expired would take their money and give them no
-         * seat, no confirmation and no line in the seat count. Money that has
-         * verifiably moved wins over a timer.
-         */
+        // Record verified money regardless of whether a lapsed hold can still
+        // be fulfilled. A paid waitlist row requires organiser reconciliation;
+        // it must not issue a duplicate pass or overbook the event.
+        const issue = await this.paymentConfirmationIssue(booking);
         const claimed = await EventBooking.findOneAndUpdate(
             {
                 _id: booking._id,
@@ -1455,13 +1444,15 @@ class EventBookingService {
                 'payment.status': { $in: ['pending', 'failed'] }
             },
             {
-                status: 'active',
+                status: issue ? 'waitlist' : 'active',
                 expiresAt: null,
                 'payment.status': 'paid',
                 'payment.mode': ['online', 'offline', 'cash', 'upi', 'bank_transfer']
                     .includes(str(mode)) ? str(mode) : 'online',
                 'payment.gatewayPaymentId': gatewayPaymentId,
-                'payment.paidAt': new Date()
+                'payment.paidAt': new Date(),
+                'payment.reconciliationRequired': !!issue,
+                'payment.reconciliationReason': issue
             },
             { new: true }
         );
@@ -1474,7 +1465,8 @@ class EventBookingService {
             amount: claimed.totalAmount
         });
 
-        this.announce(claimed);
+        if (issue) logger.warn('Paid event booking requires organiser reconciliation', { bookingRef: claimed.bookingRef, reason: issue });
+        else this.announce(claimed);
         return toBooking(claimed);
     }
 
@@ -1486,6 +1478,12 @@ class EventBookingService {
      * counted.
      */
     async recordOfflinePayment(bookingRef, { mode, recordedBy } = {}) {
+        const original = await EventBooking.findOne({ bookingRef: str(bookingRef).toUpperCase() }).select('eventId');
+        if (!original) throw ApiError.notFound('No such booking');
+        return this.withEventLock(original.eventId, () => this.recordOfflinePaymentLocked(bookingRef, { mode, recordedBy }));
+    }
+
+    async recordOfflinePaymentLocked(bookingRef, { mode, recordedBy } = {}) {
         const ref = str(bookingRef).toUpperCase();
 
         /*
@@ -1518,22 +1516,8 @@ class EventBookingService {
             throw ApiError.badRequest('This booking is not awaiting payment');
         }
 
-        const holdingSeats = existing.status === 'active'
-            && payStatus === 'pending'
-            && existing.expiresAt && new Date(existing.expiresAt).getTime() > Date.now();
-
-        if (!holdingSeats) {
-            const event = await Event.findById(existing.eventId).lean().catch(() => null);
-            if (event) {
-                const { capacity, seatsLeft } = await this.seatsFor(event);
-                if (capacity > 0 && seatsLeft < Number(existing.noOfPersons || 1)) {
-                    throw ApiError.badRequest(
-                        `Only ${seatsLeft} seat${seatsLeft === 1 ? '' : 's'} left for this event, and this `
-                        + `booking needs ${existing.noOfPersons}. Increase the event's capacity first.`
-                    );
-                }
-            }
-        }
+        const issue = await this.paymentConfirmationIssue(existing);
+        if (issue) throw ApiError.conflict(`${issue} Resolve this with the organiser before confirming the booking.`);
 
         const claimed = await EventBooking.findOneAndUpdate(
             {
@@ -1549,6 +1533,8 @@ class EventBookingService {
                     ? str(mode)
                     : 'offline',
                 'payment.paidAt': new Date(),
+                'payment.reconciliationRequired': false,
+                'payment.reconciliationReason': '',
                 'payment.recordedBy': str(recordedBy)
             },
             { new: true }
@@ -1591,6 +1577,12 @@ class EventBookingService {
      * the telephone, which makes it a ticket, not a key.
      */
     async updateParticipants(bookingRef, { participants, manageToken } = {}, context = null) {
+        const original = await EventBooking.findOne({ bookingRef: str(bookingRef).toUpperCase() }).select('eventId');
+        if (!original) throw ApiError.notFound('No such booking');
+        return this.withEventLock(original.eventId, () => this.updateParticipantsLocked(bookingRef, { participants, manageToken }, context));
+    }
+
+    async updateParticipantsLocked(bookingRef, { participants, manageToken } = {}, context = null) {
         const ref = str(bookingRef).toUpperCase();
         if (!ref) throw ApiError.badRequest('A booking reference is required');
 
@@ -1636,11 +1628,13 @@ class EventBookingService {
             );
         }
 
-        const next = cleanParticipants(participants, booking.noOfPersons, booking.bookedBy || {});
+        const next = cleanParticipants(participants, booking.noOfPersons, booking.bookedBy || {}, false);
         const previous = (booking.participants || []).map(person => person.toObject ? person.toObject() : { ...person });
         if (previous.length === next.length && next.every((person, index) => sameParticipant(person, previous[index]))) {
             return toBooking(booking.toObject ? booking.toObject() : booking);
         }
+
+        await this.assertNotAlreadyBooked({ _id: booking.eventId }, booking.bookedBy, next, booking._id);
 
         // Only the request that replaces this exact attendee list may notify it.
         // A concurrent edit/cancellation must not produce a second or stale pass.

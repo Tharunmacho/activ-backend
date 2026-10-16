@@ -34,6 +34,9 @@ const notificationSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    // Acknowledging a row is distinct from actually opening its destination.
+    readAt: Date,
+    openedAt: Date,
     deliveryKey: { type: String },
     push: {
         status: { type: String, enum: ['pending', 'sending', 'sent', 'skipped', 'failed'], default: 'pending' },
@@ -43,6 +46,7 @@ const notificationSchema = new mongoose.Schema({
         worker: String,
         lastError: String,
         sentTokens: [String],
+        openedAt: Date,
     },
     // Present only for newly published association updates; no historical
     // lifecycle messages or existing notifications are backfilled into a send.
@@ -60,4 +64,6 @@ notificationSchema.index({ 'push.status': 1, 'push.nextAttemptAt': 1 });
 notificationSchema.index({ 'updateDelivery.email.status': 1, 'updateDelivery.email.nextAttemptAt': 1 });
 notificationSchema.index({ 'updateDelivery.whatsapp.status': 1, 'updateDelivery.whatsapp.nextAttemptAt': 1 });
 notificationSchema.index({ user: 1, createdAt: -1 });
+notificationSchema.index({ createdAt: -1 });
+notificationSchema.index({ 'data.broadcastKey': 1, createdAt: -1 });
 module.exports = dataLayout.model('Notification', notificationSchema);

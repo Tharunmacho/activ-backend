@@ -31,6 +31,7 @@ async function register(user, body = {}) {
     if (!['android', 'ios', 'web'].includes(body.platform)) throw ApiError.badRequest('Choose Android, iOS or web.');
     // A shared phone belongs to its currently signed-in account only.
     await Device.findOneAndUpdate({ token }, { $set: { user, token, platform: body.platform, enabled: body.enabled !== false, lastSeenAt: new Date() } }, { upsert: true });
+    await require('./visitorPush.models').VisitorDevice.updateMany({ token }, { $set: { enabled: false }, $unset: { token: 1 } });
     const older = await Device.find({ user }).sort({ lastSeenAt: -1 }).skip(20).select('_id').lean();
     if (older.length) await Device.deleteMany({ user, _id: { $in: older.map(d => d._id) } });
     return { registered: true, configured: isConfigured() };
@@ -42,7 +43,7 @@ async function unregister(user, token) {
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
 function payload(notification, device) {
     const data = { notificationId: String(notification._id), userId: String(notification.user) };
-    for (const key of ['kind', 'event', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'orderId', 'bookingRef', 'slug']) {
+    for (const key of ['kind', 'event', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'messageId', 'orderId', 'bookingRef', 'slug']) {
         if (notification.data?.[key]) data[key] = String(notification.data[key]).slice(0, 300);
     }
     // Data-only web messages let the worker check the current account before display.
@@ -81,7 +82,9 @@ async function stillVisible(row) {
     const context = { ...member, ...memberAccess({ ...profile, ...await paidMembership(profile) }) };
     if (row.data?.kind === 'message') {
         if (!context.canNetwork || !row.data.conversationId) return false;
-        return !!await require('../messages/message.model').Conversation.exists({ _id: row.data.conversationId, participants: row.user });
+        const { Message, Conversation } = require('../messages/message.model');
+        if (row.data.messageId && !await Message.exists({ _id: row.data.messageId, deletedAt: null, hiddenFor: { $ne: row.user } })) return false;
+        return !!await Conversation.exists({ _id: row.data.conversationId, participants: row.user });
     }
     const model = Broadcast.sourceModel(row.data.kind);
     if (!model) return false;
@@ -154,7 +157,7 @@ async function processPushBatch({ client } = {}) {
 async function tick() {
     if (running) return;
     running = true;
-    try { await Promise.all([Broadcast.processBatch(), processPushBatch(), require('./associationUpdateDelivery').processBatch()]); }
+    try { await Promise.all([Broadcast.processBatch(), processPushBatch(), require('./associationUpdateDelivery').processBatch(), require('./visitorPush.service').processBatch()]); }
     catch (error) { logger.warn('Notification worker failed', { code: error.code || 'worker/unavailable' }); }
     finally { running = false; }
 }
@@ -165,12 +168,18 @@ function start() {
 }
 function stop() { if (timer) clearInterval(timer); timer = null; }
 async function health() {
-    const [devices, queued, failed, broadcasts] = await Promise.all([
+    const { VisitorDevice, VisitorDelivery, PublicNotice } = require('./visitorPush.models');
+    const [devices, queued, failed, broadcasts, visitors, visitorQueued, visitorFailed, visitorBroadcasts] = await Promise.all([
         Device.countDocuments({ enabled: true }), Notification.countDocuments({ 'push.status': 'pending' }),
         Notification.countDocuments({ 'push.status': 'failed' }), require('./broadcast.model').countDocuments({ status: { $in: ['pending', 'processing'] } }),
+        VisitorDevice.countDocuments({ enabled: true }), VisitorDelivery.countDocuments({ status: 'pending' }),
+        VisitorDelivery.countDocuments({ status: 'failed' }), PublicNotice.countDocuments({ status: { $in: ['pending', 'processing'] } }),
     ]);
-    return { configured: isConfigured(), provider: 'Firebase Cloud Messaging', devices, queued, failed, broadcasts, workerEnabled: process.env.NOTIFICATION_WORKER_ENABLED !== 'false' };
+    return { configured: isConfigured(), provider: 'Firebase Cloud Messaging', devices: devices + visitors, visitors,
+        queued: queued + visitorQueued, failed: failed + visitorFailed, broadcasts: broadcasts + visitorBroadcasts,
+        workerEnabled: process.env.NOTIFICATION_WORKER_ENABLED !== 'false' };
 }
+
 async function queueTest(user) {
     if (!isConfigured()) throw ApiError.badRequest('Firebase push is not configured yet.');
     if (process.env.NOTIFICATION_WORKER_ENABLED === 'false') throw ApiError.badRequest('The notification worker is disabled. Enable it before testing.');
@@ -180,4 +189,4 @@ async function queueTest(user) {
         message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
     return { queued: true };
 }
-module.exports = { register, unregister, isConfigured, payload, deliver, stillVisible, processPushBatch, start, stop, health, validToken, queueTest };
+module.exports = { messaging, register, unregister, isConfigured, payload, deliver, stillVisible, processPushBatch, start, stop, health, validToken, queueTest };

@@ -1,6 +1,6 @@
 # ACTIV: Firebase push, Analytics and sign-in setup
 
-Updated 16 October 2026. The Firebase project `activ-production`, public website settings and backend service account have been supplied locally. Firebase accepted a validation-only send with the local service account; no notification was delivered. Matching Android and iOS apps for `in.activ.membership` were found in Firebase, and their configuration files were downloaded into the local native project. These files are ignored by Git and must also be supplied to the native build machine. The deployed website's worker was still built without its Firebase settings at the last check. Complete the website rebuild, native builds, iOS APNs/signing and real-device activation checks below before treating delivery as live.
+Updated 16 October 2026. The Firebase project `activ-production`, public website settings and backend service account have been supplied locally. Firebase accepted a validation-only send with the local service account; no notification was delivered. Matching Android and iOS apps for `in.activ.membership` were found in Firebase, and their configuration files were downloaded into the local native project. These files are ignored by Git and must also be supplied to the native build machine. A read-only public check on 16 October at 22:39 IST confirmed the deployed worker now contains all seven Firebase web settings and the backend health endpoint returns 200. This confirms configuration, not delivery to a device. Complete the new feature deployment, native builds, iOS APNs/signing and real-device activation checks below before treating delivery as live.
 
 Paths below refer to the integration workspace: `frontend/` in the `activ--app` repository, `website/` in `activ-new`, and `backend/` in the workspace. The standalone `activ-backend` repository contains the contents of `backend/` at its root, so omit that prefix when working there.
 
@@ -174,12 +174,12 @@ Run `node scripts/check-firebase-setup.cjs` from the repository root. It reports
 
 After applying the configuration and rebuilding/deploying:
 
-1. Install the app on a real phone, sign in as Super Admin, allow notifications, and send a test to that account's devices.
+1. Install the app on a real phone and choose Allow notifications. Use a designated test member and a publication restricted to its eligible test audience for delivery checks. Super Admin shows delivery reports; the setup/test panel has been removed.
 2. Verify foreground, background and unopened-app notification taps. OS force-stop, denied permission and network restrictions can prevent delivery; reopen the app after force-stop.
 3. Publish a Student-only update using test member accounts. Confirm a Student sees it, a business member does not, and the business member cannot open the direct detail URL. Check region, unpaid and lifetime selections too.
 4. Change a test Student profile to “business”: networking must remain locked until a real paid upgrade. Confirm events still work.
 5. Test a free online booking and a paid test booking. Check the URL is absent before confirmation/payment and that direct meeting versus platform-registration actions are correct.
-6. Log out, then log in as another test account on the same phone. Notifications must belong to the new account. Verify the admin test and sign-in audit again.
+6. Log out, then log in as another test account on the same phone. Notifications must belong to the new account. Verify the notification destination, recipient report and sign-in audit again.
 7. Opt into Analytics and check Realtime; opt out and verify further page/screen events stop. Check the actual production OAuth callback settings for all three providers.
 
 Local automated coverage includes `backend/tests/audience-push-local.test.js`, `backend/tests/push-worker-local.test.js`, `website/tests/browser-push.test.mjs`, the mobile notification tests, the OAuth provider tests and the existing booking/public-content tests. Push tests cover publication revisions, audience and region changes, account availability, device ownership, retries, logout races and notification destinations using disposable data and mocked sends. They do not send messages to real members or prove live FCM/APNs delivery.
@@ -199,7 +199,7 @@ Email uses the existing membership SMTP account, with ACTIV branding, a personal
 The existing Meta account and token are reused. No Firebase Auth, new WhatsApp subscription or billing change is required by this integration. The template defaults are below; set them explicitly on the backend host if desired:
 
 ```text
-ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE=activ_association_update_v1
+ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE=activ_association_update_v2
 ASSOCIATION_UPDATE_WHATSAPP_LANGUAGE=en_US
 ```
 
@@ -235,3 +235,24 @@ The automated test uses disposable loopback MongoDB and stubbed providers. It co
 The preview command sends nothing. The two explicit send flags are hard-coded to the user-authorized test email `tharunroobika@gmail.com` and WhatsApp `+919092317264`; no other recipient can be supplied. Test email disables office archive CC/BCC and checks the final SMTP envelope. The script never connects to a member database or publishes an update. It writes an HTML preview and a small acceptance report under `artifacts/` beside the backend directory.
 
 Verification on 15 October 2026: the authorized test email was accepted by SMTP. The read-only Meta check still reports `PENDING`, category `MARKETING`, with `contractMatches: true`; no WhatsApp test has been sent. The current record is `artifacts/association-update-live-test.json`. Wait for template approval before the WhatsApp send check, and do not repeat the already accepted email merely because the laptop or worker restarted.
+
+
+## Communication features added in this release
+
+- Super Admin > Notifications > Delivery reports provides publication and automation reports for email, WhatsApp, push and the in-app inbox. Select a campaign and recipient to inspect the recorded outcome. Accepted means the provider accepted a request; email delivery/opens are not measured by the current SMTP service. A missing open is not proof that a person ignored a message. See `notification-delivery-reports.md`.
+- Updates support multiple hierarchical state/district/block selections. A member must match the selected membership audience and at least one region. Type `{Name}` or `{name}` in the title, summary or message to insert the recipient's profile name. Missing names and anonymous visitors use `ACTIVian`. Previews do not modify the authored template.
+- Select **Also show to visitors** only for all-member, all-region updates intended to be public. This is off by default. Public events follow the existing onboarding/public visibility controls. Private membership and regional updates are not turned public automatically.
+- Website visitors and app users see a first-use **Allow notifications / Later** invitation. Allow opens the browser/OS permission request where required; Later is remembered and the bell/settings offer another opportunity. Existing granted browser permission reconnects automatically unless that browser was explicitly opted out. The public website and signed-out app bells show public updates. Guest and account device ownership are stored separately; sign-in transfers delivery to the member's account. No private member content is exposed to visitors. Permission remains subject to browser/OS settings. Super Admin has reports, not a push setup/test panel.
+- Chats offer separate photo, document and audio-file controls. Members can delete any visible message for themselves or delete their own message for everyone. Audio files can be selected and played; microphone recording is not included.
+- **Book for someone else** creates another booking under the signed-in member, with their current eligible price and a different attendee email. The booker can receive many booking receipts. Each attendee email can hold only one current place/checkout hold for an event. Existing capacity and per-booking limits remain in force; full events follow the existing waitlist rules.
+
+### Deployment and acceptance
+
+Deploy backend and website together, then distribute a freshly built native app. Existing app installations will not gain the new controls from a website deployment. Existing email/WhatsApp lifecycle automations remain the source of their messages; the reports observe them and do not create extra sends. New public publications create durable visitor jobs; the worker rechecks visibility, opt-in, ownership and expiry before sending. Nothing backfills historical open/read evidence.
+
+Use an explicitly designated test account/device for the final delivery test: enable notifications, publish a test update limited to that account's permitted audience where possible, check its recipient report, open the notification, and confirm its destination and tap timestamp. Publishing a public visitor update may notify every opted-in visitor, so do not use a public publication for an isolated smoke test. Do not bulk resend simply because no open receipt exists.
+
+WhatsApp static footers are approved provider content. The local definitions use `Adidravidar Confederation of Trade & Industrial Vision-ACTIV`; deploying code cannot change previously approved Meta footers. The read-only audit found 25 approved templates needing a footer edit and `activ_association_update_v2` still pending. The exact review artifacts are `artifacts/whatsapp-footer-provider-patch.json` and `artifacts/whatsapp-footer-rollout.txt` in the integration workspace. Submit footer-only changes in controlled batches and wait for approval; preserve each template's other components and parameters. No live template was edited and no member campaign was sent during implementation.
+
+
+Website registration diagnosis on 16 October: the deployed service worker was configured and activated without errors in approximately 0.53 seconds in an isolated browser. The reported timeout belonged to the combined SDK/token registration budget; the failing step on the user's browser was not independently observed. Registration now reports the failing stage, allows up to 30 seconds for Firebase token/subscription creation, cancels promptly on logout/opt-out, and retries on a new connection/focus. A blocked push service, denied permission or unsupported browser still needs the user's browser/network setting corrected; registration cannot override those conditions.

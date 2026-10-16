@@ -1253,7 +1253,7 @@ const WHATSAPP_TEMPLATES = [
     },
     {
         name: 'activ_event_document_standard_v1', envKey: 'BOTBEE_TPL_EVENT_DOCUMENT',
-        category: 'Utility', meta: true, standard: true, header: 'DOCUMENT', footer: 'ACTIV',
+        category: 'Utility', meta: true, standard: true, header: 'DOCUMENT', footer: require('./organizationBrand').FOOTER,
         bodyWithVariables: 'Dear *{{1}}*,\n\n*Event document*\n\n'
             + '*Document:* {{2}}\n\n*Event:* {{3}}\n\n*Schedule:* {{4}}\n\n*Booking ID:* {{5}}\n\n'
             + '*Event queries:* events@activ.org.in\n\nPlease keep this file with your booking confirmation.',

@@ -15,7 +15,7 @@ const setupSecurity = (app) => {
         origin: config.cors.origin,
         credentials: config.cors.credentials,
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Activ-Visitor-Key'],
         exposedHeaders: ['Content-Length', 'X-Request-Id']
     }));
 

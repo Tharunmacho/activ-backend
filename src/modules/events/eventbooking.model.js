@@ -238,6 +238,10 @@ const eventBookingSchema = new mongoose.Schema({
         /** What the gateway called it. Empty until the gateway answers. */
         gatewayPaymentId: { type: String, trim: true, default: '' },
         paidAt: { type: Date, default: null },
+        // A verified late payment is retained even if its released seats were
+        // taken meanwhile. These rows stay on the waitlist without entry rights.
+        reconciliationRequired: { type: Boolean, default: false },
+        reconciliationReason: { type: String, trim: true, default: '' },
 
         /**
          * Recorded by an administrator rather than taken through the gateway.

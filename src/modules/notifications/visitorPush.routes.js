@@ -1,0 +1,13 @@
+const router = require('express').Router();
+const service = require('./visitorPush.service');
+const { createRateLimiter } = require('../../core/middleware/rateLimit');
+const reply = handler => async (req, res, next) => { try { res.json({ success: true, data: await handler(req) }); } catch (error) { next(error); } };
+const key = req => req.get('x-activ-visitor-key');
+router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+router.get('/', reply(() => service.feed()));
+router.post('/installations', createRateLimiter({ windowMs: 3600000, max: 15 }), reply(() => service.install()));
+router.put('/devices', createRateLimiter({ windowMs: 60000, max: 30 }), reply(req => service.register(key(req), req.body)));
+router.delete('/devices', reply(req => service.unregister(key(req))));
+router.patch('/:id/open', createRateLimiter({ windowMs: 60000, max: 60 }), reply(req => service.opened(key(req), req.params.id, req.body?.channel)));
+router.get('/:id', reply(req => service.feed(req.params.id)));
+module.exports = router;

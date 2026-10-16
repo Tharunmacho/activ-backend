@@ -79,6 +79,7 @@ const MODELS = {
     // ---- events
     Event: ['events', 'events', A, 'events'],
     EventBooking: ['events', 'event_bookings', A, 'event_bookings'],
+    EventBookingLock: ['events', 'booking_locks', A, 'booking_locks'],
     EventCheckin: ['events', 'event_checkins', A, 'event_checkins'],
     EventRegistration: ['events', 'event_registrations', A, 'event_registrations'],
 
@@ -90,6 +91,9 @@ const MODELS = {
     // ---- notifications
     Notification: ['notifications', 'notifications', A, 'notifications'],
     PushDevice: ['notifications', 'push_devices', A, 'push_devices'],
+    VisitorDevice: ['notifications', 'visitor_devices', A, 'visitor_devices'],
+    PublicNotice: ['notifications', 'public_notices', A, 'public_notices'],
+    VisitorDelivery: ['notifications', 'visitor_deliveries', A, 'visitor_deliveries'],
     ContentBroadcast: ['notifications', 'content_broadcasts', A, 'content_broadcasts'],
     LifecycleOutbox: ['notifications', 'lifecycle_outbox', A, 'lifecycle_outbox'],
     NotificationLog: ['notifications', 'notification_logs', A, 'notificationlogs'],

@@ -90,7 +90,7 @@ module.exports = ({ appUrl, oneLine, esc, TPL }) => {
             })
         },
         WHATSAPP_TEMPLATES: [{
-            name: TEMPLATE, meta: true, category: 'Utility', footer: 'ACTIV',
+            name: TEMPLATE, meta: true, category: 'Utility', footer: require('./organizationBrand').FOOTER,
             bodyWithVariables: 'Dear {{1}},\n\n*Update to your ACTIV record*\n{{2}}\n\n*Details*\n{{3}}\n\nView your record: {{4}}\n\nFor questions about this update, contact {{5}}.\n\nThis notification relates to your existing ACTIV account or event registration.',
             params: ['name', 'update title', 'update details', 'record link', 'queries email'],
             samples: ['Test member', 'Event details updated: Business workshop',

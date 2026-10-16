@@ -12,6 +12,7 @@ const TYPES = {
     xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     txt: 'text/plain', csv: 'text/csv', rtf: 'application/rtf',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', opus: 'audio/ogg', webm: 'audio/webm',
 };
 const IMAGE_LIMIT = 5 * 1024 * 1024;
 const FILE_LIMIT = 10 * 1024 * 1024;
@@ -19,7 +20,7 @@ const FILE_ID = /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 1, fileSize: FILE_LIMIT } })
     .fields([{ name: 'file', maxCount: 1 }, { name: 'image', maxCount: 1 }]);
 const receive = (req, res, next) => upload(req, res, error => next(error
-    ? ApiError.badRequest(error.code === 'LIMIT_FILE_SIZE' ? 'Documents must be 10 MB or smaller; photos must be 5 MB or smaller.' : 'Choose one photo or document to attach.')
+    ? ApiError.badRequest(error.code === 'LIMIT_FILE_SIZE' ? 'Documents and audio must be 10 MB or smaller; photos must be 5 MB or smaller.' : 'Choose one photo, document or audio file to attach.')
     : undefined));
 const cleanName = value => path.basename(String(value || '').replace(/\\/g, '/'))
     .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '-').replace(/^[. ]+|[. ]+$/g, '').slice(-120);
@@ -51,22 +52,23 @@ function officeZip(buffer, extension) {
 async function validateFile(file) {
     const name = cleanName(file?.originalname), extension = path.extname(name).slice(1).toLowerCase();
     const mimeType = TYPES[extension], buffer = file?.buffer;
-    if (!mimeType) throw ApiError.badRequest('Choose a PDF, Word, Excel, PowerPoint, text file or JPEG, PNG, WebP or GIF photo.');
+    if (!mimeType) throw ApiError.badRequest('Choose a photo, document or MP3, M4A, AAC, WAV, Ogg or WebM audio file.');
     const received = String(file.mimetype || '').toLowerCase();
-    const aliases = { 'image/jpg': 'image/jpeg', 'text/comma-separated-values': 'text/csv', 'text/rtf': 'application/rtf' };
+    const aliases = { 'image/jpg': 'image/jpeg', 'text/comma-separated-values': 'text/csv', 'text/rtf': 'application/rtf', 'audio/x-m4a': 'audio/mp4', 'audio/x-wav': 'audio/wav', 'audio/wave': 'audio/wav', 'audio/mp3': 'audio/mpeg', 'audio/x-aac': 'audio/aac', 'application/ogg': 'audio/ogg' };
     if (received && received !== 'application/octet-stream' && (aliases[received] || received) !== mimeType) {
         throw ApiError.badRequest('The file type does not match its name. Choose the original document.');
     }
-    const kind = mimeType.startsWith('image/') ? 'image' : 'file';
+    const kind = mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('audio/') ? 'audio' : 'file';
     if (!Buffer.isBuffer(buffer) || !buffer.length) throw ApiError.badRequest('This file is empty or could not be read.');
-    if (buffer.length > (kind === 'image' ? IMAGE_LIMIT : FILE_LIMIT)) throw ApiError.badRequest(kind === 'image' ? 'Photos must be 5 MB or smaller.' : 'Documents must be 10 MB or smaller.');
+    if (buffer.length > (kind === 'image' ? IMAGE_LIMIT : FILE_LIMIT)) throw ApiError.badRequest(kind === 'image' ? 'Photos must be 5 MB or smaller.' : 'Documents and audio must be 10 MB or smaller.');
     let valid = false;
     if (kind === 'image') {
         try {
             const image = await require('sharp')(buffer, { limitInputPixels: 40000000 }).metadata();
             valid = image.format === (extension === 'jpg' ? 'jpeg' : extension) && image.width > 0 && image.height > 0;
         } catch { valid = false; }
-    } else if (extension === 'pdf') valid = buffer.subarray(0, 5).toString() === '%PDF-';
+    } else if (kind === 'audio') valid = validAudio(buffer, extension);
+    else if (extension === 'pdf') valid = buffer.subarray(0, 5).toString() === '%PDF-';
     else if (['doc', 'xls', 'ppt'].includes(extension)) valid = buffer.subarray(0, 8).equals(Buffer.from('d0cf11e0a1b11ae1', 'hex'));
     else if (['docx', 'xlsx', 'pptx'].includes(extension)) valid = officeZip(buffer, extension);
     else {
@@ -76,16 +78,35 @@ async function validateFile(file) {
             if (extension === 'rtf') valid = valid && /^\{\\rtf[0-9]/.test(contents) && !/\\(?:object|objdata)\b/i.test(contents);
         } catch { valid = false; }
     }
-    if (!valid) throw ApiError.badRequest('This file is not a valid supported document or photo. Choose the original file.');
+    if (!valid) throw ApiError.badRequest('This file is not a valid supported document, photo or audio recording. Choose the original file.');
     return { name, mimeType, size: buffer.length, kind };
+}
+
+function validAudio(buffer, extension) {
+    if (buffer.length < 12) return false;
+    const header = buffer.subarray(0, Math.min(buffer.length, 256 * 1024));
+    if (extension === 'wav') return header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 12) === 'WAVE' && header.includes(Buffer.from('fmt ')) && buffer.includes(Buffer.from('data'));
+    if (extension === 'm4a') return header.toString('ascii', 4, 8) === 'ftyp' && buffer.includes(Buffer.from('soun')) && !buffer.includes(Buffer.from('vide'));
+    if (extension === 'ogg' || extension === 'opus') return header.toString('ascii', 0, 4) === 'OggS' && (header.includes(Buffer.from('OpusHead')) || header.includes(Buffer.from('vorbis'))) && !header.includes(Buffer.from('theora'));
+    if (extension === 'webm') return header.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')) && (header.includes(Buffer.from('A_OPUS')) || header.includes(Buffer.from('A_VORBIS'))) && !header.includes(Buffer.from('V_VP')) && !header.includes(Buffer.from('V_AV1'));
+    if (extension === 'aac') return buffer[0] === 0xff && (buffer[1] & 0xf6) === 0xf0;
+    if (extension === 'mp3') {
+        let offset = 0;
+        if (header.toString('ascii', 0, 3) === 'ID3') {
+            if ([6, 7, 8, 9].some(i => buffer[i] & 0x80)) return false;
+            offset = 10 + ((buffer[6] << 21) | (buffer[7] << 14) | (buffer[8] << 7) | buffer[9]);
+        }
+        return offset + 4 < buffer.length && buffer[offset] === 0xff && (buffer[offset + 1] & 0xe0) === 0xe0 && (buffer[offset + 1] & 6) !== 0 && (buffer[offset + 2] & 0xf0) !== 0xf0 && (buffer[offset + 2] & 12) !== 12;
+    }
+    return false;
 }
 
 async function storeUpload(req, ownerId) {
     const file = req.files?.file?.[0] || req.files?.image?.[0];
-    if (!file) throw ApiError.badRequest('Choose a photo or document to attach.');
+    if (!file) throw ApiError.badRequest('Choose a photo, document or audio file to attach.');
     const meta = await validateFile(file);
     if (file.fieldname === 'image' && meta.kind !== 'image') throw ApiError.badRequest('Choose a photo for the image attachment.');
-    const id = crypto.randomUUID(), category = meta.kind === 'image' ? 'chat-images' : 'chat-files';
+    const id = crypto.randomUUID(), category = meta.kind === 'image' ? 'chat-images' : meta.kind === 'audio' ? 'chat-audio' : 'chat-files';
     const storedName = meta.name.normalize('NFKD').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[-.]+/, '') || `document.${path.extname(meta.name).slice(1)}`;
     const filename = `${category}/${id}/${storedName}`;
     const target = path.join(require('../../core/storage/uploadStore').UPLOADS_DIR, filename);
@@ -124,14 +145,14 @@ function blockPublicFiles(req, res, next) {
     let requested;
     try { requested = path.posix.normalize('/' + decodeURIComponent(req.path || '').replace(/\\/g, '/')); }
     catch { return res.status(400).end(); }
-    if (/^\/chat-files(?:\/|$)/i.test(requested)) return res.status(404).end();
+    if (/^\/chat-(?:files|audio)(?:\/|$)/i.test(requested)) return res.status(404).end();
     return next();
 }
 
 async function download(attachment, res) {
     const store = require('../../core/storage/uploadStore');
     const name = attachment.storageName;
-    if (!/^chat-(?:files|images)\/[a-f\d-]{36}\/[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(name || '')) throw ApiError.notFound('Attachment not found');
+    if (!/^chat-(?:files|images|audio)\/[a-f\d-]{36}\/[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(name || '')) throw ApiError.notFound('Attachment not found');
     let stream;
     try {
         const target = path.join(store.UPLOADS_DIR, name);

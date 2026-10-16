@@ -2,8 +2,10 @@ const mongoose = require('mongoose');
 const Announcement = require('./announcement.model');
 const ApiError = require('../../core/utils/ApiError');
 const auditService = require('../audit/audit.service');
-const { audienceClause, targetsMember, targetLabel, targetDepth } = require('../common/regionMatch');
+const { multiTargetClause, multiTargetsViewer, targetsLabel, targetDepth } = require('../common/regionMatch');
 const { AUDIENCES, announcementAudienceClause, matchesAudience } = require('../common/memberAudience');
+const { personalizeUpdate } = require('../common/recipientPersonalization');
+const { sanitizeHtml } = require('../cms/richText');
 
 const FEED_LIMIT = 50;
 const ADMIN_LIMIT = 200;
@@ -33,8 +35,10 @@ const toAnnouncement = (doc = {}) => ({
     state: doc.state || '',
     district: doc.district || '',
     block: doc.block || '',
+    targets: doc.targets || [],
+    includeVisitors: doc.includeVisitors === true,
     /** "Tamil Nadu › Sivaganga", or empty when it went to everyone. */
-    targetLabel: targetLabel(doc),
+    targetLabel: targetsLabel(doc),
     audience: doc.audience || 'all',
     planKeys: doc.planKeys || [],
     bannerUrl: doc.bannerUrl || '',
@@ -60,6 +64,29 @@ const sanitize = (payload = {}) => {
     ].forEach((key) => {
         if (payload[key] !== undefined) out[key] = str(payload[key]);
     });
+    if (out.body !== undefined) out.body = sanitizeHtml(out.body);
+
+    if (payload.includeVisitors !== undefined) out.includeVisitors = payload.includeVisitors === true || payload.includeVisitors === 'true';
+    if (payload.targets !== undefined) {
+        let targets = payload.targets;
+        if (typeof targets === 'string') {
+            try { targets = JSON.parse(targets); } catch (_) { throw ApiError.badRequest('Choose regions from the region selector.'); }
+        }
+        if (!Array.isArray(targets) || targets.length > 500) throw ApiError.badRequest('Choose up to 500 regions.');
+        const unique = new Map();
+        for (const target of targets) {
+            if (!target || typeof target !== 'object' || ['state', 'district', 'block'].some(key => target[key] !== undefined && typeof target[key] !== 'string')) throw ApiError.badRequest('Each region needs a state, district and block selection.');
+            const entry = Object.fromEntries(['state', 'district', 'block'].map(key => [key, str(target[key])]));
+            if (!entry.state || entry.block && !entry.district) throw ApiError.badRequest('Choose a state for every region and a district before a block.');
+            if (Object.values(entry).some(value => value.length > 150)) throw ApiError.badRequest('A region name is too long.');
+            unique.set(Object.values(entry).map(value => value.toLowerCase().replace(/\s+/g, ' ')).join('|'), entry);
+        }
+        out.targets = [...unique.values()];
+        Object.assign(out, out.targets[0] || { state: '', district: '', block: '' });
+    } else if (['state', 'district', 'block'].some(key => payload[key] !== undefined)) {
+        // An older client edits a single region: do not retain a hidden old list.
+        out.targets = [];
+    }
 
     for (const key of ['bannerUrl', 'attachmentUrl']) {
         if (!out[key]) continue;
@@ -135,6 +162,9 @@ const validateDocument = async (data, current = {}) => {
     if (!str(merged.title)) throw ApiError.badRequest('An update needs a title');
     if (merged.district && !merged.state) throw ApiError.badRequest('Choose a state before choosing a district.');
     if (merged.block && !merged.district) throw ApiError.badRequest('Choose a district before choosing a block.');
+    if (merged.includeVisitors && ((merged.audience || 'all') !== 'all' || merged.state || merged.district || merged.block || merged.targets?.length)) {
+        throw ApiError.badRequest('Visitor updates must use all members and all regions.');
+    }
     if (merged.audience === 'plans') {
         const keys = merged.planKeys || [];
         if (!keys.length) throw ApiError.badRequest('Select at least one membership plan.');
@@ -195,7 +225,7 @@ class AnnouncementService {
             status: 'published',
             $and: [
                 // Targeted at this member's regions — see regionMatch.js.
-                ...audienceClause(context).$and,
+                multiTargetClause(context),
                 // Still in date. An update with no expiry never expires.
                 { $or: [{ expiresAt: null }, { expiresAt: { $exists: false } }, { expiresAt: { $gt: now } }] }
             ]
@@ -219,12 +249,13 @@ class AnnouncementService {
             .lean()
             .catch(() => []);
 
-        const rows = (documents || []).map(toAnnouncement);
+        const rows = (documents || []).map(doc => personalizeUpdate(toAnnouncement(doc), context));
 
         rows.sort((a, b) => {
             if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
 
-            const depth = targetDepth(b) - targetDepth(a);
+            const depthOf = row => Math.max(targetDepth(row), ...(row.targets || []).map(targetDepth));
+            const depth = depthOf(b) - depthOf(a);
             if (depth !== 0) return depth;
 
             return new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0);
@@ -244,13 +275,13 @@ class AnnouncementService {
 
         if (!isAdmin) {
             if (doc.status !== 'published') throw ApiError.notFound('Update not found');
-            if (!matchesAudience(doc.audience, context, doc.planKeys) || !targetsMember(doc, context)
+            if (!matchesAudience(doc.audience, context, doc.planKeys) || !multiTargetsViewer(doc, context)
                 || (doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now())) {
                 throw ApiError.notFound('Update not found');
             }
         }
 
-        return toAnnouncement(doc);
+        return personalizeUpdate(toAnnouncement(doc), context);
     }
 
     /** Everything, drafts included. Super admin only — the route enforces it. */

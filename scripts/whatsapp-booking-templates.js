@@ -134,7 +134,7 @@ const payloadFor = (t) => ({
             text: t.bodyWithVariables,
             example: { body_text: [t.samples] }
         },
-        { type: 'FOOTER', text: t.footer || 'ACTIV' }
+        { type: 'FOOTER', text: t.footer || require('../src/modules/notifications/organizationBrand').FOOTER }
     ]
 });
 
@@ -174,7 +174,7 @@ const need = () => {
         for (const t of booking) {
             console.log(`== ${t.name}   (${t.envKey})   header: ${t.header || 'none'}   category: UTILITY   language: ${language}`);
             console.log(t.bodyWithVariables);
-            console.log(`Footer: ${t.footer || 'ACTIV'}`);
+            console.log(`Footer: ${t.footer || require('../src/modules/notifications/organizationBrand').FOOTER}`);
             console.log('Samples:');
             t.samples.forEach((s, i) => console.log(`  {{${i + 1}}} = ${s}`));
             // Meta's rules, checked here so a rejection is not the first sign.

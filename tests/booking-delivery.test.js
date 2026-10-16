@@ -159,6 +159,9 @@ const chain = (value) => ({ lean: () => chain(value), select: () => chain(value)
 
 /** A fake booking store: one pending paid booking; the claim is real compare-and-set. */
 const fakeBookingStore = () => {
+    // Database concurrency/fulfilment rules are exercised by booking-friends-local.
+    stub(bookingService, 'withEventLock', async (_eventId, work) => work());
+    stub(bookingService, 'paymentConfirmationIssue', async () => '');
     const doc = {
         _id: 'b1', bookingRef: 'ACTIVB-PAID-0001', eventId: 'e1', status: 'active', noOfPersons: 1, totalAmount: 1500,
         bookedBy: { name: 'Paid Booker', email: 'paid@example.com', phone: '9940100000' },

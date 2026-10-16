@@ -154,13 +154,15 @@ const messageSchema = new mongoose.Schema({
     attachment: {
         type: new mongoose.Schema({
             id: String, url: String, name: String, mimeType: String, size: Number,
-            kind: { type: String, enum: ['image', 'file'] }, storageName: String,
+            kind: { type: String, enum: ['image', 'file', 'audio'] }, storageName: String,
         }, { _id: false }),
         default: undefined,
     },
 
     /** When the OTHER participant read it. Null until they do. */
     readAt: { type: Date, default: null },
+    deletedAt: { type: Date, default: null },
+    hiddenFor: { type: [mongoose.Schema.Types.ObjectId], default: [] },
 }, { timestamps: true });
 
 /*
@@ -173,7 +175,7 @@ const messageSchema = new mongoose.Schema({
 messageSchema.pre('validate', function guardEmpty(next) {
     const hasText = String(this.body || '').trim().length > 0;
     const hasImage = String(this.attachmentUrl || '').trim().length > 0;
-    if (!hasText && !hasImage) {
+    if (!this.deletedAt && !hasText && !hasImage) {
         return next(new Error('A message must carry text or a picture'));
     }
     return next();

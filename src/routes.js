@@ -78,6 +78,7 @@ router.use('/share', require('./modules/share/share.routes'));
  * why the two are separate routers rather than one with exceptions in it.
  */
 router.use('/event-bookings', eventBookingRoutes);
+router.use('/public-notifications', require('./modules/notifications/visitorPush.routes'));
 
 /**
  * Event check-in at the door (QR entry passes). Above `businessRoutes` for the
