@@ -1,6 +1,6 @@
 # ACTIV: Firebase push, Analytics and sign-in setup
 
-Prepared 15 October 2026. This release includes the application integration. A Firebase project, its configuration files, server credentials and a GA4 Web measurement ID have **not** been supplied. Live Firebase delivery and Analytics collection still require the configuration and activation checks below.
+Updated 16 October 2026. The Firebase project `activ-production`, public website settings and backend service account have been supplied locally. Firebase accepted a validation-only send with the local service account; no notification was delivered. Matching Android and iOS apps for `in.activ.membership` were found in Firebase, and their configuration files were downloaded into the local native project. These files are ignored by Git and must also be supplied to the native build machine. The deployed website's worker was still built without its Firebase settings at the last check. Complete the website rebuild, native builds, iOS APNs/signing and real-device activation checks below before treating delivery as live.
 
 Paths below refer to the integration workspace: `frontend/` in the `activ--app` repository, `website/` in `activ-new`, and `backend/` in the workspace. The standalone `activ-backend` repository contains the contents of `backend/` at its root, so omit that prefix when working there.
 
@@ -55,9 +55,9 @@ Use **Node 22 or later**; the installed Firebase Admin SDK requires it. Install 
 
 Never put the service-account JSON or private key in `google-services.json`, a `VITE_` variable, the website, the APK, source control, screenshots or chat. The project-specific app config and typical service-account filenames are ignored by Git. Restrict server credentials to the backend host. [Admin SDK sending](https://firebase.google.com/docs/cloud-messaging/send/admin-sdk)
 
-**Super Admin → Notifications** shows configured status, registered phones, queued/failed alerts and publications being processed. On mobile, open the Delivery tab. **Send test to my phones** queues a notification only for phones signed in to that Super Admin account. It does not send to members. A configured status means settings are present; the device test verifies actual delivery.
+**Super Admin → Notifications** shows configured status, registered devices, queued/failed alerts and publications being processed. On mobile, open the Delivery tab. The test button queues a notification only for devices signed in to that Super Admin account. It does not send to members. A configured status means backend settings are present; website build configuration and actual delivery are separate checks. Publishing eligible content queues member notifications automatically.
 
-## 5. Website Google Analytics
+## 5. Website notifications and Google Analytics
 
 ### Website browser push
 
@@ -69,6 +69,11 @@ project. Do not put Admin SDK credentials into any `VITE_` variable.
 
 In Dokploy, supply these `VITE_FIREBASE_*` variables to the website **build**,
 then rebuild it; runtime-only environment changes cannot update a Vite bundle.
+For the Nixpacks deployment, open the **website application** (`activ-new`) in
+Dokploy, set all seven variables from `.env.push.example` under Environment,
+save, then **Deploy**. Restart alone cannot change the existing browser bundle.
+Check `/firebase-messaging-sw.js` after deployment and enable notifications in
+the browser. A successful registration increases the registered device count.
 On the backend, privately supply `FIREBASE_SERVICE_ACCOUNT_JSON` (the complete
 JSON, preserving escaped newlines), `FIREBASE_PROJECT_ID`, `PUSH_ENABLED=true`
 and `NOTIFICATION_WORKER_ENABLED=true`. Remove the local Windows
@@ -90,6 +95,8 @@ and attempts to remove the server registration. Explicit opt-out also deletes th
 FCM token. Browser registration refreshes on page load, focus and hourly while open.
 FCM authentication alone does not prove delivery: a real browser test remains
 necessary after deployment. No Firebase Authentication migration is required.
+
+### Website Google Analytics
 
 1. In the GA4 property linked to Firebase, add a **Web data stream** for `https://activ.org.in`.
 2. Copy its measurement ID, starting with `G-`, into **`VITE_GA_MEASUREMENT_ID`** in the website build environment. `website/.env.analytics.example` is the template.
@@ -175,7 +182,7 @@ After applying the configuration and rebuilding/deploying:
 6. Log out, then log in as another test account on the same phone. Notifications must belong to the new account. Verify the admin test and sign-in audit again.
 7. Opt into Analytics and check Realtime; opt out and verify further page/screen events stop. Check the actual production OAuth callback settings for all three providers.
 
-Local automated coverage lives in `backend/tests/audience-push-local.test.js`, the OAuth provider tests, `frontend/__tests__/eventAudienceFilters.test.ts`, existing mobile booking/public/certificate tests and `website/tests/event-booking-browser.test.mjs`. Those tests use disposable data and mocked providers; they do not send messages to real members or prove live FCM/APNs delivery.
+Local automated coverage includes `backend/tests/audience-push-local.test.js`, `backend/tests/push-worker-local.test.js`, `website/tests/browser-push.test.mjs`, the mobile notification tests, the OAuth provider tests and the existing booking/public-content tests. Push tests cover publication revisions, audience and region changes, account availability, device ownership, retries, logout races and notification destinations using disposable data and mocked sends. They do not send messages to real members or prove live FCM/APNs delivery.
 
 Validation passed locally: Android debug assembly with the Firebase native modules, mobile and website TypeScript checks, the website production build, audience/networking/online-booking backend checks, consent checks, and responsive booking-history/filter browser checks. The publication queue test covers 510 recipients over multiple batches with replay deduplication. This is not a production load test or an iOS build.
 

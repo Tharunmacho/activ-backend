@@ -118,7 +118,7 @@ const replyReasonToSkip = async (row = {}) => {
  * This does not send, mutate, or rebuild notifications. A failed lookup always
  * stops stateful payment/renewal replay; other event messages use booking resend.
  */
-const reasonToSkip = async (row = {}) => {
+const reasonToSkip = async (row = {}, { throwOnReadError = false } = {}) => {
     if (!STATEFUL.has(row.event)) return '';
     if (row.event === 'BOT_REPLY') return replyReasonToSkip(row);
     const data = row.data || {};
@@ -225,7 +225,8 @@ const reasonToSkip = async (row = {}) => {
         const originalAt = Number.isFinite(openedAt) ? openedAt : sentAt;
         if (Number.isFinite(originalAt) && paidAt >= originalAt) return 'The member has paid since this checkout was started.';
         return '';
-    } catch {
+    } catch (error) {
+        if (throwOnReadError) throw error;
         return 'Current payment or membership status could not be checked. Retry after the status can be verified.';
     }
 };

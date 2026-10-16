@@ -42,7 +42,7 @@ async function unregister(user, token) {
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
 function payload(notification, device) {
     const data = { notificationId: String(notification._id), userId: String(notification.user) };
-    for (const key of ['kind', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'orderId', 'bookingRef', 'slug']) {
+    for (const key of ['kind', 'event', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'orderId', 'bookingRef', 'slug']) {
         if (notification.data?.[key]) data[key] = String(notification.data[key]).slice(0, 300);
     }
     // Data-only web messages let the worker check the current account before display.
@@ -55,21 +55,47 @@ function payload(notification, device) {
             payload: { aps: { sound: 'default' } } } };
 }
 async function stillVisible(row) {
-    if (!row.data?.sourceId) return true;
+    // Do not use the feed cache: a block, expiry, region change or logout must
+    // take effect before a queued alert is handed to Firebase.
+    const member = await require('../members/memberdetails.model').findById(row.user).lean();
+    if (!member) {
+        if (row.data?.sourceId || row.data?.kind === 'message') return false;
+        const admin = await require('../admin/admin.repository').findById(String(row.user));
+        return !!admin?.active;
+    }
+    if (member.isActive === false || member.deletedAt) return false;
+    const { memberAccess, paidMembership } = require('../common/memberAudience');
+    if (!row.data?.sourceId && row.data?.kind !== 'message') {
+        const reason = await require('./retryEligibility').reasonToSkip({ ...row, event: row.data?.event }, { throwOnReadError: true });
+        return !reason;
+    }
+    // Match payment reconciliation without mutating membership from this
+    // worker. A failed read throws, so the queued push retries instead of
+    // treating an unverifiable receipt as paid (or permanently skipping it).
+    const ref = String(member.paymentId || '');
+    const checkReceipt = ['active', 'completed'].includes(String(member.membershipStatus || '').toLowerCase()) && /^(pay_|OFF-)/.test(ref);
+    const missingReceipt = checkReceipt && !await require('../payment/paymentorder.model').exists({
+        $or: [{ gatewayPaymentId: ref }, { orderId: ref }], status: 'paid',
+    });
+    const profile = missingReceipt ? { ...member, membershipStatus: 'pending' } : member;
+    const context = { ...member, ...memberAccess({ ...profile, ...await paidMembership(profile) }) };
+    if (row.data?.kind === 'message') {
+        if (!context.canNetwork || !row.data.conversationId) return false;
+        return !!await require('../messages/message.model').Conversation.exists({ _id: row.data.conversationId, participants: row.user });
+    }
     const model = Broadcast.sourceModel(row.data.kind);
     if (!model) return false;
-    const member = await require('../common/memberContext').memberSnapshot(String(row.user));
-    if (!member) return false;
-    const source = await model.findById(row.data.sourceId).select(Broadcast.VISIBILITY_FIELDS).lean();
-    return Broadcast.visibleTo(row.data.kind, source, { ...member, ...require('../common/memberAudience').memberAccess(member) });
+    const source = await model.findById(row.data.sourceId).lean();
+    if (!source || (row.data.broadcastKey && Broadcast.sourceKey(row.data.kind, source) !== row.data.broadcastKey)) return false;
+    return Broadcast.visibleTo(row.data.kind, source, context);
 }
 const invalidTokenCodes = new Set(['messaging/registration-token-not-registered', 'messaging/invalid-registration-token']);
 const transientCodes = new Set(['messaging/internal-error', 'messaging/server-unavailable', 'messaging/unknown-error', 'messaging/quota-exceeded', 'messaging/message-rate-exceeded', 'app/network-error', 'app/network-timeout']);
-async function deliver(row, devices, client = messaging()) {
+async function deliver(row, devices, client) {
     const sent = new Set(row.push?.sentTokens || []);
     const targets = devices.filter(d => d.enabled && String(d.user) === String(row.user) && !sent.has(tokenHash(d.token)));
     if (!targets.length) return { status: sent.size ? 'sent' : 'skipped', sentTokens: [...sent] };
-    const response = await client.sendEach(targets.map(d => payload(row, d)));
+    const response = await (client || messaging()).sendEach(targets.map(d => payload(row, d)));
     let retry = false;
     let failed = false;
     let lastError = '';
@@ -85,7 +111,7 @@ async function deliver(row, devices, client = messaging()) {
     }
     return { status: retry ? 'pending' : failed ? 'failed' : sent.size ? 'sent' : 'skipped', sentTokens: [...sent], lastError };
 }
-async function processPushBatch() {
+async function processPushBatch({ client } = {}) {
     if (!isConfigured()) return;
     const now = new Date();
     const worker = crypto.randomUUID();
@@ -98,15 +124,22 @@ async function processPushBatch() {
         'push.status': 'sending', 'push.worker': worker, 'push.leaseUntil': new Date(Date.now() + 600000),
     } });
     const rows = await Notification.find({ 'push.worker': worker, 'push.status': 'sending' }).lean();
-    const devices = await Device.find({ user: { $in: rows.map(r => r.user) }, enabled: true, lastSeenAt: { $gte: new Date(Date.now() - 90 * 86400000) } }).lean();
     // Bounded concurrency prevents a publication to one lakh members exhausting the API process.
     for (let offset = 0; offset < rows.length; offset += 10) {
         await Promise.all(rows.slice(offset, offset + 10).map(async row => {
             const attempts = (row.push?.attempts || 0) + 1;
             let result;
             try {
-                result = row.createdAt < new Date(Date.now() - 86400000) || !(await stillVisible(row))
-                    ? { status: 'skipped' } : await deliver(row, devices.filter(d => String(d.user) === String(row.user)).slice(0, 20));
+                if (row.createdAt < new Date(Date.now() - 86400000) || !(await stillVisible(row))) {
+                    result = { status: 'skipped' };
+                } else {
+                    // A token may be removed or switch accounts while earlier
+                    // rows are processed. Resolve its owner at delivery time.
+                    const devices = await Device.find({ user: row.user, enabled: true,
+                        lastSeenAt: { $gte: new Date(Date.now() - 90 * 86400000) },
+                    }).sort({ lastSeenAt: -1 }).limit(20).lean();
+                    result = await deliver(row, devices, client);
+                }
             } catch (error) {
                 result = { status: 'pending', lastError: error.code || 'push/unavailable' };
             }
@@ -138,4 +171,13 @@ async function health() {
     ]);
     return { configured: isConfigured(), provider: 'Firebase Cloud Messaging', devices, queued, failed, broadcasts, workerEnabled: process.env.NOTIFICATION_WORKER_ENABLED !== 'false' };
 }
-module.exports = { register, unregister, isConfigured, payload, deliver, stillVisible, processPushBatch, start, stop, health, validToken };
+async function queueTest(user) {
+    if (!isConfigured()) throw ApiError.badRequest('Firebase push is not configured yet.');
+    if (process.env.NOTIFICATION_WORKER_ENABLED === 'false') throw ApiError.badRequest('The notification worker is disabled. Enable it before testing.');
+    const registered = await Device.exists({ user, enabled: true, lastSeenAt: { $gte: new Date(Date.now() - 90 * 86400000) } });
+    if (!registered) throw ApiError.badRequest('Enable notifications in this browser or sign in to the ACTIV app and allow notifications before testing.');
+    await require('./notification.service').createNotification(user, { title: 'ACTIV notification test',
+        message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
+    return { queued: true };
+}
+module.exports = { register, unregister, isConfigured, payload, deliver, stillVisible, processPushBatch, start, stop, health, validToken, queueTest };

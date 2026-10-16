@@ -49,7 +49,14 @@ function install(schema, kind) {
         const update = this.getUpdate() || {};
         // Seat counts, reminder claims and other operational writes are not publications.
         const keys = Object.keys(update.$set || update).filter(k => !['updatedAt', 'createdAt'].includes(k));
-        if (keys.some(k => MATERIAL_FIELDS.includes(k.split('.')[0]))) await notify(doc);
+        if (doc && keys.some(k => MATERIAL_FIELDS.includes(k.split('.')[0]))) {
+            // Mongoose returns the pre-edit document unless the caller requests
+            // `new: true`. Publications must always describe the committed row.
+            const options = this.getOptions();
+            const current = options.new === true || options.returnDocument === 'after'
+                ? doc : await this.model.findById(doc._id).lean();
+            await notify(current);
+        }
     });
 }
 const labels = { announcement: 'association update', event: 'event programme', news: 'news story', gallery: 'gallery update', scheme: 'government scheme' };
@@ -60,7 +67,7 @@ function notice(job, doc, user) {
         message: `Dear member, there is a new or revised ${labels[kind]} for you. Thank you for being part of ACTIV.`,
         type: 'info', isRead: false,
         ...(kind === 'announcement' ? { updateDelivery: { email: {}, whatsapp: {} } } : {}),
-        data: { kind, sourceId: String(doc._id), ...(kind === 'announcement' ? { broadcastKey: job.key } : {}), ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
+        data: { kind, sourceId: String(doc._id), broadcastKey: job.key, ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
             ...(kind === 'announcement' ? { announcementId: String(doc._id) } : {}), slug: doc.slug || '' },
         push: { status: 'pending', attempts: 0, nextAttemptAt: new Date() } };
 }
@@ -76,8 +83,8 @@ async function processBatch() {
     if (!job) return;
     const claim = { _id: job._id, worker };
     try {
-        const doc = await sourceModel(job.kind).findById(job.sourceId).select(VISIBILITY_FIELDS).lean();
-        if (!published(job.kind, doc) || job.createdAt < new Date(Date.now() - 86400000)) {
+        const doc = await sourceModel(job.kind).findById(job.sourceId).lean();
+        if (!published(job.kind, doc) || sourceKey(job.kind, doc) !== job.key || job.createdAt < new Date(Date.now() - 86400000)) {
             await Job.updateOne(claim, { $set: { status: 'done' } }); return;
         }
         const rows = await Member.find({ ...(job.cursor ? { _id: { $gt: job.cursor } } : {}),

@@ -37,9 +37,8 @@ router.get('/push/status', requireRole('super_admin'), asyncHandler(async(req, r
     res.json(ApiResponse.success(await require('./push.service').health()));
 }));
 router.post('/push/test', requireRole('super_admin'), asyncHandler(async(req, res) => {
-    if (!require('./push.service').isConfigured()) throw ApiError.badRequest('Firebase push is not configured yet.');
-    await notificationService.createNotification(req.user.userId, { title: 'ACTIV notification test', message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
-    res.json(ApiResponse.success({ queued: true }, 'Test queued for your signed-in devices.'));
+    const result = await require('./push.service').queueTest(req.user.userId);
+    res.json(ApiResponse.success(result, 'Test queued for your signed-in devices.'));
 }));
 
 /* ------------------------------------------------------------ the member's own */
