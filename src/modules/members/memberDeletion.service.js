@@ -86,7 +86,16 @@ async function purgeMember(id, actor = {}) {
     await drop('NotificationLog', { $or: [{ 'data.memberId': owner }, { 'data.userId': owner }, { 'data.member._id': owner }] });
     await drop('PaymentOrder', { memberId: owner, orderType: { $in: ['membership', 'company_listing', null] } });
     // Event, booking and donation history keep their existing behavior.
-    if (member.deletionAuthId) await drop('MemberAuth', { _id: new mongoose.Types.ObjectId(String(member.deletionAuthId)) });
+    if (member.deletionAuthId) {
+        const authId = new mongoose.Types.ObjectId(String(member.deletionAuthId));
+        const identities = await collection('OAuthIdentity').find({ authId }, { projection: { provider: 1, subject: 1 } }).toArray();
+        // Keep the captured credential ID, never a live email lookup. Expire
+        // pending sign-ins before removing their links so a partial purge can
+        // retry safely and old callbacks cannot recreate this deleted account.
+        if (identities.length) await drop('OAuthFlow', { $or: identities.map(row => ({ provider: row.provider, subject: row.subject })) });
+        await drop('OAuthIdentity', { authId });
+        await drop('MemberAuth', { _id: authId });
+    }
     removed.MemberDetails = (await Member.collection.deleteOne({ _id, role: memberRoles })).deletedCount;
     await invalidateMemberContext(String(_id));
     await cache.del(CACHE_KEYS.USER(String(_id)));

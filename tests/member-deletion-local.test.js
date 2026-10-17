@@ -36,10 +36,13 @@ let mongo;
     const tokens = auth.generateTokens(member);
     await Member.updateOne({ _id: id }, { $set: { membershipNumber: 'ACTIV-STU-20261013-001' } });
     const credential = await Auth.findOne({ email: input.email });
+    const oauth = require('../src/modules/auth/oauthAccount.service');
     const companyId = new mongoose.Types.ObjectId();
     const conversationId = new mongoose.Types.ObjectId();
     const unrelatedId = new mongoose.Types.ObjectId();
     const fixtures = {
+        OAuthIdentity: { provider: 'google', subject: 'deleted-google-subject', authId: credential._id },
+        OAuthFlow: { provider: 'google', subject: 'deleted-google-subject', expiresAt: new Date(Date.now() + 600000) },
         Application: { userId: member._id },
         PersonalInfo1: { userId: String(credential._id) },
         MemberDeclaration: { memberId: id },
@@ -65,6 +68,7 @@ let mongo;
     }
     await raw('PaymentOrder').insertOne({ memberId: id, orderType: 'event_booking', testMarker: 'event-payment' });
     await raw('EventBooking').insertOne({ memberId: id, testMarker: 'keep-event' });
+    const pendingSocial = await oauth.create('google', { subject: 'deleted-google-subject', email: input.email, verified: true, name: 'Deletion fixture' });
     const middleware = (handler, token) => new Promise((resolve, reject) => {
         const req = { headers: { authorization: `Bearer ${token}` } };
         handler(req, {}, error => error ? reject(error) : resolve(req));
@@ -74,6 +78,7 @@ let mongo;
     await Promise.all([deletion.remove(id, actor), deletion.remove(id, actor)]);
     assert.equal(await Member.findById(id), null);
     assert.equal(await Auth.findOne({ email: input.email }), null);
+    await assert.rejects(oauth.exchange(pendingSocial), /expired|unavailable/);
     assert.equal(await cache.get(CACHE_KEYS.USER(id)), null);
     await assert.rejects(auth.login(input.email, input.password), e => e.statusCode === 401);
     await assert.rejects(auth.refreshToken(tokens.refreshToken), e => e.statusCode === 401);
@@ -97,10 +102,40 @@ let mongo;
         { _id: new mongoose.Types.ObjectId(String(next.user.id)) }, 'ACTIV-STU-20261013-001'
     ), e => e.statusCode === 409);
     await auth.login(input.email, 'New-password-123!');
+    const freshSocial = await oauth.create('google', { subject: 'deleted-google-subject', email: input.email, verified: true, name: 'Deletion fixture' });
+    assert.equal(String((await oauth.exchange(freshSocial)).user.id), String(next.user.id), 'deleted subject can link to the newly created account');
     await assert.rejects(auth.login(input.email, input.password), e => e.statusCode === 401);
     await deletion.remove(id, actor); // A repeated old delete cannot erase the new login.
     await auth.login(input.email, 'New-password-123!');
+    assert.equal(await raw('OAuthIdentity').countDocuments({ provider: 'google', subject: 'deleted-google-subject' }), 1, 'old deletion never deletes a fresh social association');
     await assert.rejects(middleware(verifyToken, tokens.accessToken), e => e.statusCode === 401);
+    // A linked flow can already be consumed when deletion removes its identity.
+    // It must not fall back to provisioning from the old provider email.
+    const raceEmail = 'social-delete-race@example.test';
+    const race = await auth.register({ ...input, email: raceEmail, phoneNumber: '9456780123' });
+    const raceCredential = await Auth.findOne({ email: raceEmail });
+    const Identity = require('../src/modules/auth/oauthIdentity.model');
+    await Identity.create({ provider: 'google', subject: 'delete-during-exchange', authId: raceCredential._id });
+    const raceFlow = await oauth.create('google', { subject: 'delete-during-exchange', email: raceEmail, verified: true });
+    const originalFindOne = Identity.findOne;
+    let lookups = 0;
+    Identity.findOne = function (...args) {
+        const query = originalFindOne.apply(this, args);
+        if (args[0]?.subject === 'delete-during-exchange' && ++lookups === 2) {
+            const originalLean = query.lean;
+            query.lean = async function (...leanArgs) {
+                await deletion.remove(String(race.user.id), actor);
+                return originalLean.apply(this, leanArgs);
+            };
+        }
+        return query;
+    };
+    try {
+        await assert.rejects(oauth.exchange(raceFlow), /unavailable/);
+        assert.equal(await Member.findOne({ email: raceEmail }), null, 'in-flight callback cannot recreate deleted profile');
+        assert.equal(await Auth.findOne({ email: raceEmail }), null, 'in-flight callback cannot recreate deleted credential');
+        assert.equal(await Identity.countDocuments({ subject: 'delete-during-exchange' }), 0);
+    } finally { Identity.findOne = originalFindOne; }
     // Accounts archived by previous releases also free their email safely.
     const old = await auth.register({ ...input, email: 'legacy-delete@example.test', phoneNumber: '9234567801' });
     await Member.updateOne({ _id: old.user.id }, { $set: { deletedAt: new Date(), isActive: false } });

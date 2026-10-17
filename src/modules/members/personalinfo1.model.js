@@ -11,28 +11,28 @@ const personalInfo1Schema = new mongoose.Schema({
     },
     name: {
         type: String,
-        required: true,
+        required: function requiredForCompletedRegistration() { return this.registrationIncomplete !== true; },
         trim: true
     },
     phoneNumber: {
         type: String,
-        required: true,
+        required: function requiredForCompletedRegistration() { return this.registrationIncomplete !== true; },
         trim: true
     },
     state: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredUnlessInternational() { return this.registrationIncomplete !== true && this.isInternational !== true; },
         trim: true
     },
     district: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredUnlessInternational() { return this.registrationIncomplete !== true && this.isInternational !== true; },
         trim: true
     },
     block: {
         type: String,
         required: function requiredForDevelopmentDistrict() {
-            return this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
+            return this.registrationIncomplete !== true && this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
         },
         trim: true
     },
@@ -80,6 +80,7 @@ const personalInfo1Schema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    registrationIncomplete: { type: Boolean, default: false },
     createdAt: {
         type: Date,
         default: Date.now

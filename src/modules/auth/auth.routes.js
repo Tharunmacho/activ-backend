@@ -112,11 +112,18 @@ router.get('/oauth/:provider/callback', authLimiter, async(req, res) => {
 
 router.post('/oauth/exchange', authLimiter, async(req, res, next) => {
     try {
-        const result = await oauthService.exchange(req.body && req.body.code);
-        res.json({ success: true, message: 'Login successful', data: result });
+        const result = await oauthService.exchange(req.body && req.body.code, req.body || {});
+        res.set('Cache-Control', 'no-store').json({ success: true, message: result.requiresEmailVerification ? 'Verify your email to continue' : 'Login successful', data: result });
     } catch (err) {
         next(err);
     }
+});
+
+router.post('/oauth/verify-email', authLimiter, async(req, res, next) => {
+    try {
+        const result = await oauthService.requestEmail(req.body?.code, req.body?.email);
+        res.set('Cache-Control', 'no-store').json({ success: true, data: result });
+    } catch (error) { next(error); }
 });
 
 // Protected routes

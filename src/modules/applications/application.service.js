@@ -7,6 +7,7 @@ const { PERSONAL_FIELDS, personalFrom, assertCompletePersonal } = require('../me
 const BusinessInfo = require('../members/businessinfo.model');
 const MemberFinancialInfo = require('../members/memberfinancialinfo.model');
 const MemberDeclaration = require('../members/memberdeclaration.model');
+const { completeSections } = require('./applicationCompleteness');
 const { internationalFromPhone } = require('../common/phoneNumber');
 const ApiError = require('../../core/utils/ApiError');
 const cacheClient = require('../../core/cache/cacheClient');
@@ -66,8 +67,53 @@ const ROLE_TO_TIER = {
     state_admin: 'state',
     super_admin: 'super'
 };
+const requiredSnapshot = data => JSON.stringify([
+    PERSONAL_FIELDS.map(key => (data?.personalDetails || data?.personal || {})[key] || ''),
+    ['doingBusiness', 'registrationType', 'businessCommencementYear'].map(key => data?.businessInfo?.[key] ?? ''),
+    ['agreeToDeclaration', 'sisterConcerns', 'companyNames'].map(key => data?.declaration?.[key] ?? ''),
+]);
 
 class ApplicationService {
+    guardReviewRevision(application) {
+        application.$where = { status: application.status, updatedAt: application.updatedAt };
+    }
+
+    async assertReviewRevision(application, session = null) {
+        const exists = await Application.exists({ _id: application._id, ...application.$where }).session(session);
+        if (!exists) throw ApiError.conflict('This application changed during review. Refresh and review the latest submitted answers.');
+    }
+
+    async saveReviewedApplication(application, options) {
+        try { await application.save(options); }
+        catch (error) {
+            if (error.name === 'DocumentNotFoundError' || error.name === 'VersionError') {
+                throw ApiError.conflict('This application changed during review. Refresh and review the latest submitted answers.');
+            }
+            throw error;
+        }
+    }
+
+    async rollbackProfileWrites(writes) {
+        // Standalone Mongo cannot roll back a transaction. Undo only values
+        // written by this attempt; never delete an existing member, and never
+        // overwrite another request's later contact/profile edit.
+        for (const { doc, before, written } of writes.reverse()) {
+            const Model = doc.constructor;
+            if (!before) {
+                await Model.deleteOne({ _id: doc._id, updatedAt: written.updatedAt, __v: written.__v });
+                continue;
+            }
+            const operations = [];
+            for (const key of new Set([...Object.keys(before), ...Object.keys(written)])) {
+                if (['_id', '__v', 'createdAt', 'updatedAt'].includes(key)
+                    || JSON.stringify(before[key]) === JSON.stringify(written[key])) continue;
+                const filter = { _id: doc._id, [key]: written[key] === undefined ? { $exists: false } : written[key] };
+                const update = before[key] === undefined ? { $unset: { [key]: '' } } : { $set: { [key]: before[key] } };
+                operations.push({ updateOne: { filter, update } });
+            }
+            if (operations.length) await Model.bulkWrite(operations, { ordered: false });
+        }
+    }
     /**
      * Record one activity, without ever failing the caller.
      *
@@ -119,45 +165,16 @@ class ApplicationService {
         const storedAbroad = userDetails?.isInternational === true
             || internationalFromPhone(userDetails?.phoneNumber || userDetails?.phone).international;
         const personal = assertCompletePersonal(personalInput, { international: storedAbroad });
-        if (existingApplication) {
-            // The pending lookup is scoped to this authenticated owner. A retry
-            // can repair their old snapshot using the complete answers just
-            // validated, without requiring a separate profile-save request.
-            existingApplication.data = {
-                ...(existingApplication.data || {}),
-                personalDetails: {
-                    ...(existingApplication.data?.personalDetails || existingApplication.data?.personal || {}),
-                    ...submittedPersonal, ...personal, phone: personal.phoneNumber,
-                },
-            };
-            await this.completeApplicationPersonal(existingApplication);
-            await existingApplication.save();
-            await this.invalidateReviewCaches(existingApplication);
-            return existingApplication;
+        const [storedBusiness, storedDeclaration] = await Promise.all([
+            BusinessInfo.findOne({ userId }).lean(),
+            MemberDeclaration.findOne({ $or: [{ userId }, { memberId: userId }] }).lean(),
+        ]);
+        const sections = completeSections(appData, storedBusiness, storedDeclaration, applicationData);
+        const kind = sections.businessInfo.registrationType;
+        const derivedRole = kind;
+        if (!existingApplication && await Application.exists({ userId, status: 'Approved' })) {
+            throw ApiError.conflict('Your application is already approved. Update your profile from your dashboard.');
         }
-        const bizInfo = appData.businessInfo || {};
-        const declares = (value) => [
-            appData.registrationType, appData.memberType,
-            applicationData.registrationType, applicationData.memberType
-        ].some((v) => String(v || '').toLowerCase() === value);
-
-        /*
-         * A STUDENT is the second non-business kind, with its own fee. Named by
-         * the client, or already recorded on the member's own business record
-         * (the Business step writes it there) — so a client that only sends
-         * "aspirant" cannot turn a declared student back into one.
-         */
-        const storedBusiness = await BusinessInfo.findOne({ userId }).lean().catch(() => null);
-        const isStudent = declares('student')
-            || (bizInfo.doingBusiness === false && String(bizInfo.registrationType || '').toLowerCase() === 'student')
-            || (!!storedBusiness && storedBusiness.doingBusiness === false && storedBusiness.registrationType === 'student'
-                && bizInfo.doingBusiness !== true && !declares('business'));
-        const isAspirant = !isStudent && (
-            bizInfo.doingBusiness === false ||
-            declares('aspirant'));
-        const kind = isStudent ? 'student' : (isAspirant ? 'aspirant' : 'business');
-
-        const derivedRole = isStudent ? 'student' : (isAspirant ? 'aspirant' : (bizInfo.doingBusiness ? 'business' : 'member'));
 
         const payload = {
             fullName: applicationData.fullName || (userDetails && (userDetails.fullName || userDetails.name)) || 'Applicant',
@@ -174,7 +191,7 @@ class ApplicationService {
             block: applicationData.block || (userDetails && userDetails.block) || '',
             data: appData,
             role: derivedRole,
-            ...applicationData,
+            applicationType: applicationData.applicationType || 'membership',
             fullName: personal.fullName,
             email: personal.email,
             phone: personal.phoneNumber,
@@ -182,7 +199,7 @@ class ApplicationService {
             district: personal.district || '',
             block: personal.block || '',
             place: personal.place || '',
-            data: { ...appData, personalDetails: { ...submittedPersonal, ...personal, phone: personal.phoneNumber } },
+            data: { ...appData, ...sections, personalDetails: { ...submittedPersonal, ...personal, phone: personal.phoneNumber } },
             // After the spread: the derived kind wins over a client's older label.
             memberType: kind,
             registrationType: kind
@@ -257,15 +274,51 @@ class ApplicationService {
             isInternational: payload.isInternational, place: payload.place || '',
         });
 
+        if (existingApplication) {
+            // A retry is a fresh, complete submission by the same owner. Keep
+            // optional saved sections, but never carry a stale required answer
+            // over an explicit blank. Routing is validated above on retries too.
+            const nextData = { ...existingApplication.data, ...payload.data };
+            const changed = requiredSnapshot(existingApplication.data) !== requiredSnapshot(nextData);
+            // An admin may decide while the applicant is editing. Do not replace
+            // a newly decided file, or a more recent retry, with stale answers.
+            existingApplication.$where = { status: { $in: PENDING_STORED_STATUSES }, updatedAt: existingApplication.updatedAt };
+            existingApplication.set({ fullName: payload.fullName, email: payload.email, phone: payload.phone,
+                state: payload.state, district: payload.district, block: payload.block, place: payload.place,
+                isInternational: payload.isInternational, country: payload.country,
+                memberType: kind, registrationType: kind, data: nextData });
+            if (changed) {
+                // Prior endorsements described different answers. Retain the
+                // audit trail while requiring reviewers to review this revision.
+                const reviewFields = ['reviews', 'reviewedBy', 'approvedBy', 'rejectedBy', 'blockApprovedAt', 'districtApprovedAt', 'stateApprovedAt', 'rejectionReason'];
+                const priorReview = Object.fromEntries(reviewFields.map(key => [key, existingApplication.get(key)]));
+                existingApplication.notes.push({ adminId: userId, adminType: 'Member',
+                    note: `Application answers resubmitted. Previous review record: ${JSON.stringify(priorReview)}` });
+                for (const key of reviewFields) if (key !== 'reviews') existingApplication.set(key, undefined);
+                existingApplication.reviewedBy = {};
+                existingApplication.reviews = { block: { decision: 'pending' }, district: { decision: 'pending' }, state: { decision: 'pending' } };
+            }
+            try { await existingApplication.save(); }
+            catch (error) {
+                if (error.name === 'DocumentNotFoundError' || error.name === 'VersionError') throw ApiError.conflict('Your application changed during submission. Refresh its status before trying again.');
+                throw error;
+            }
+            if (changed) await this.logActivity(userId, 'application_resubmitted', 'Application', existingApplication._id, 'Membership application answers resubmitted for review');
+            await this.clearRegistrationDraft(userId, personal, payload);
+            await this.invalidateReviewCaches(existingApplication);
+            return existingApplication;
+        }
+
         const application = new Application({
-            userId: userId,
             ...payload,
+            userId: userId,
             // One pending state. Every admin in the applicant's own region —
             // block, district and state — sees it from this moment.
             status: 'Pending'
         });
 
         await application.save();
+        await this.clearRegistrationDraft(userId, personal, payload);
 
         await this.logActivity(userId, 'application_submitted', 'Application', application._id,
             'Membership application submitted');
@@ -356,6 +409,21 @@ class ApplicationService {
         });
 
         return application;
+    }
+
+    async clearRegistrationDraft(userId, personal, payload) {
+        // Only this validated final-submit path can end an initial account
+        // draft. A raw profile PATCH cannot opt out of required schema fields.
+        const fields = { ...personal, registrationIncomplete: false, profileCompleted: true,
+            state: payload.state, district: payload.district, block: payload.block,
+            isInternational: payload.isInternational, country: payload.country || '', place: payload.place || '' };
+        const [member, savedPersonal] = await Promise.all([
+            MemberDetails.findOne({ _id: userId, registrationIncomplete: true }),
+            PersonalInfo1.findOne({ userId, registrationIncomplete: true }),
+        ]);
+        if (member) { member.set(fields); await member.save(); }
+        if (savedPersonal) { savedPersonal.set({ ...fields, name: personal.fullName, isLocked: true }); await savedPersonal.save(); }
+        require('../common/memberContext').invalidateMemberContext(userId);
     }
 
     /**
@@ -475,16 +543,19 @@ class ApplicationService {
     }
 
     async completeApplicationPersonal(application) {
-        const ownerId = application.userId?._id || application.userId;
-        const member = ownerId ? await MemberDetails.findOne({ $or: [{ _id: ownerId }, { userId: ownerId }] }).lean() : null;
-        const saved = member ? await PersonalInfo1.findOne({ userId: member._id }).lean() : null;
         const snapshot = application.data?.personalDetails || application.data?.personal || {};
-        // Approval must never fill demographics from an unrelated row sharing
-        // the application's display email. Only its stored owner can supply gaps.
-        const personal = assertCompletePersonal(personalFrom(member, saved, application, snapshot), {
+        // Approval validates what was submitted, never later profile edits or
+        // another account sharing an email. A legacy gap requires resubmission.
+        const personalInput = personalFrom(application, snapshot);
+        for (const key of PERSONAL_FIELDS) if (Object.hasOwn(snapshot, key)) personalInput[key] = snapshot[key];
+        const personal = assertCompletePersonal(personalInput, {
             international: application.isInternational === true || internationalFromPhone(application.phone).international,
         });
-        application.data = { ...(application.data || {}), personalDetails: { ...snapshot, ...personal, phone: personal.phoneNumber } };
+        // Saved profile edits alone are not an application submission. Business
+        // answers and consent must be present in the submitted snapshot; a
+        // legacy incomplete application must be resubmitted by its owner.
+        const sections = completeSections(application.data || {}, {}, {}, application);
+        application.data = { ...(application.data || {}), ...sections, personalDetails: { ...snapshot, ...personal, phone: personal.phoneNumber } };
         application.markModified('data');
         return personal;
     }
@@ -596,6 +667,7 @@ class ApplicationService {
         if (!application) {
             throw ApiError.notFound('Application not found');
         }
+        this.guardReviewRevision(application);
 
         const current = normalizeStatus(application.status);
         const allowed = ALLOWED_TRANSITIONS[current] || [];
@@ -632,7 +704,7 @@ class ApplicationService {
             };
         }
 
-        await application.save();
+        await this.saveReviewedApplication(application);
         await cacheClient.del(CACHE_KEYS.APPLICATION(id));
         await cacheClient.del(CACHE_KEYS.APPLICATION_USER(application.userId));
         // Every tier dashboard is a cached, region-scoped view of exactly this
@@ -774,6 +846,7 @@ class ApplicationService {
         if (!application) {
             throw ApiError.notFound('Application not found');
         }
+        this.guardReviewRevision(application);
 
         if (user) await this.assertWithinScope(application, tier, user);
         this.assertTierDecidable(application, tier);
@@ -864,7 +937,7 @@ class ApplicationService {
          * changed.
          */
         if (!writesOutcome) {
-            await application.save();
+            await this.saveReviewedApplication(application);
 
             logger.info('Tier verdict recorded', { applicationId, adminId, tier, action });
 
@@ -982,7 +1055,7 @@ class ApplicationService {
             rejectedAt: new Date()
         };
 
-        await application.save();
+        await this.saveReviewedApplication(application);
 
         logger.info('Application rejected', { applicationId, adminId, tier, reason: rejectionReason });
 
@@ -1033,6 +1106,7 @@ class ApplicationService {
      * still avoids leaving an orphaned member row behind.
      */
     async commitFinalApproval(application, adminId, tier = 'state') {
+        if (!application.$where) this.guardReviewRevision(application);
         /*
          * WHO SIGNED IT, recorded once and honestly.
          *
@@ -1076,16 +1150,17 @@ class ApplicationService {
 
         const session = await mongoose.startSession();
         try {
-            let profile = null;
-
-            await session.withTransaction(async() => {
-                profile = await this.createMemberProfile(application, adminId, session);
-                markApproved();
-                await application.save({ session });
-            });
-
+            // Do not automatically replay writes against an old document after
+            // a transaction conflict. The reviewer must inspect the new revision.
+            session.startTransaction();
+            await this.assertReviewRevision(application, session);
+            const profile = await this.createMemberProfile(application, adminId, session);
+            markApproved();
+            await this.saveReviewedApplication(application, { session });
+            await session.commitTransaction();
             return profile;
         } catch (error) {
+            if (session.inTransaction()) await session.abortTransaction().catch(() => null);
             const unsupported = /Transaction numbers are only allowed|replica set|Transactions are not supported/i
                 .test(error.message || '');
 
@@ -1095,16 +1170,13 @@ class ApplicationService {
 
             const created = [];
             try {
+                await this.assertReviewRevision(application);
                 const profile = await this.createMemberProfile(application, adminId, null, created);
                 markApproved();
-                await application.save();
+                await this.saveReviewedApplication(application);
                 return profile;
             } catch (innerError) {
-                // Undo whatever landed so a retry is not blocked by a half-written
-                // profile (the unique email index would reject it forever).
-                for (const doc of created.reverse()) {
-                    await doc.deleteOne().catch(() => null);
-                }
+                await this.rollbackProfileWrites(created);
                 throw innerError;
             }
         } finally {
@@ -1125,15 +1197,16 @@ class ApplicationService {
         const personalDetails = { ...suppliedPersonal, ...assertCompletePersonal(personalFrom(application, suppliedPersonal), {
             international: application.isInternational === true || internationalFromPhone(application.phone).international,
         }) };
-        const businessInfo = formData.businessInfo || formData.business || formData;
+        const sections = completeSections(formData, {}, {}, application);
+        const businessInfo = sections.businessInfo;
         const financialInfo = formData.financialInfo || formData.financial || formData;
-        const declarationData = formData.declaration || formData;
+        const declarationData = sections.declaration;
 
         // Single save path so every document joins the transaction (or gets
         // tracked for rollback) without repeating the plumbing four times.
-        const saveDoc = async(doc) => {
+        const saveDoc = async(doc, before = null) => {
             await doc.save(session ? { session } : undefined);
-            if (track) track.push(doc);
+            if (track) track.push({ doc, before, written: doc.toObject({ depopulate: true }) });
             return doc;
         };
 
@@ -1168,6 +1241,7 @@ class ApplicationService {
                 socialCategory: personalDetails.socialCategory,
                 gender: personalDetails.gender,
                 profileCompleted: true,
+                registrationIncomplete: false,
                 approvedBy: approvedByAdminId,
                 approvedBlock: application.block,
                 approvedAt: new Date(),
@@ -1183,16 +1257,21 @@ class ApplicationService {
 
             const existingQuery = {
                 $or: [
+                    { _id: application.userId },
                     { userId: application.userId },
-                    ...(application.email ? [{ email: String(application.email).toLowerCase() }] : [])
                 ]
             };
 
             let memberDetails = await MemberDetails.findOne(existingQuery).session(session || null);
 
             if (memberDetails) {
+                const before = memberDetails.toObject({ depopulate: true });
+                // Approval must not roll back a later credential/contact edit,
+                // or disconnect this profile from its current login email.
+                memberFields.email = memberDetails.email;
+                memberFields.phoneNumber = memberDetails.phoneNumber || application.phone;
                 memberDetails.set(memberFields);
-                await saveDoc(memberDetails);
+                await saveDoc(memberDetails, before);
             } else {
                 memberDetails = new MemberDetails(memberFields);
                 await saveDoc(memberDetails);
@@ -1205,8 +1284,9 @@ class ApplicationService {
             const upsert = async(Model, query, fields) => {
                 const existing = await Model.findOne(query).session(session || null);
                 if (existing) {
+                    const before = existing.toObject({ depopulate: true });
                     existing.set(fields);
-                    return saveDoc(existing);
+                    return saveDoc(existing, before);
                 }
                 return saveDoc(new Model(fields));
             };

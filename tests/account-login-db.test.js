@@ -72,7 +72,9 @@ async function main() {
   await auth.login('updated@example.test', 'Office-reset-2026');
   passed('existing account selection is explicit and office password reset works');
   await assert.rejects(lifetime.updateAccount(id, { password: 'Forbidden-test-2026' }, { role: 'member' }), e => e.statusCode === 403);
-  await lifetime.grant(id, { amount: 200000, paymentMode: 'cash', manualAdmission: true, note: 'Isolated integration office admission', receivedOn: new Date().toISOString().slice(0, 10) }, actor);
+  await assert.rejects(lifetime.grant(id, { amount: 200000, paymentMode: 'cash', manualAdmission: true, note: 'Office receipt cannot replace submission' }, actor), /submit their application/);
+  await Application.create(require('./fixtures/membershipApplication')(await Member.findById(id)));
+  await lifetime.grant(id, { amount: 200000, paymentMode: 'cash', note: 'Isolated integration office payment after completed application approval', receivedOn: new Date().toISOString().slice(0, 10) }, actor);
   const paid = await auth.login('updated@example.test', 'Office-reset-2026');
   assert.equal(paid.memberDetails.membershipTier, 'platinum');
   assert.equal(paid.memberDetails.membershipType, 'lifetime');

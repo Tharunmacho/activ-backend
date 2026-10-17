@@ -17,6 +17,7 @@ const bcrypt = require('bcrypt');
 const { internationalFromPhone, validateMobile } = require('../common/phoneNumber');
 const { ALL_SOCIAL_CATEGORIES, GENDERS } = require('./demographicOptions');
 const { PERSONAL_FIELDS, personalFrom, normalizePersonal, missingPersonalFields, assertCompletePersonal } = require('./personalDetails');
+const { completeBusiness, normalizeDeclaration } = require('../applications/applicationCompleteness');
 
 /**
  * The short names every client actually sends, mapped to the schema's names.
@@ -98,6 +99,8 @@ const updateMember = asyncHandler(async(req, res) => {
 
     // Before anything reads the body: see `FIELD_ALIASES` above.
     const profileData = normalizeProfileAliases(rawProfileData);
+    // Account drafts and approval state are controlled only by the server.
+    delete profileData.registrationIncomplete;
     // The website profile editor still posts name/phone. Preserve explicit
     // empty canonical values so an alias cannot hide an attempted erasure.
     if (!Object.hasOwn(profileData, 'fullName') && Object.hasOwn(profileData, 'name')) profileData.fullName = profileData.name;
@@ -134,7 +137,10 @@ const updateMember = asyncHandler(async(req, res) => {
      * gives a free-text place instead. The flag comes from the stored record
      * or the stored number, never from this request.
      */
-    const abroad = member.isInternational === true
+    const firstPhone = !member.phoneNumber && profileData.phoneNumber !== undefined
+        ? validateMobile(profileData.phoneNumber) : null;
+    if (firstPhone && !firstPhone.ok) throw require('../../core/utils/ApiError').badRequest(firstPhone.reason);
+    const abroad = firstPhone?.ok ? internationalFromPhone(firstPhone.stored) : member.isInternational === true
         ? { international: true, country: member.country || '' }
         : internationalFromPhone(member.phoneNumber);
     if (abroad.international) {
@@ -165,9 +171,26 @@ const updateMember = asyncHandler(async(req, res) => {
         profileData.socialCategory = normalizedPersonal.socialCategory;
         profileData.gender = normalizedPersonal.gender;
     }
-    
-    // Store original email before any updates (needed for finding auth record)
-    const originalEmail = member.email;
+
+    // Validate the section before writing personal/contact records. Missing
+    // optional company/financial fields are not membership requirements.
+    const editsBusiness = ['doingBusiness', 'registrationType', 'memberType', 'businessCommencementYear'].some(key => Object.hasOwn(profileData, key));
+    const editsDeclaration = ['sisterConcerns', 'companyNames', 'agreeToDeclaration'].some(key => Object.hasOwn(profileData, key));
+    if (editsBusiness || editsDeclaration) {
+        const savedBusiness = await BusinessInfo.findOne({ userId: req.user.userId }).lean();
+        if (editsBusiness) {
+            const business = completeBusiness({ ...savedBusiness, ...profileData });
+            Object.assign(profileData, { doingBusiness: business.doingBusiness, registrationType: business.registrationType,
+                businessCommencementYear: business.businessCommencementYear });
+        }
+        if (editsDeclaration) {
+            const savedDeclaration = await MemberDeclaration.findOne({ $or: [{ userId: req.user.userId }, { memberId: req.user.userId }] }).lean();
+            Object.assign(profileData, normalizeDeclaration({ ...savedDeclaration, ...profileData }, {
+                business: (editsBusiness ? profileData.doingBusiness : savedBusiness?.doingBusiness) !== false,
+                requireAgreement: false,
+            }));
+        }
+    }
     
     // Keep the profile and login email/password together, validate both contact
     // numbers before any profile writes, and reject incomplete password edits.
@@ -251,6 +274,7 @@ const updateMember = asyncHandler(async(req, res) => {
             socialCategory: profileData.socialCategory || personalInfo.socialCategory,
             gender: safeGender !== undefined ? safeGender : personalInfo.gender,
             isLocked: personalComplete,
+            registrationIncomplete: member.registrationIncomplete === true,
             updatedAt: new Date()
         });
     } else {
@@ -269,7 +293,8 @@ const updateMember = asyncHandler(async(req, res) => {
             religion: profileData.religion || personalFallback.religion,
             socialCategory: profileData.socialCategory || personalFallback.socialCategory,
             gender: safeGender !== undefined ? safeGender : personalFallback.gender,
-            isLocked: personalComplete
+            isLocked: personalComplete,
+            registrationIncomplete: member.registrationIncomplete === true
         });
     }
     
@@ -334,61 +359,8 @@ const updateMember = asyncHandler(async(req, res) => {
         await member.save();
     }
 
-    /*
-     * THE APPLICATION MIRROR IS BEST EFFORT, SO IT NO LONGER HOLDS THE REPLY.
-     *
-     * This copies the member's name, email, phone and region onto their
-     * Application rows so the admin queues show current details. It has
-     * always been wrapped in a `try` that swallows its own failure — which
-     * says plainly that the save is not considered to depend on it — and yet
-     * the member waited for it before their own screen came back.
-     *
-     * `void (async () => …)()` runs it after this handler has replied. A
-     * failure is logged rather than silently dropped, which is a change: it
-     * was invisible before.
-     *
-     * THE FILTER IS DEDUPED. It listed `email` twice (the current one and the
-     * original, identical whenever the email did not change) and could carry
-     * empty strings, and an `$or` branch that matches nothing still has to be
-     * planned. Only the predicates that can actually match are sent.
-     */
-    void (async () => {
-      try {
-        const Application = require('../applications/application.model');
-        const searchEmail = (member.email || originalEmail || '').toLowerCase();
-        const emails = [...new Set([searchEmail, String(originalEmail || '').toLowerCase()])]
-            .filter(Boolean);
-        const or = [{ userId: req.user.userId }, ...emails.map((value) => ({ email: value }))];
-        await Application.updateMany(
-            { $or: or },
-            {
-                $set: {
-                    ...(profileData.fullName ? { fullName: profileData.fullName } : {}),
-                    ...(member.email ? { email: member.email } : {}),
-                    ...(profileData.phoneNumber ? { phone: profileData.phoneNumber } : {}),
-                    ...(profileData.block ? { block: profileData.block } : {}),
-                    ...(profileData.district ? { district: profileData.district } : {}),
-                    ...(profileData.state ? { state: profileData.state } : {}),
-                    'data.personalDetails.fullName': profileData.fullName || member.fullName,
-                    'data.personalDetails.email': member.email || searchEmail,
-                    'data.personalDetails.phone': profileData.phoneNumber || member.phoneNumber,
-                    'data.personalDetails.phoneNumber': profileData.phoneNumber || member.phoneNumber,
-                    'data.personalDetails.block': profileData.block || member.block,
-                    'data.personalDetails.district': profileData.district || member.district,
-                    'data.personalDetails.state': profileData.state || member.state,
-                    'data.personalDetails.city': profileData.city || member.city,
-                    'data.personalDetails.religion': profileData.religion || member.religion,
-                    'data.personalDetails.socialCategory': profileData.socialCategory || member.socialCategory,
-                    'data.personalDetails.gender': safeGender || member.gender || ''
-                }
-            }
-        );
-      } catch (syncErr) {
-        // Logged, not swallowed: the mirror going stale is a real fault, it
-        // is just not one the member should wait for.
-        console.error('Error syncing member updates to Application collection:', syncErr);
-      }
-    })();
+    // Saved profile changes stay drafts until the applicant submits again.
+    // Application snapshots and prior reviewer decisions must remain coherent.
 
     /**
      * One answer, not two.
@@ -485,7 +457,7 @@ const updateMember = asyncHandler(async(req, res) => {
                 constitutionType: profileData.constitutionType || businessInfo.constitutionType,
                 businessTypes: profileData.businessTypes || businessInfo.businessTypes,
                 businessActivities: profileData.businessActivities || businessInfo.businessActivities,
-                businessCommencementYear: profileData.businessCommencementYear || businessInfo.businessCommencementYear,
+                businessCommencementYear: profileData.businessCommencementYear ?? businessInfo.businessCommencementYear,
                 numberOfEmployees: profileData.numberOfEmployees || businessInfo.numberOfEmployees,
                 memberOfOtherChamber: profileData.memberOfOtherChamber !== undefined ? profileData.memberOfOtherChamber : businessInfo.memberOfOtherChamber,
                 otherChamber: profileData.otherChamber || businessInfo.otherChamber,

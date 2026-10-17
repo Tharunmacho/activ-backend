@@ -9,6 +9,7 @@ const plans = require('../src/modules/members/membershipplan.service');
 const appsService = require('../src/modules/applications/application.service');
 const paymentService = require('../src/modules/payment/payment.service');
 const service = require('../src/modules/admin/adminMembershipDashboard.service');
+const submittedApplication = require('./fixtures/membershipApplication');
 const members = [], apps = [], orders = [], notices = [], reviews = [];
 const actor = { role: 'super_admin', userId: new mongoose.Types.ObjectId().toString(), email: 'office@example.test' };
 const clone = x => x == null ? x : structuredClone(x);
@@ -18,6 +19,7 @@ const matches = (row, f) => Object.entries(f).every(([k, v]) => {
     if (v instanceof Date) return +row[k] === +v;
     if (v && typeof v === 'object') {
         if ('$nin' in v) return !v.$nin.includes(row[k]);
+        if ('$in' in v) return v.$in.map(String).includes(String(row[k]));
         if ('$ne' in v) return row[k] !== v.$ne;
         if ('$exists' in v) return (row[k] !== undefined) === v.$exists;
     }
@@ -43,6 +45,8 @@ Member.collection.updateOne = async (f, p) => {
 };
 require('../src/modules/auth/auth.model').findOne = () => query(null);
 Application.find = f => query(apps.filter(a => matches(a, f)).sort((a, b) => +b.updatedAt - +a.updatedAt));
+Application.findById = async id => { const row = apps.find(a => a._id === String(id)); return row ? new Application(row) : null; };
+require('../src/modules/members/personalinfo1.model').findOne = () => query(null);
 Order.find = f => query(orders.filter(o => matches(o, f)).sort((a, b) => +b.createdAt - +a.createdAt));
 Order.create = async o => { const receipt = { ...clone(o), _id: new mongoose.Types.ObjectId().toString(), createdAt: new Date() }; orders.push(receipt); return receipt; };
 Order.updateOne = async (f, p) => Object.assign(orders.find(o => matches(o, f)), p.$set);
@@ -59,7 +63,7 @@ const fixture = (status = 'Approved', overrides = {}) => {
     const _id = new mongoose.Types.ObjectId().toString();
     const m = { _id, fullName: 'Test Member', email: `${_id}@example.test`, phoneNumber: '9000000000', role: 'member', memberType: 'student', membershipStatus: 'pending', isActive: true, createdAt: new Date(), updatedAt: new Date(), ...overrides };
     members.push(m);
-    if (status) apps.push({ _id: new mongoose.Types.ObjectId().toString(), userId: _id, email: m.email, status, createdAt: new Date(), updatedAt: new Date() });
+    if (status) apps.push({ ...submittedApplication(m, { status }), _id: new mongoose.Types.ObjectId().toString() });
     return m;
 };
 const body = { planId: 'student', mode: 'waived', note: 'Office fee exemption approved.' };
@@ -70,6 +74,15 @@ async function main() {
     await assert.rejects(service.detail('invalid', actor), e => e.statusCode === 400);
     const unsubmitted = fixture(null);
     await assert.rejects(service.confirm(unsubmitted._id, body, actor), /submit their application/);
+    await assert.rejects(service.confirm(unsubmitted._id, { ...body, manualAdmission: true }, actor), /submit their application/);
+    const missingConsent = fixture('Pending');
+    delete apps.find(a => a.userId === missingConsent._id).data.declaration;
+    await assert.rejects(service.confirm(missingConsent._id, { ...body, manualAdmission: true }, actor), /declaration/i);
+    assert.equal(orders.length, 0, 'incomplete submissions never create a receipt');
+    assert.equal(reviews.length, 0, 'incomplete submissions are not approved');
+    const wrongOwner = fixture(null);
+    apps.push({ ...submittedApplication(wrongOwner), _id: new mongoose.Types.ObjectId().toString(), userId: new mongoose.Types.ObjectId().toString() });
+    await assert.rejects(service.confirm(wrongOwner._id, { ...body, manualAdmission: true }, actor), /submit their application/);
     const rejected = fixture('Rejected');
     await assert.rejects(service.confirm(rejected._id, body, actor), /Review the application/);
     const blocked = fixture('Approved', { isActive: false });
@@ -121,11 +134,12 @@ async function main() {
     assert.equal(dashboard.plans[0].id, 'student', 'UI submits the plan key, not the database ID');
     assert.equal(dashboard.plans.length, 1, 'Platinum uses its existing grant page');
     assert.equal(service.memberRow(unsubmitted, null, []).status, 'registered');
-    const office = await service.confirm(unsubmitted._id, { ...body, mode: 'cash', amount: 1000, manualAdmission: true, note: 'Identity and membership details verified at the office.' }, actor);
-    assert.equal(office.member.status, 'active');
-    assert.equal(office.member.applicationStatus, 'Not submitted', 'office admission must not fabricate application approval');
-    assert.equal(office.payments[0].manual.admission, true);
-    assert.equal(notices.filter(n => n.member._id === unsubmitted._id).length, 1);
+    await assert.rejects(service.confirm(unsubmitted._id, { ...body, mode: 'cash', amount: 1000, manualAdmission: true, note: 'Identity checked at the office.' }, actor), /submit their application/);
+    assert.equal(service.memberRow(unsubmitted, null, []).canConfirm, false);
+    assert.equal(notices.filter(n => n.member._id === unsubmitted._id).length, 0);
+    const legacyRenewal = fixture(null, { membershipStatus: 'expired', membershipType: 'annual', membershipExpiresAt: new Date(Date.now() - 86400000) });
+    await service.confirm(legacyRenewal._id, body, actor);
+    assert.equal(legacyRenewal.membershipStatus, 'active', 'an established member may renew without a new application');
     await assert.rejects(service.remove(offline._id, { role: 'state_admin' }), e => e.statusCode === 403);
     // The destructive database workflow is exercised against disposable Mongo
     // in member-deletion-local.test.js. Here verify delegation and fresh totals.
@@ -146,7 +160,7 @@ async function main() {
     await assert.rejects(service.detail(offline._id, actor), /Member not found/);
     const afterDelete = await service.overview(actor);
     assert.equal(afterDelete.rows.some(r => r.id === offline._id), false);
-    assert.equal(afterDelete.summary.collected, 1000, 'permanently removed membership payments leave current totals');
+    assert.equal(afterDelete.summary.collected, 0, 'permanently removed membership payments leave current totals');
     assert.equal(afterDelete.payments.some(p => p.memberId === offline._id), false);
     const authoritative = fixture('Approved');
     apps.push({ _id: new mongoose.Types.ObjectId().toString(), userId: authoritative._id, email: authoritative.email, status: 'Rejected', updatedAt: new Date(Date.now() + 1000) });

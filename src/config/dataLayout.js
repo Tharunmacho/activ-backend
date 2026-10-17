@@ -54,6 +54,8 @@ const MODELS = {
     //      member's own activity timeline
     MemberDetails: ['members', 'members', A, 'users'],
     MemberAuth: ['members', 'member_logins', A, 'auth'],
+    OAuthIdentity: ['members', 'oauth_identities', A, 'oauth_identities'],
+    OAuthFlow: ['members', 'oauth_flows', A, 'oauth_flows'],
     PersonalInfo1: ['members', 'member_personal_details', A, 'additional form for personal information 1'],
     MemberDeclaration: ['members', 'member_declarations', A, 'additional form for declaration 4'],
     Application: ['members', 'applications', A, 'applications'],

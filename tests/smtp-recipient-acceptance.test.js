@@ -80,6 +80,15 @@ async function check(name, fn) { await fn(); checks++; console.log(`PASS ${name}
         config.email.archiveMode = 'bcc';
     });
 
+    await check('private authentication codes are sent only to their intended recipient and never copied or logged', async () => {
+        smtpInfo = accepted;
+        const result = await mailer.send({ to: target, subject: 'Sign-in verification', text: 'Private code 123456', privateRecipientOnly: true,
+            log: { event: 'SOCIAL_EMAIL_VERIFICATION', data: { provider: 'facebook' } } });
+        assert.equal(result.sent, true);
+        assert.equal(sent.at(-1).to, target); assert.equal(sent.at(-1).cc, undefined); assert.equal(sent.at(-1).bcc, undefined);
+        assert(!JSON.stringify(recorded.at(-1)).includes('123456'));
+    });
+
     await check('partial/missing metadata is reviewable and is never marked accepted or automatically replayed', async () => {
         for (const [to, info, status] of [[target, noMetadata, 'unknown'],
             [`${target}, other@example.test`, { accepted: [target], rejected: ['other@example.test'] }, 'partial']]) {

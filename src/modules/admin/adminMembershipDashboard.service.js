@@ -12,13 +12,15 @@ const { membershipState, renewalFor, renewalBase } = require('../members/members
 const { invalidateMemberContext } = require('../common/memberContext');
 const { membershipNumberFor } = require('../members/memberNumber');
 const { displayPlanName } = require('../members/membershipLabels');
+const { ownerIds, existingMembership, validateInitialMembership } = require('../members/membershipAdmission');
 
 const MEMBER_FILTER = { deletedAt: null, role: { $nin: ['super_admin', 'state_admin', 'district_admin', 'block_admin', 'cms_admin', 'events_admin', 'admin'] } };
-const MEMBER_FIELDS = 'fullName email phoneNumber whatsappNumber role memberType registrationType state district block membershipNumber membershipStatus membershipType membershipTier membershipActivatedAt membershipExpiresAt paymentId paymentAmount lastPaymentDate isActive createdAt updatedAt';
+const MEMBER_FIELDS = 'userId fullName email phoneNumber whatsappNumber role memberType registrationType state district block membershipNumber membershipStatus membershipType membershipTier membershipActivatedAt membershipExpiresAt paymentId paymentAmount lastPaymentDate isActive createdAt updatedAt';
 const superOnly = (actor) => { if (actor?.role !== 'super_admin') throw ApiError.forbidden('Only the Super Admin can manage membership registrations.'); };
 const validId = (id) => { if (!mongoose.isValidObjectId(id)) throw ApiError.badRequest('Invalid member ID.'); };
 const appFor = (member, apps) => {
-    const own = apps.filter(a => String(a.userId) === String(member._id) || (a.email && a.email.toLowerCase() === member.email?.toLowerCase()));
+    const owners = ownerIds(member);
+    const own = apps.filter(a => owners.includes(String(a.userId?._id || a.userId || '')));
     // Match the existing directory: an approved application remains authoritative.
     return own.find(a => normalizeStatus(a.status) === 'Approved') || own[0];
 };
@@ -35,7 +37,7 @@ const memberRow = (m, app, orders = []) => {
     const paid = orders.filter(o => o.status === 'paid');
     const latest = paid[0];
     const blocked = m.isActive === false;
-    const canConfirm = !blocked && (!app || ['Pending', 'Approved'].includes(outcome))
+    const canConfirm = !blocked && (existingMembership(m) || (app && ['Pending', 'Approved'].includes(outcome)))
         && (state.state !== 'active' || renewalFor(m).canRenew);
     return {
         id: String(m._id), name: m.fullName || '', email: m.email || '', phone: m.phoneNumber || m.whatsappNumber || '',
@@ -47,8 +49,8 @@ const memberRow = (m, app, orders = []) => {
         activatedAt: m.membershipActivatedAt || null, expiresAt: state.expiresAt, lifetime: state.lifetime,
         collected: paid.reduce((n, o) => n + Number(o.amount || 0), 0),
         confirmation: latest?.paymentMethod === 'waived' ? 'Fee waived' : latest?.provider === 'offline' ? 'Office payment' : latest ? 'Online payment' : '',
-        canConfirm, requiresManualAdmission: !app,
-        blockedReason: canConfirm ? '' : blocked ? 'Unblock this account before confirming membership.' : !app ? 'The member must submit their application first.' : !['Pending', 'Approved'].includes(outcome) ? 'Review the application before confirming membership.' : 'This membership is already active. Renewal opens during its final 30 days.'
+        canConfirm: !!canConfirm, requiresManualAdmission: false,
+        blockedReason: canConfirm ? '' : blocked ? 'Unblock this account before confirming membership.' : !app && !existingMembership(m) ? 'The member must submit their application first.' : !existingMembership(m) && !['Pending', 'Approved'].includes(outcome) ? 'Review the application before confirming membership.' : 'This membership is already active. Renewal opens during its final 30 days.'
     };
 };
 const currentMemberRow = (member, application, orders, business, catalogue) => {
@@ -96,7 +98,7 @@ class MembershipDashboardService {
         const m = await Member.findOne({ ...MEMBER_FILTER, _id: id }).select(MEMBER_FIELDS).lean();
         if (!m) throw ApiError.notFound('Member not found.');
         const [apps, orders] = await Promise.all([
-            Application.find({ $or: [{ userId: id }, { email: m.email }] }).select('userId email status submittedAt createdAt updatedAt').sort({ updatedAt: -1 }).lean(),
+            Application.find({ userId: { $in: ownerIds(m) } }).select('userId email status submittedAt createdAt updatedAt').sort({ updatedAt: -1 }).lean(),
             Order.find({ memberId: id, orderType: 'membership' }).sort({ createdAt: -1 }).lean()
         ]);
         const [business, catalogue] = await Promise.all([Business.findOne({ userId: m._id }).lean(), plans.listAll()]);
@@ -122,13 +124,12 @@ class MembershipDashboardService {
         if (selected.audience === 'business' && !planRules.matchesYear(selected, commencementYear)) {
             throw ApiError.badRequest('Choose a business commencement year from the selected plan’s year range.');
         }
-        if (detail.member.requiresManualAdmission && body.manualAdmission !== true) {
-            throw ApiError.badRequest('The member must submit their application, or the Super Admin must explicitly confirm office admission after checking their details.');
-        }
         let member = await Member.findById(id).select(MEMBER_FIELDS).lean();
         if (!member || member.isActive === false) throw ApiError.badRequest('This account is unavailable.');
         const current = membershipState(member);
         if (current.state === 'active' && !renewalFor(member).canRenew) throw ApiError.conflict('Membership is already active.');
+        const application = await validateInitialMembership(member, { applicationId: detail.member.applicationId });
+        if (application) detail.member.applicationStatus = normalizeStatus(application.status);
         if (body.membershipNumber != null && typeof body.membershipNumber !== 'string') throw ApiError.badRequest('Enter a valid membership ID.');
         let membershipNumber = await require('../members/memberNumber').prepareMembershipNumber(member, body.membershipNumber || '', require('../members/membershipIdCategory').membershipIdCategory(member, selected));
         if (selected.audience === 'business') {

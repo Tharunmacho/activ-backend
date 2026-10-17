@@ -36,6 +36,8 @@ let mongo;
     const fixture = async extra => {
         const email = `personal-${++seq}@example.test`;
         const member = await Member.create({ ...base, email, role: 'member', isActive: true, ...extra });
+        await require('../src/modules/members/businessinfo.model').create({ userId: member._id, doingBusiness: false, registrationType: 'aspirant' });
+        await require('../src/modules/members/memberdeclaration.model').create({ userId: member._id, memberId: member._id, agreeToDeclaration: true });
         await Auth.create({ email, password: 'LocalOnly123!', isActive: true });
         const token = require('jsonwebtoken').sign({ userId: String(member._id), role: 'member' }, process.env.JWT_SECRET);
         return { member, api: method => url => request(app)[method](url).set('Authorization', `Bearer ${token}`) };
@@ -93,7 +95,7 @@ let mongo;
     for (const kind of ['business', 'student']) {
         const next = await fixture({});
         const result = await next.api('post')('/applications/submit').send({ registrationType: kind, data: { personalDetails: demographics,
-            businessInfo: { doingBusiness: kind === 'business', registrationType: kind } } });
+            businessInfo: { doingBusiness: kind === 'business', registrationType: kind, businessCommencementYear: kind === 'business' ? '2020' : '' } } });
         assert.equal(result.status, 201, JSON.stringify(result.body));
         assert.equal(result.body.data.memberType, kind);
         assert.equal(result.body.data.data.personalDetails.religion, 'Hindu');

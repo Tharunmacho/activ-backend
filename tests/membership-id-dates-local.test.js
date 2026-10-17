@@ -20,7 +20,9 @@ let mongo;
         const row = { _id: new mongoose.Types.ObjectId(), fullName: 'Fixture Member', email: new mongoose.Types.ObjectId() + '@example.test',
             phoneNumber: '9000000000', role: 'member', memberType: 'student', isActive: true, createdAt: new Date(join), updatedAt: new Date(join),
             membershipStatus: 'active', membershipType: 'annual', membershipActivatedAt: new Date(join), ...extra };
-        await Member.collection.insertOne(row); return row;
+        await Member.collection.insertOne(row);
+        if (row.membershipStatus === 'pending') await require('../src/modules/applications/application.model').create(require('./fixtures/membershipApplication')(row));
+        return row;
     };
     const members = await Promise.all(Array.from({ length: 24 }, () => make({})));
     const ids = await Promise.all(members.map(m => numbers.assignMembershipNumber(m)));
@@ -80,4 +82,4 @@ let mongo;
     assert.deepEqual(converted, original, 'conversion changes only the ID and preserves its prior reference');
     assert.equal(await Order.countDocuments(), receiptsBefore, 'conversion never modifies receipts');
     console.log('PASS: concurrent daily IDs, midnight reset, manual cash ID and duplicate protection, original-date conversion with legacy references, annual validity, leap day and renewal boundaries.');
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); });
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); process.exit(process.exitCode || 0); });

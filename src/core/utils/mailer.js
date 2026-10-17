@@ -109,7 +109,7 @@ const record = async(log, target, subject, result, messageId) => {
  * delivery log so the Super Admin can see the send and why it failed. The
  * result then carries `logId`.
  */
-const send = async({ to, subject, text, html, log }) => {
+const send = async({ to, subject, text, html, log, privateRecipientOnly = false }) => {
     const target = String(to || '').trim();
     const title = subject || 'ACTIV';
     const finish = async(result, messageId) => {
@@ -127,7 +127,7 @@ const send = async({ to, subject, text, html, log }) => {
             from: accountFor('membership').from,
             to: target,
             // The office keeps a copy of everything sent (config.email.archiveCopy).
-            ...archiveFields(target),
+            ...(privateRecipientOnly ? {} : archiveFields(target)),
             subject: title,
             text: text || '',
             html: html || undefined

@@ -4,6 +4,7 @@ const path = require('path');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server-core');
 process.env.NODE_ENV = 'test';
+process.env.MEMBERSHIP_PLAN_NOTICES = 'false';
 let mongo;
 (async () => {
     mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1' } });
@@ -34,6 +35,7 @@ let mongo;
             isActive: true, membershipStatus: paidKey ? 'active' : 'pending', membershipType: paidKey ? 'annual' : 'none',
             membershipActivatedAt: paidKey ? new Date() : null, membershipExpiresAt: paidKey ? dates.annualExpiry(new Date()) : null, createdAt: new Date(), updatedAt: new Date() };
         await Member.collection.insertOne(m);
+        if (!paidKey) await require('../src/modules/applications/application.model').create(require('./fixtures/membershipApplication')(m, { kind, year }));
         await Business.create({ userId: _id, doingBusiness: kind === 'business', registrationType: kind, businessCommencementYear: year || '' });
         if (paidKey) await Order.create({ memberId: _id, email: m.email, orderId: 'FIX-' + _id, planId: paidKey, planName: paidKey,
             planAudience: kind, amount: 1000, membershipType: 'annual', status: 'paid', orderType: 'membership', provider: 'offline',
@@ -114,4 +116,4 @@ let mongo;
     await Plan.updateOne({ key: 'basic' }, { $set: { isActive: false } });
     assert.equal((await upgrades.eligibility(student._id)).plans.length, 0, 'retiring Beginner must not offer an advanced tier to students');
     console.log('PASS: office plan/year/ID confirmation, student entry-only upgrades, automatic business progression, unchanged validity and receipts, renewal-only charges, configurable ranges/prices, retired plans and IST year boundary.');
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); });
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); process.exit(process.exitCode || 0); });

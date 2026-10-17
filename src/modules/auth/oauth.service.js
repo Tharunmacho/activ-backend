@@ -4,9 +4,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../../config');
 const logger = require('../../config/logger');
 const ApiError = require('../../core/utils/ApiError');
-const cacheClient = require('../../core/cache/cacheClient');
-const MemberAuth = require('./auth.model');
-const adminRepository = require('../admin/admin.repository');
+const accounts = require('./oauthAccount.service');
 
 /**
  * ============================================================================
@@ -20,21 +18,14 @@ const adminRepository = require('../admin/admin.repository');
  *   GET  /auth/oauth/:provider/start      -> redirect to the provider
  *   GET  /auth/oauth/:provider/callback   <- the provider sends the person back
  *                                         -> redirect to the website with a
- *                                            60-second, single-use hand-off code
+ *                                            10-minute, single-use hand-off code
  *   POST /auth/oauth/exchange { code }    -> the normal sign-in response
  *
- * WHAT IT PROVES AND WHAT IT DOES NOT. A provider proves the person controls
- * an email address. That is exactly what the password reset proves too, so it
- * is allowed to open the MEMBER account registered with that address — and
- * nothing else:
- *
- *   - no account with that email -> sent to registration, prefilled; nothing
- *     is created behind their back (registration asks for the region, phone
- *     and a password the association needs).
- *   - an ADMIN account -> refused. Admins sign in with their password on the
- *     admin screen; a Facebook login must never become a way into an admin
- *     portal.
- *   - an address the provider has not verified -> refused.
+ * A provider subject identifies a social account. Previously linked subjects
+ * reopen the same member account even if its provider email changes. First
+ * association requires a trustworthy verified email or our single-use email
+ * challenge. New accounts remain incomplete/unapproved until application
+ * submission and the normal admin approval workflow. Admin access is refused.
  *
  * CSRF: the `state` is a signed token carrying a nonce that must match a
  * cookie set on /start, so a callback URL crafted by somebody else cannot
@@ -71,7 +62,8 @@ const PROVIDERS = {
             const info = await axios.get('https://openidconnect.googleapis.com/v1/userinfo', {
                 headers: { Authorization: `Bearer ${accessToken(token)}` }, timeout: 15000
             });
-            return { email: info.data.email, verified: info.data.email_verified === true, name: info.data.name };
+            const authoritative = /@gmail\.com$/i.test(String(info.data.email || '')) || !!info.data.hd;
+            return { subject: info.data.sub, email: info.data.email, verified: info.data.email_verified === true && authoritative, name: info.data.name };
         }
     },
     facebook: {
@@ -115,7 +107,9 @@ const PROVIDERS = {
                         ? 'facebook_no_email' : 'email_permission';
                 } catch { /* Keep the actionable generic recovery if this diagnostic is unavailable. */ }
             }
-            return { email, verified: !!email, name: info.data.name, emailError };
+            // Graph's email field is not an email_verified claim. Confirm it
+            // ourselves before a first link; subsequent logins use the app ID.
+            return { subject: info.data.id, email, verified: false, name: info.data.name, emailError };
         }
     },
     linkedin: {
@@ -138,15 +132,13 @@ const PROVIDERS = {
             });
             // LinkedIn makes email_verified optional. An absent claim cannot
             // prove ownership of an existing ACTIV member's login address.
-            return { email: info.data.email, verified: info.data.email_verified === true, name: info.data.name };
+            return { subject: info.data.sub, email: info.data.email, verified: info.data.email_verified === true, name: info.data.name };
         }
     }
 };
 
 const COOKIE = 'activ_oauth';
 const STATE_TTL_S = 10 * 60;
-// Allow for browser-to-app confirmation and a cold start; still single-use.
-const HANDOFF_TTL_S = 5 * 60;
 
 const providerFor = (key) => Object.prototype.hasOwnProperty.call(PROVIDERS, key) ? PROVIDERS[key] : null;
 const isConfigured = (p) => !!(providerFor(p) && providerFor(p).clientId() && providerFor(p).clientSecret());
@@ -296,53 +288,15 @@ const handleCallback = async(provider, req, res) => {
         return back({ error: reason, provider });
     }
 
-    const email = String((who && who.email) || '').toLowerCase().trim();
-    if (!email || !who.verified) return back({ error: who?.emailError || 'no_email', provider });
-
-    const member = await MemberAuth.findOne({ email }).select('_id isActive').lean().catch(() => null);
-    if (!member) {
-        const admin = await adminRepository.findRawByEmail(email).catch(() => null);
-        if (admin) return back({ error: 'admin', provider });
-        return back({ error: 'no_account', provider, email, name: String(who.name || '') });
-    }
-
-    const jti = crypto.randomBytes(12).toString('hex');
-    const handoff = jwt.sign({ t: 'oauth-handoff', e: email, p: provider, jti }, config.jwt.secret, { expiresIn: HANDOFF_TTL_S });
-    logger.info('Social sign-in verified', { provider, email });
+    const handoff = await accounts.create(provider, who);
+    logger.info('Social provider authenticated', { provider });
     return back({ code: handoff, provider });
 };
 
 /** Trade the hand-off code for a normal member session. Single use. */
-const exchange = async(code) => {
-    let claims;
-    try {
-        claims = jwt.verify(String(code || ''), config.jwt.secret);
-    } catch (e) {
-        throw ApiError.unauthorized('That sign-in has expired. Please try again.');
-    }
-    if (!claims || claims.t !== 'oauth-handoff' || !claims.e || !claims.jti || !providerFor(claims.p)) {
-        throw ApiError.unauthorized('That sign-in has expired. Please try again.');
-    }
-
-    const usedKey = `oauth:used:${claims.jti}`;
-    if (!await cacheClient.claim(usedKey, 1, HANDOFF_TTL_S * 2)) {
-        throw ApiError.unauthorized('That sign-in has already been used. Please try again.');
-    }
-
-    const authService = require('./auth.service');
-    const member = await MemberAuth.findOne({ email: claims.e }).select('isActive').lean().catch(() => null);
-    if (!member) throw ApiError.unauthorized('No ACTIV member account uses that email.');
-    if (member.isActive === false) {
-        throw ApiError.forbidden('Your account has been blocked by the organisation. '
-            + 'Please contact the ACTIV administration if you believe this is a mistake.');
-    }
-
-    const session = await authService.memberSession(claims.e, 'member', claims.p);
-    if (!session) throw ApiError.unauthorized('No ACTIV member account uses that email.');
-    return session;
-};
+const exchange = accounts.exchange;
 
 module.exports = {
     listProviders, startUrl, handleCallback, exchange, isConfigured, PROVIDERS,
-    clientFrom, clientFromState, toClient, providerFailure
+    clientFrom, clientFromState, toClient, providerFailure, requestEmail: accounts.requestEmail
 };

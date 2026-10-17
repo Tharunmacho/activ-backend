@@ -10,7 +10,7 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     fullName: {
         type: String,
-        required: true,
+        required: function requiredForCompletedRegistration() { return this.registrationIncomplete !== true; },
         trim: true
     },
     email: {
@@ -23,7 +23,7 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     phoneNumber: {
         type: String,
-        required: true,
+        required: function requiredForCompletedRegistration() { return this.registrationIncomplete !== true; },
         trim: true
     },
     /**
@@ -65,20 +65,20 @@ const memberDetailsSchema = new mongoose.Schema({
     },
     state: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredUnlessInternational() { return this.registrationIncomplete !== true && this.isInternational !== true; },
         trim: true,
         index: true
     },
     district: {
         type: String,
-        required: function requiredUnlessInternational() { return this.isInternational !== true; },
+        required: function requiredUnlessInternational() { return this.registrationIncomplete !== true && this.isInternational !== true; },
         trim: true,
         index: true
     },
     block: {
         type: String,
         required: function requiredForDevelopmentDistrict() {
-            return this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
+            return this.registrationIncomplete !== true && this.isInternational !== true && require('../regions/geography').requiresBlock(this.state, this.district);
         },
         trim: true,
         index: true
@@ -153,6 +153,8 @@ const memberDetailsSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    // Server-owned: account creation can precede the membership forms.
+    registrationIncomplete: { type: Boolean, default: false },
     approvedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'StateAdmin'

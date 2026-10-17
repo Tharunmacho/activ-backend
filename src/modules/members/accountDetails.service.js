@@ -1,7 +1,6 @@
 const Member = require('./memberdetails.model');
 const Auth = require('../auth/auth.model');
 const Personal = require('./personalinfo1.model');
-const Application = require('../applications/application.model');
 const ApiError = require('../../core/utils/ApiError');
 const { validateMobile } = require('../common/phoneNumber');
 const { invalidateMemberContext } = require('../common/memberContext');
@@ -74,14 +73,9 @@ async function update(member, body, { admin = false } = {}) {
     const cache = require('../../core/cache/cacheClient');
     const { CACHE_KEYS } = require('../../core/cache/cacheKeys');
     await Promise.all([cache.del(CACHE_KEYS.USER(String(member._id))), cache.del(CACHE_KEYS.MEMBER(String(member._id)))]);
-    await Promise.all([
-        Personal.updateOne({ userId: member._id }, { $set: { phoneNumber: member.phoneNumber } }),
-        Application.updateMany({ userId: member._id }, { $set: {
-            email: member.email, 'data.personalDetails.email': member.email,
-            'data.personalDetails.phoneNumber': member.phoneNumber,
-            'data.personalDetails.whatsappNumber': member.whatsappNumber || '',
-        } }),
-    ]);
+    await Personal.updateOne({ userId: member._id }, { $set: { phoneNumber: member.phoneNumber } });
+    // Contact edits update this account, not the answers admins already
+    // reviewed. Explicit application resubmission records a new snapshot.
     return member;
 }
 module.exports = { update };

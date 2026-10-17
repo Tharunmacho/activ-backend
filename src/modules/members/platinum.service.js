@@ -7,9 +7,10 @@ const notificationService = require('../notifications/notification.service');
 const membershipContext = require('../notifications/membershipContext');
 const { membershipNumberFor } = require('./memberNumber');
 const { normalizeStatus, STATUS } = require('../common/applicationStatus');
-const { invalidateMemberContext, isPaidStatus } = require('../common/memberContext');
+const { invalidateMemberContext } = require('../common/memberContext');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
+const { existingMembership, validateInitialMembership } = require('./membershipAdmission');
 
 /**
  * PLATINUM — A LIFETIME MEMBERSHIP THE SUPER ADMIN GRANTS BY HAND.
@@ -69,11 +70,11 @@ const shape = (m, outcome = '') => ({
     membershipType: m.membershipType || 'none',
     membershipTier: m.membershipTier || 'standard',
     applicationOutcome: outcome,
-    canAdmitManually: m.isActive !== false && m.membershipTier !== 'platinum' && outcome !== STATUS.REJECTED && (!m.role || m.role === 'member' || ['business', 'student', 'aspirant'].includes(m.role)),
+    canAdmitManually: false,
     /** Why a grant would be refused, or '' when it can go ahead. */
     blockedReason: m.isActive === false ? 'Unblock this account before admission' : m.membershipTier === 'platinum'
         ? 'Already a Lifetime member'
-        : (outcome === STATUS.APPROVED || isPaidStatus(m.membershipStatus))
+        : (outcome === STATUS.APPROVED || existingMembership(m))
             ? ''
             : outcome === STATUS.REJECTED
                 ? 'Their application was not approved'
@@ -429,12 +430,8 @@ class PlatinumService {
         if (member.isActive === false || (member.role && !['member', 'business', 'student', 'aspirant'].includes(member.role))) throw ApiError.badRequest('Choose an active member account.');
         if (member.membershipTier === 'platinum') throw ApiError.badRequest('This member is already a Lifetime member.');
 
-        const outcome = (await outcomesFor([member._id])).get(String(member._id)) || '';
-        const manualAdmission = body.manualAdmission === true && outcome !== STATUS.REJECTED && String(body.note || '').trim();
-        if (outcome !== STATUS.APPROVED && !isPaidStatus(member.membershipStatus) && !manualAdmission) {
-            throw ApiError.badRequest(shape(member.toObject(), outcome).blockedReason
-                + ' — Lifetime is granted to an approved applicant or an existing member.');
-        }
+        const application = await validateInitialMembership(member, { requireApproved: true });
+        const outcome = application ? normalizeStatus(application.status) : (await outcomesFor([member._id])).get(String(member._id)) || '';
 
         const plan = await this.plan();
         const amount = Number(body.amount);
@@ -465,7 +462,7 @@ class PlatinumService {
             gatewayPaymentId: String(body.receiptNumber || '').trim() || orderId,
             paidAt: receivedOn,
             manualConfirmation: { by: String(actor.userId || actor.id || ''), byName: actor.email || 'Super Admin', at: now,
-                note: `${manualAdmission ? 'Super Admin office admission. ' : ''}${String(body.note || '').trim()}`.slice(0, 500),
+                note: String(body.note || '').trim().slice(0, 500),
                 expectedAmount: plan.price, waivedAmount: Math.max(0, plan.price - amount), receiptNumber: String(body.receiptNumber || '').trim() },
             expiresAt: now
         });
