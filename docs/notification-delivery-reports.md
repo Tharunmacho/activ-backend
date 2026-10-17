@@ -7,6 +7,8 @@ Super Admin → Notifications → **Delivery reports** (website) or **Reports** 
 3. Search for a name, email, phone or booking reference. Select a delivery outcome or **No confirmed open** to identify contacts for review.
 4. Open a recipient row to see the recorded provider timeline, timestamps, attempts and failure/skip reason. Viewing a report never sends a message. Existing Automation retry controls retain their original eligibility and consent checks.
 
+On the website, select a summary card to filter and focus its recipient records. **Accepted / in inbox** includes records that later became delivered, opened or marked read; the separate **Provider accepted / in inbox** dropdown option selects that exact recorded state. Channel cards toggle the selected channel while preserving the other filters. Recipient identities are distinct identities, while the rows are delivery records, so one person can appear in several rows.
+
 ## What the figures mean
 
 | Figure | Evidence |
@@ -32,6 +34,6 @@ Anonymous app visitors are shown as `Visitor · <installation suffix>`. They rec
 - Push taps use the first open timestamp, separate from in-app marked-read/opened timestamps. Visitor reporting reads the corresponding public notice delivery records.
 - Reports batch-resolve member names across the project's separate members database. Notification/provider joins remain in the notifications database.
 - `node backend/tests/delivery-report-local.test.js` exercises real aggregation and access controls against disposable local Mongo, without provider calls.
-- After building the website, `node website/tests/delivery-report-browser.test.mjs` exercises the report in headless Chrome at 320, 390 and 1440 px with isolated fixture data. Screenshots are saved to `artifacts/delivery-report`.
+- After building the website, `node website/tests/delivery-report-browser.test.mjs` exercises card filters, keyboard controls, pagination and aligned recipient columns in headless Chrome at 320, 390, 768 and 1440 px with isolated fixture data. Screenshots are saved to `artifacts/delivery-report`.
 
 Production validation still requires deploying backend + website and a new app build. Provider callbacks and device permission/configuration must be working for delivery evidence to appear; no migration or fabricated historical read backfill is performed.

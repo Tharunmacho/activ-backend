@@ -21,6 +21,7 @@ const logger = require('../../config/logger');
 
 let client = null;
 let sdk = null;
+let readUnavailableUntil = 0;
 
 const cfg = () => config.objectStorage || {};
 
@@ -116,17 +117,46 @@ const exists = async(name) => {
 /**
  * Fetch an object, optionally a byte range (`bytes=…`). Resolves
  * `{ body, contentType, contentLength, contentRange, totalSize }`, or null
- * when missing / unavailable. Never throws.
+ * when missing/unconfigured, `{ unavailable: true }` on a failed read, or
+ * `{ unsatisfiable: true }` for a rejected byte range. Never throws.
  */
 const getObject = async(name, range) => {
     const c = s3();
     if (!c || !name) return null;
+    // A confirmed timeout affects the shared endpoint, not just this filename.
+    // Briefly use the same recovery sources; retry the bucket after 15 seconds.
+    if (Date.now() < readUnavailableUntil) return { unavailable: true };
+    // Reads must reach GridFS/legacy fallback when the bucket stops answering.
+    // Keep the client's retry policy for writes unchanged; this deadline covers
+    // all retries of this GET, rather than restarting for each attempt.
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 5000);
+    deadline.unref?.();
     try {
         const out = await c.send(new sdk.GetObjectCommand({
             Bucket: cfg().bucket,
             Key: keyFor(name),
             Range: range || undefined,
-        }));
+        }), { abortSignal: controller.signal });
+        clearTimeout(deadline);
+        readUnavailableUntil = 0;
+        // Node's S3 response body is an IncomingMessage. Bound inactivity after
+        // headers too, without limiting how long a progressing video may take.
+        if (out.Body && typeof out.Body.setTimeout === 'function') {
+            const body = out.Body;
+            const timedOut = () => body.destroy(new Error('Upload storage read stalled'));
+            let cleaned = false;
+            const cleanup = () => {
+                if (cleaned) return;
+                cleaned = true;
+                body.removeListener('timeout', timedOut);
+                // Node can detach the socket before the body's end event.
+                if (body.socket) body.setTimeout(0);
+            };
+            body.setTimeout(10000, timedOut);
+            body.once('end', cleanup);
+            body.once('close', cleanup);
+        }
         const contentRange = out.ContentRange || '';
         const total = /\/(\d+)$/.exec(contentRange);
         return {
@@ -137,13 +167,16 @@ const getObject = async(name, range) => {
             totalSize: total ? Number(total[1]) : Number(out.ContentLength || 0),
         };
     } catch (err) {
+        if (controller.signal.aborted) readUnavailableUntil = Date.now() + 15000;
         if (!isNotFound(err) && statusOf(err) !== 416) {
             logger.warn('Could not read an upload from the S3 bucket', {
                 name, status: statusOf(err), error: err && err.message,
             });
         }
         if (statusOf(err) === 416) return { unsatisfiable: true };
-        return null;
+        return isNotFound(err) ? null : { unavailable: true };
+    } finally {
+        clearTimeout(deadline);
     }
 };
 

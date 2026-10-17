@@ -73,9 +73,10 @@ const readOriginal = async(uploadsDir, name, store) => {
     try {
         if (store.objectStore && store.objectStore.isEnabled()) {
             const obj = await store.objectStore.getObject(name);
+            if (obj && obj.unavailable) store.onUnavailable?.();
             if (obj && obj.body) return await streamToBuffer(obj.body);
         }
-    } catch { /* not in the bucket */ }
+    } catch { store.onUnavailable?.(); /* try the database after a failed bucket read */ }
 
     try {
         const bucket = store.bucket && store.bucket();
@@ -117,8 +118,12 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
 
         let job = rendering.get(file);
         if (!job) {
-            job = (async() => {
-                const original = await readOriginal(uploadsDir, name, { objectStore, bucket });
+            job = { unavailable: false, pending: null };
+            const state = job;
+            job.pending = (async() => {
+                const original = await readOriginal(uploadsDir, name, {
+                    objectStore, bucket, onUnavailable: () => { state.unavailable = true; }
+                });
                 if (!original) return null;
                 let pipeline = sharp(original, { failOn: 'none' }).rotate()
                     .resize({ width, withoutEnlargement: true });
@@ -133,7 +138,12 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
             rendering.set(file, job);
         }
 
-        const buffer = await job;
+        let buffer;
+        try { buffer = await job.pending; } finally {
+            // The original-file middleware follows this one. Do not spend a
+            // second GET deadline on the same unavailable bucket in one request.
+            if (job.unavailable) req.uploadStorageUnavailable = true;
+        }
         if (!buffer) return next();
         return send(buffer);
     } catch (error) {

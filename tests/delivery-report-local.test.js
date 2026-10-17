@@ -365,6 +365,15 @@ let mongo;
     1,
     "confirmed-delivered filter includes WhatsApp reads and excludes device taps"
   );
+  result = await reports.report({ status: "accepted_any", limit: 100 });
+  assert.equal(result.pagination.total, result.summary.accepted,
+    "accepted card includes every accepted delivery, including later delivered/read outcomes");
+  assert(result.rows.length > 0);
+  assert(result.rows.every(row => ["accepted", "sent", "delivered", "read", "marked_read"].includes(row.status)));
+  assert(result.rows.some(row => row.status === "read"), "opening a message does not remove it from accepted totals");
+  const exactAccepted = await reports.report({ status: "accepted", limit: 100 });
+  assert(exactAccepted.rows.every(row => row.status === "accepted"), "the existing exact-status filter is unchanged");
+  assert(exactAccepted.pagination.total < result.pagination.total);
   console.log(
     "PASS: unified delivery counts, retries, missing open evidence, queues, filters, pagination and owner/admin access"
   );

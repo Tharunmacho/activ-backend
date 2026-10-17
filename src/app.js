@@ -39,6 +39,7 @@ app.use('/uploads', serveFromDatabase);
 // Last: the retired server that still holds files uploaded to it. A hit is
 // written to the bucket on the way through — see core/storage/legacyUploads.js.
 app.use('/uploads', uploadStore.serveFromLegacy);
+app.use('/uploads', uploadStore.serveUnavailable);
 
 // Every successful upload is copied into the S3 bucket (GridFS if the bucket
 // refuses it), whichever router's multer received it.

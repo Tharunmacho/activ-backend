@@ -224,6 +224,7 @@ const restoreDiskCopy = (readable, name) => {
  */
 const serveFromBucket = async(req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (req.uploadStorageUnavailable) return next();
     if (!objectStore.isEnabled()) return next();
 
     const name = safeRel(decodeURIComponent(req.path || ''));
@@ -232,6 +233,10 @@ const serveFromBucket = async(req, res, next) => {
     const range = /^bytes=\d*-\d*$/.test(String(req.headers.range || '')) ? String(req.headers.range) : '';
     const obj = await objectStore.getObject(name, range);
     if (!obj) return next();
+    if (obj.unavailable) {
+        req.uploadStorageUnavailable = true;
+        return next();
+    }
     if (obj.unsatisfiable) return res.status(416).end();
 
     res.setHeader('Accept-Ranges', 'bytes');
@@ -250,8 +255,18 @@ const serveFromBucket = async(req, res, next) => {
     }
 
     obj.body
-        .on('error', () => { if (!res.headersSent) next(); else res.end(); })
+        .on('error', () => {
+            req.uploadStorageUnavailable = true;
+            if (res.headersSent) return res.destroy();
+            // Nothing has been sent: let GridFS/legacy supply the file, without
+            // the bucket's length/range/cache headers leaking into that answer.
+            res.status(200);
+            ['Accept-Ranges', 'Cache-Control', 'Content-Type', 'Content-Range', 'Content-Length']
+                .forEach(header => res.removeHeader(header));
+            return next();
+        })
         .pipe(res);
+    res.on('close', () => obj.body.destroy());
 
     // Restore the disk cache from a full read only — a partial one is not the file.
     if (!range) {
@@ -330,6 +345,14 @@ const serveFromLegacy = require('./legacyUploads').makeServeFromLegacy({
     restoreDiskCopy,
     cacheControl: UPLOAD_CACHE,
 });
+
+// Only after all recovery sources have been tried. An unreachable bucket is
+// not evidence that the upload was deleted; do not cache a false 404 for it.
+const serveUnavailable = (req, res, next) => {
+    if (!req.uploadStorageUnavailable) return next();
+    return res.status(503).set('Cache-Control', 'no-store').set('Retry-After', '30')
+        .send('Media is temporarily unavailable. Please try again.');
+};
 
 /** Read a whole GridFS file into memory. */
 const readGridFile = (store, id) => new Promise((resolve, reject) => {
@@ -424,6 +447,7 @@ module.exports = {
     serveFromBucket,
     serveFromDatabase,
     serveFromLegacy,
+    serveUnavailable,
     syncToBucket,
     // For `imageVariants`, which reads an original from the same three places.
     bucket,

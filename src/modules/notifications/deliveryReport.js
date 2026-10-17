@@ -449,7 +449,9 @@ async function report(input = {}) {
     ];
   }
   const outcomeFilter =
-    input.status === "unconfirmed"
+    input.status === "accepted_any"
+      ? { status: { $in: ["accepted", "sent", "delivered", "read", "marked_read"] } }
+      : input.status === "unconfirmed"
       ? { status: { $ne: "read" } }
       : input.status === "delivered"
       ? { channel: "whatsapp", status: { $in: ["delivered", "read"] } }

@@ -154,6 +154,7 @@ async function download(attachment, res) {
     const name = attachment.storageName;
     if (!/^chat-(?:files|images|audio)\/[a-f\d-]{36}\/[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(name || '')) throw ApiError.notFound('Attachment not found');
     let stream;
+    let storageUnavailable = false;
     try {
         const target = path.join(store.UPLOADS_DIR, name);
         await fs.access(target);
@@ -161,6 +162,7 @@ async function download(attachment, res) {
     } catch { /* A deployment can clear the disk cache. Read durable storage. */ }
     if (!stream && store.objectStore.isEnabled()) {
         const object = await store.objectStore.getObject(name);
+        storageUnavailable = object?.unavailable === true;
         if (object?.body) stream = object.body;
     }
     if (!stream) {
@@ -168,6 +170,7 @@ async function download(attachment, res) {
         const files = bucket ? await bucket.find({ filename: name }).sort({ uploadDate: -1 }).limit(1).toArray() : [];
         if (files.length) stream = bucket.openDownloadStream(files[0]._id);
     }
+    if (!stream && storageUnavailable) throw new ApiError(503, 'Attachment storage is temporarily unavailable. Please try again.');
     if (!stream) throw ApiError.notFound('This attachment is unavailable. Ask the sender to attach it again.');
     res.attachment(attachment.name);
     res.type(attachment.mimeType);
