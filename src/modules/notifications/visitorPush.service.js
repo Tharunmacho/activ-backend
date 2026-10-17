@@ -17,6 +17,10 @@ async function source(notice) {
     const doc = await Broadcast.sourceModel(notice.kind)?.findById(notice.sourceId).lean();
     return publicEligible(notice.kind, doc) && Broadcast.sourceKey(notice.kind, doc) === notice.key ? doc : null;
 }
+async function pushSource(notice) {
+    const doc = await source(notice);
+    return doc && (notice.kind !== 'announcement' || require('../announcements/announcementChannels').enabled(doc, 'push')) ? doc : null;
+}
 async function install() {
     const key = crypto.randomBytes(32).toString('hex');
     const row = await VisitorDevice.create({ secretHash: digest(key) });
@@ -103,7 +107,7 @@ async function fanout() {
         { $set: { status: 'processing', worker, leaseUntil: new Date(Date.now() + 300000) } }, { new: true, sort: { createdAt: 1 } }).lean();
     if (!job) return;
     try {
-        if (job.createdAt < new Date(Date.now() - 86400000) || !await source(job)) {
+        if (job.createdAt < new Date(Date.now() - 86400000) || !await pushSource(job)) {
             await PublicNotice.updateOne({ _id: job._id, worker }, { $set: { status: 'done' } }); return;
         }
         const devices = await VisitorDevice.find({ enabled: true, createdAt: { $lte: job.createdAt }, lastSeenAt: { $gte: new Date(Date.now() - 90 * 86400000) },
@@ -129,7 +133,7 @@ async function processBatch(client) {
             const device = await VisitorDevice.findById(row.device).select('+token').lean();
             const notice = await PublicNotice.findById(row.notice).lean();
             if (notice && notice.createdAt >= new Date(Date.now() - 86400000) && device?.enabled && device.token
-                && device.lastSeenAt >= new Date(Date.now() - 90 * 86400000) && !await MemberDevice.exists({ token: device.token }) && await source(notice)) {
+                && device.lastSeenAt >= new Date(Date.now() - 90 * 86400000) && !await MemberDevice.exists({ token: device.token }) && await pushSource(notice)) {
                 const data = { audience: 'visitor', publicNotificationId: String(notice._id), visitorId: String(device._id) };
                 // A web worker validates the opted-in installation before showing
                 // a notification. Firebase must not auto-display after opt-out/login.
@@ -151,4 +155,4 @@ async function processBatch(client) {
             leaseUntil: null, nextAttemptAt: new Date(Date.now() + Math.min(3600000, 30000 * 2 ** row.attempts)) } });
     }
 }
-module.exports = { publicEligible, source, install, deviceFor, register, unregister, enqueue, feed, opened, processBatch, fanout };
+module.exports = { publicEligible, source, pushSource, install, deviceFor, register, unregister, enqueue, feed, opened, processBatch, fanout };

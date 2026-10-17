@@ -47,7 +47,7 @@ let mongo;
     ];
     const payload = { title: '{title} {Name}', body: '<p>{company_name}: {meeting_place}; fee {fee}; paid {last_paid_fee}; expiry {renewal_date}; date {date}</p>',
         summary: 'Hello {NAME}', audience: 'plans', planKeys: ['business-test'], targets: [{ state: 'Tamil Nadu', district: '', block: '' }],
-        recipientMode: 'selected', memberIds: [id(alice), id(bala), id(celia)], variables, status: 'published' };
+        recipientMode: 'selected', memberIds: [id(alice), id(bala), id(celia)], variables, status: 'published', deliveryChannels: { email: true, whatsapp: false, push: false } };
     const created = await updates.create(payload);
     const source = await Announcement.findById(created.id).lean();
     for (const member of members) {

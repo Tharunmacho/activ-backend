@@ -7,6 +7,7 @@ const { AUDIENCES, announcementAudienceClause, matchesAudience } = require('../c
 const { personalizeUpdate } = require('../common/recipientPersonalization');
 const { sanitizeHtml } = require('../cms/richText');
 const recipients = require('./announcementRecipients');
+const deliveryChannels = require('./announcementChannels');
 const { BUILTINS, missingVariables, variableValues } = require('../common/updateVariables');
 
 const FEED_LIMIT = 50;
@@ -58,6 +59,7 @@ const toAnnouncement = (doc = {}) => ({
 });
 // Personal values and recipient IDs belong only in the authenticated admin editor.
 const toAdminAnnouncement = doc => ({ ...toAnnouncement(doc), recipientMode: doc.recipientMode || 'audience',
+    deliveryChannels: deliveryChannels.effective(doc),
     memberIds: (doc.memberIds || []).map(String), variables: (doc.variables || []).map(row => ({ key: row.key,
         defaultValue: row.defaultValue || '', overrides: (row.overrides || []).map(entry => ({ memberId: String(entry.memberId), value: entry.value || '' })) })) });
 
@@ -65,6 +67,7 @@ const toAdminAnnouncement = doc => ({ ...toAnnouncement(doc), recipientMode: doc
 const sanitize = (payload = {}) => {
     const out = {};
     recipients.sanitizeRecipients(payload, out);
+    if (Object.hasOwn(payload, 'deliveryChannels')) out.deliveryChannels = deliveryChannels.clean(payload.deliveryChannels);
 
     ['title', 'summary', 'body', 'state', 'district', 'block',
         'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel'
@@ -352,6 +355,7 @@ class AnnouncementService {
 
     async create(payload = {}, actor = {}) {
         const data = sanitize(payload);
+        if (data.deliveryChannels === undefined) data.deliveryChannels = deliveryChannels.none();
 
         await validateDocument(data);
 
@@ -371,7 +375,7 @@ class AnnouncementService {
             targetId: announcement.id,
             targetLabel: announcement.title,
             state: announcement.state,
-            metadata: { status: announcement.status, audience: announcement.audience, planKeys: announcement.planKeys }
+            metadata: { status: announcement.status, audience: announcement.audience, planKeys: announcement.planKeys, deliveryChannels: announcement.deliveryChannels }
         });
 
         return announcement;
@@ -409,7 +413,8 @@ class AnnouncementService {
             actorRole: actor.role || 'super_admin',
             targetId: announcement.id,
             targetLabel: announcement.title,
-            state: announcement.state
+            state: announcement.state,
+            metadata: { deliveryChannels: announcement.deliveryChannels }
         });
 
         return announcement;

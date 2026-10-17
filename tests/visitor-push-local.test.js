@@ -31,7 +31,7 @@ let mongo;
     await assert.rejects(service.register(another.key, { token: 'other-test-token-12345678', platform: 'ios' }), error => error.statusCode === 401, 'expiry enforced before TTL cleanup');
     let sequence = 0;
     const createPublic = async () => {
-        const item = await updates.create({ title: `Dear {Name}, update ${++sequence}`, body: '<p>Welcome <strong>{name}</strong></p>', status: 'published', audience: 'all', includeVisitors: true, targets: [] });
+        const item = await updates.create({ title: `Dear {Name}, update ${++sequence}`, body: '<p>Welcome <strong>{name}</strong></p>', status: 'published', audience: 'all', includeVisitors: true, targets: [], deliveryChannels: { email: false, whatsapp: false, push: true } });
         return PublicNotice.findOne({ sourceId: item.id }).lean();
     };
     const notice = await createPublic();

@@ -7,7 +7,7 @@ const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district 
 const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets', 'recipientMode', 'memberIds', 'variables',
     'startAt', 'endAt', 'days', 'mode', 'venue', 'venueAddress', 'venueMapUrl', 'onlinePlatform', 'onlineUrl', 'language', 'category', 'topic',
     'content', 'image', 'images', 'media', 'photos', 'attachments', 'links', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
-    'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote', 'includeVisitors', 'channel', 'showOnOnboarding'];
+    'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote', 'includeVisitors', 'channel', 'showOnOnboarding', 'deliveryChannels'];
 
 function published(kind, doc) {
     if (!doc || doc.archivedAt || doc.deletedAt) return false;
@@ -64,14 +64,16 @@ function install(schema, kind) {
 const labels = { announcement: 'association update', event: 'event programme', news: 'news story', gallery: 'gallery update', scheme: 'government scheme' };
 function notice(job, doc, user) {
     const kind = job.kind;
+    const channels = kind === 'announcement' ? require('../announcements/announcementChannels').effective(doc) : { push: true };
     // No private headline/body on a lock screen, including after a membership changes.
     return { user: user._id, deliveryKey: `${job._id}:${user._id}`, title: 'ACTIV · ' + labels[kind],
         message: `Dear member, there is a new or revised ${labels[kind]} for you. Thank you for being part of ACTIV.`,
         type: 'info', isRead: false,
-        ...(kind === 'announcement' ? { updateDelivery: { email: {}, whatsapp: {} } } : {}),
+        ...(kind === 'announcement' ? { updateDelivery: { ...(channels.email ? { email: {} } : {}), ...(channels.whatsapp ? { whatsapp: {} } : {}) } } : {}),
         data: { kind, sourceId: String(doc._id), broadcastKey: job.key, ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
             ...(kind === 'announcement' ? { announcementId: String(doc._id) } : {}), slug: doc.slug || '' },
-        push: { status: 'pending', attempts: 0, nextAttemptAt: new Date() } };
+        push: { status: channels.push ? 'pending' : 'skipped', attempts: 0, nextAttemptAt: new Date(),
+            ...(!channels.push ? { lastError: require('../announcements/announcementChannels').disabledReason('push') } : {}) } };
 }
 async function processBatch() {
     const Job = require('./broadcast.model');

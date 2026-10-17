@@ -45,7 +45,7 @@ let mongo;
     const updates = {};
     for (const key of ['paid_non_student', 'business', 'aspirant', 'student', 'lifetime', 'unpaid', 'plans:basic', 'plans:intermediate', 'plans:student', 'plans:aspirant', 'plans:platinum']) {
         const [audience, plan] = key.split(':');
-        updates[key] = await service.create({ title: key, body: 'Dear member, thank you for being part of ACTIV.', status: 'published', audience, ...(plan ? { planKeys: [plan] } : {}) });
+        updates[key] = await service.create({ title: key, body: 'Dear member, thank you for being part of ACTIV.', status: 'published', audience, deliveryChannels: { email: false, whatsapp: false, push: true }, ...(plan ? { planKeys: [plan] } : {}) });
     }
     for (const kind of Object.keys(members)) {
         const ctx = await context(kind);

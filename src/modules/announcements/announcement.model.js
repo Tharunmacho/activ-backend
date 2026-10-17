@@ -58,6 +58,8 @@ const announcementSchema = new mongoose.Schema({
     }, { _id: false })], default: [] },
     // Public visitors are a deliberate opt-in, never implied by audience=all.
     includeVisitors: { type: Boolean, default: false },
+    deliveryChannels: { type: mongoose.Schema.Types.Mixed, default: undefined,
+        validate: { validator: value => value === undefined || require('./announcementChannels').valid(value), message: 'Choose all three delivery channels with true/false values.' } },
     recipientMode: { type: String, enum: ['audience', 'selected'], default: 'audience' },
     memberIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
     variables: { type: [new mongoose.Schema({
@@ -131,6 +133,13 @@ const announcementSchema = new mongoose.Schema({
 announcementSchema.index({ status: 1, pinned: -1, publishedAt: -1 });
 announcementSchema.index({ status: 1, state: 1, district: 1, block: 1 });
 announcementSchema.index({ status: 1, audience: 1, planKeys: 1 });
+
+// A default function also runs when old documents are hydrated. Only new
+// records get the safe feed-only default; missing legacy fields stay missing.
+announcementSchema.pre('validate', function(next) {
+    if (this.isNew && this.deliveryChannels === undefined) this.deliveryChannels = require('./announcementChannels').none();
+    next();
+});
 
 require('../notifications/contentBroadcast').install(announcementSchema, 'announcement');
 module.exports = dataLayout.model('Announcement', announcementSchema);

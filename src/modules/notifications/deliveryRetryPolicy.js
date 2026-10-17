@@ -138,7 +138,7 @@ async function reason(record) {
     const [notice, device] = await Promise.all([PublicNotice.findById(row.notice).lean(), VisitorDevice.findById(row.device).select('+token').lean()]);
     if (!device?.enabled || !device.token || past(device.lastSeenAt, 90 * 86400000)) return 'This visitor has disabled notifications or has no active device.';
     if (await require('./pushDevice.model').exists({ token: device.token })) return 'This visitor device now belongs to a signed-in account.';
-    return !past(notice?.createdAt, 86400000) && await require('./visitorPush.service').source(notice)
+    return !past(notice?.createdAt, 86400000) && await require('./visitorPush.service').pushSource(notice)
         ? '' : 'This public notification is expired, unpublished, or has been replaced.';
 }
 

@@ -69,6 +69,7 @@ let mongo;
     for (const key of [...new Set(Object.values(expected).flat())]) {
         const [audience, plan] = key.split(':');
         await service.create({ title: key, body: 'Dear member, thank you for joining ACTIV.', status: 'published',
+            deliveryChannels: { email: true, whatsapp: true, push: true },
             audience, state: 'Tamil Nadu', district: 'Chennai', block: 'Test Block', ...(plan ? { planKeys: [plan] } : {}) });
     }
     const drain = async () => {
@@ -94,6 +95,7 @@ let mongo;
     // Isolated queued notice makes each late-state transition explicit.
     const queued = async (title, audience = 'plans', planKeys = ['basic']) => {
         const update = await Announcement.create({ title, body: 'Please review this update. Thank you.', status: 'published', audience, planKeys,
+            deliveryChannels: { email: true, whatsapp: true, push: true },
             state: 'Tamil Nadu', district: 'Chennai', block: 'Test Block' });
         const job = await Job.findOne({ sourceId: update._id }).lean();
         await Job.updateOne({ _id: job._id }, { $set: { status: 'done' } });

@@ -90,11 +90,14 @@ async function stillVisible(row) {
     if (!model) return false;
     const source = await model.findById(row.data.sourceId).lean();
     if (!source || (row.data.broadcastKey && Broadcast.sourceKey(row.data.kind, source) !== row.data.broadcastKey)) return false;
+    if (row.data.kind === 'announcement' && !require('../announcements/announcementChannels').enabled(source, 'push')) return false;
     return Broadcast.visibleTo(row.data.kind, source, context);
 }
 const invalidTokenCodes = new Set(['messaging/registration-token-not-registered', 'messaging/invalid-registration-token']);
 const transientCodes = new Set(['messaging/internal-error', 'messaging/server-unavailable', 'messaging/unknown-error', 'messaging/quota-exceeded', 'messaging/message-rate-exceeded', 'app/network-error', 'app/network-timeout']);
 async function deliver(row, devices, client) {
+    // Recheck after device lookup as well as in the worker/report eligibility.
+    if (row.data?.kind === 'announcement' && !await stillVisible(row)) return { status: 'skipped' };
     const sent = new Set(row.push?.sentTokens || []);
     const targets = devices.filter(d => d.enabled && String(d.user) === String(row.user) && !sent.has(tokenHash(d.token)));
     if (!targets.length) return { status: sent.size ? 'sent' : 'skipped', sentTokens: [...sent] };

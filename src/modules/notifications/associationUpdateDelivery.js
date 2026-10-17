@@ -9,6 +9,7 @@ const { preferences, phoneFor } = require('./updatePreferences');
 const messages = require('./associationUpdateMessage');
 const email = require('./email.service');
 const whatsapp = require('./whatsappTemplate');
+const selection = require('../announcements/announcementChannels');
 const channels = ['email', 'whatsapp'];
 const AGE_LIMIT = 7 * 86400000;
 const LEASE_MS = 5 * 60000;
@@ -24,6 +25,7 @@ async function current(row, channel) {
     ]);
     if (!member || member.isActive === false || member.deletedAt || /admin$/.test(member.role || '')) return { reason: 'The member account is unavailable.' };
     if (!update || !broadcast.published('announcement', update)) return { reason: 'The update is no longer published or has expired.' };
+    if (!selection.enabled(update, channel)) return { reason: selection.disabledReason(channel) };
     if (broadcast.sourceKey('announcement', update) !== row.data.broadcastKey) return { reason: 'A newer version of this update has replaced this delivery.' };
     const receipt = await require('../payment/paymentorder.model').findOne({ memberId: member._id, orderType: 'membership', status: 'paid' })
         .sort({ paidAt: -1, createdAt: -1 }).select('planId planAudience upgradeKind').lean();
@@ -43,6 +45,11 @@ async function current(row, channel) {
 
 async function sendPrepared(channel, member, update, recipient) {
     if (!channels.includes(channel)) throw new Error('Unsupported association update channel.');
+    const latest = update?._id ? await Announcement.findById(update._id).lean() : update;
+    const reason = !selection.enabled(latest, channel) ? selection.disabledReason(channel)
+        : !latest || !broadcast.published('announcement', latest) || broadcast.sourceKey('announcement', latest) !== broadcast.sourceKey('announcement', update)
+            ? 'This update was changed or withdrawn before delivery.' : '';
+    if (reason) return { success: false, skipped: true, error: reason };
     const rendered = messages.render(update, member);
     if (channel === 'email') {
         if (!require('./emailAccounts').accountFor('membership').isConfigured) return { success: false, error: 'Membership email sender is not configured.' };
@@ -97,6 +104,12 @@ async function run(row, channel, worker, resendOf) {
         if (!linked.matchedCount) return { skipped: true, reason: 'Another worker owns this delivery.' };
         contacted = true;
         const outcome = await sendPrepared(channel, member, update, recipient);
+        if (outcome.skipped) {
+            await Log.updateOne({ _id: log._id }, { $set: { status: 'failed', lastError: outcome.error,
+                'data.autoRetryDisabled': true, 'data.skipReason': outcome.error } });
+            await finish(row, channel, worker, { status: 'skipped', lastError: outcome.error });
+            return { row: log, skipped: true, reason: outcome.error };
+        }
         const accepted = outcome.success && !outcome.mock;
         // All provider results are recorded, including missing credentials and
         // a rejected template. A successful mock is never called delivered.

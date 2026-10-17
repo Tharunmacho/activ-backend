@@ -87,7 +87,7 @@ let mongo;
 
     // Only the latest published revision produces a campaign, even if an
     // editor saves twice before the worker wakes up.
-    const update = await Announcement.create({ title: 'Revision one', body: 'A member update', status: 'published', audience: 'paid', state: 'Tamil Nadu' });
+    const update = await Announcement.create({ title: 'Revision one', body: 'A member update', status: 'published', audience: 'paid', state: 'Tamil Nadu', deliveryChannels: { email: false, whatsapp: false, push: true } });
     await Announcement.findByIdAndUpdate(update._id, { $set: { title: 'Revision two' } }, { new: true });
     for (let index = 0; index < 3; index++) await broadcast.processBatch();
     assert.equal(await Notification.countDocuments({ user: owner, 'data.sourceId': String(update._id) }), 1);
