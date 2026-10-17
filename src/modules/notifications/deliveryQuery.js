@@ -199,6 +199,7 @@ const matchLegacyRows = async(refs = []) => {
 
     const since = new Date(Math.min(...bookings.map((b) => new Date(b.createdAt || 0).getTime())));
     const rows = await NotificationLog.find({
+        adminHistoryHiddenAt: null,
         bookingRef: { $exists: false },
         'data.bookingRef': { $exists: false },
         event: { $regex: BOOKING_EVENT_RE.source },

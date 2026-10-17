@@ -81,7 +81,7 @@ class NotificationService {
          */
         const [notifications, total, unread] = await Promise.all([
             Notification.find(query)
-                .select('-push -deliveryKey -updateDelivery')
+                .select('-push -deliveryKey -updateDelivery -adminHistoryHiddenAt -adminHistoryHiddenBatch')
                 .skip(skip)
                 .limit(limit)
                 .sort({ createdAt: -1 })
@@ -95,7 +95,7 @@ class NotificationService {
 
     async markAsRead(userId, notificationId) {
         await Notification.updateOne({ _id: notificationId, user: userId, readAt: null }, { $set: { readAt: new Date() } });
-        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey -updateDelivery');
+        const notification = await Notification.findOneAndUpdate({ _id: notificationId, user: userId }, { isRead: true }, { new: true }).select('-push -deliveryKey -updateDelivery -adminHistoryHiddenAt -adminHistoryHiddenBatch');
         return notification;
     }
 
@@ -745,14 +745,14 @@ class NotificationService {
         const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
         const safePage = Math.max(parseInt(page, 10) || 1, 1);
 
-        const query = buildLogQuery({ channel, status, event, search, delivery, group, eventId, bookingRef, from, to });
+        const query = { $and: [{ adminHistoryHiddenAt: null }, buildLogQuery({ channel, status, event, search, delivery, group, eventId, bookingRef, from, to })] };
         /*
          * THE TILES' SCOPE: the same filters WITHOUT the status ("delivery")
          * and channel picks. Those two only narrow the LIST. Counted from the
          * full query, tapping "Failed" made "Sent" read 0 — the tiles then
          * described the filter instead of the automation.
          */
-        const tileQuery = buildLogQuery({ status, event, search, group, eventId, bookingRef, from, to });
+        const tileQuery = { $and: [{ adminHistoryHiddenAt: null }, buildLogQuery({ status, event, search, group, eventId, bookingRef, from, to })] };
 
         const [rows, total, counts, filtered, events] = await Promise.all([
             NotificationLog.find(query)
@@ -768,6 +768,7 @@ class NotificationService {
              * change as an operator narrows the view looking for the failures.
              */
             NotificationLog.aggregate([
+                { $match: { adminHistoryHiddenAt: null } },
                 { $group: { _id: { status: '$status', mock: '$mock' }, n: { $sum: 1 } } }
             ]).catch(() => []),
             // The Automation view's tiles: the category / event / dates / search, by effective status (see tileQuery).
@@ -777,7 +778,7 @@ class NotificationService {
             ]).catch(() => []),
             // Events that have messages, for the event filter.
             NotificationLog.aggregate([
-                { $match: { eventId: { $exists: true, $nin: ['', null] } } },
+                { $match: { adminHistoryHiddenAt: null, eventId: { $exists: true, $nin: ['', null] } } },
                 { $sort: { createdAt: 1 } },
                 { $group: { _id: '$eventId', title: { $last: '$eventTitle' }, count: { $sum: 1 }, last: { $max: '$createdAt' } } },
                 { $sort: { last: -1 } },
@@ -855,6 +856,7 @@ class NotificationService {
         if (!refs.length) return out;
 
         const tracked = await NotificationLog.find({
+            adminHistoryHiddenAt: null,
             $or: [{ bookingRef: { $in: refs } }, { 'data.bookingRef': { $in: refs } }],
             channel: { $in: ['email', 'whatsapp'] }
         }).sort({ createdAt: -1 }).limit(5000).lean().catch(() => []);

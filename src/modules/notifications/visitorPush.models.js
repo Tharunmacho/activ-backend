@@ -21,6 +21,8 @@ const notice = new mongoose.Schema({
 notice.index({ status: 1, nextAttemptAt: 1, leaseUntil: 1 });
 notice.index({ createdAt: -1 });
 const delivery = new mongoose.Schema({
+    adminHistoryHiddenAt: { push: Date, in_app: Date },
+    adminHistoryHiddenBatch: { push: String, in_app: String },
     notice: { type: mongoose.Schema.Types.ObjectId, required: true },
     device: { type: mongoose.Schema.Types.ObjectId, required: true },
     status: { type: String, enum: ['pending', 'sending', 'sent', 'failed', 'skipped'], default: 'pending' },

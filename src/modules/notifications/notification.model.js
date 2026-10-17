@@ -11,6 +11,8 @@ const updateDeliverySchema = new mongoose.Schema({
 }, { _id: false });
 
 const notificationSchema = new mongoose.Schema({
+    adminHistoryHiddenAt: { email: Date, whatsapp: Date, push: Date, in_app: Date },
+    adminHistoryHiddenBatch: { email: String, whatsapp: String, push: String, in_app: String },
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

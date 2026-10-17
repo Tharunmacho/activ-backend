@@ -2,6 +2,10 @@ const mongoose = require('mongoose');
 const dataLayout = require('../../config/dataLayout');
 
 const notificationLogSchema = new mongoose.Schema({
+    // Admin history visibility only: callbacks, deduplication and retry guards
+    // continue to use this delivery record after it is removed from reports.
+    adminHistoryHiddenAt: Date,
+    adminHistoryHiddenBatch: String,
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

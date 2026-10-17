@@ -99,6 +99,7 @@ const MODELS = {
     ContentBroadcast: ['notifications', 'content_broadcasts', A, 'content_broadcasts'],
     LifecycleOutbox: ['notifications', 'lifecycle_outbox', A, 'lifecycle_outbox'],
     DeliveryRetryBatch: ['notifications', 'delivery_retry_batches', A, 'delivery_retry_batches'],
+    NotificationHistoryBatch: ['notifications', 'history_cleanup_batches', A, 'history_cleanup_batches'],
     NotificationLog: ['notifications', 'notification_logs', A, 'notificationlogs'],
     Announcement: ['notifications', 'announcements', A, 'announcements'],
 

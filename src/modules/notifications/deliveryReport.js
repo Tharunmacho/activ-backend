@@ -25,6 +25,12 @@ const escapeRe = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const nullable = (field) => ({ $ifNull: [field, null] });
 const present = (field) => ({ $ne: [nullable(field), null] });
+const visibleHistoryChannel = {
+  $expr: { $eq: [{ $ifNull: [{ $switch: {
+    branches: CHANNELS.map(channel => ({ case: { $eq: ['$reportChannels', channel] }, then: `$adminHistoryHiddenAt.${channel}` })),
+    default: null,
+  } }, null] }, null] },
+};
 const publicationKey = { $concat: ["publication:", "$data.broadcastKey"] };
 const campaignKey = (event) => ({
   $cond: [
@@ -61,7 +67,7 @@ const totals = () => ({
   }),
 });
 
-function sourcePipeline(from, to) {
+function sourcePipeline(from, to, { historySelection = false } = {}) {
   const start = istDay(from),
     end = istDay(to, true);
   const date =
@@ -74,6 +80,9 @@ function sourcePipeline(from, to) {
         }
       : {};
   const logProject = {
+    ...(historySelection ? { historyRemovable: { $and: [
+      { $ne: ['$status', 'queued'] }, { $eq: [nullable('$retryClaim.token'), null] },
+    ] } } : {}),
     _id: { $concat: ["log:", { $toString: "$_id" }] },
     logId: { $toString: "$_id" },
     user: 1,
@@ -104,6 +113,7 @@ function sourcePipeline(from, to) {
     {
       $match: {
         ...date,
+        adminHistoryHiddenAt: null,
         channel: { $in: ["email", "whatsapp"] },
         resentAs: { $exists: false },
         // Association deliveries are joined from their queue row below so
@@ -141,6 +151,7 @@ function sourcePipeline(from, to) {
             },
           },
           { $unwind: "$reportChannels" },
+          { $match: visibleHistoryChannel },
           {
             $set: {
               queue: {
@@ -169,8 +180,17 @@ function sourcePipeline(from, to) {
             },
           },
           { $set: { deliveryLog: { $arrayElemAt: ["$deliveryLog", 0] } } },
+          { $match: { 'deliveryLog.adminHistoryHiddenAt': null } },
           {
             $project: {
+              ...(historySelection ? { historyRemovable: { $or: [
+                { $eq: ['$reportChannels', 'in_app'] },
+                { $and: [
+                  { $not: [{ $in: ['$queue.status', ['pending', 'sending']] }] },
+                  { $ne: ['$deliveryLog.status', 'queued'] },
+                  { $eq: [nullable('$deliveryLog.retryClaim.token'), null] },
+                ] },
+              ] } } : {}),
               _id: { $concat: [{ $toString: "$_id" }, ":", "$reportChannels"] },
               notificationId: { $toString: "$_id" },
               logId: { $toString: "$queue.logId" },
@@ -309,8 +329,13 @@ function sourcePipeline(from, to) {
           { $unwind: "$publicNotice" },
           { $set: { reportChannels: ["push", "in_app"] } },
           { $unwind: "$reportChannels" },
+          { $match: visibleHistoryChannel },
           {
             $project: {
+              ...(historySelection ? { historyRemovable: { $or: [
+                { $eq: ['$reportChannels', 'in_app'] },
+                { $not: [{ $in: ['$status', ['pending', 'sending']] }] },
+              ] } } : {}),
               _id: {
                 $concat: [
                   "visitor:",
@@ -414,9 +439,9 @@ function sourcePipeline(from, to) {
   ];
 }
 
-async function report(input = {}) {
+async function report(input = {}, { maxRows = 100, historySelection = false } = {}) {
   const page = Math.max(1, Math.min(100000, parseInt(input.page, 10) || 1));
-  const limit = Math.max(1, Math.min(100, parseInt(input.limit, 10) || 25));
+  const limit = Math.max(1, Math.min(maxRows, parseInt(input.limit, 10) || 25));
   const campaignPage = Math.max(
     1,
     Math.min(100000, parseInt(input.campaignPage, 10) || 1)
@@ -459,7 +484,7 @@ async function report(input = {}) {
       ? { status: input.status }
       : {};
   const results = await Log.aggregate([
-    ...sourcePipeline(input.from, input.to),
+    ...sourcePipeline(input.from, input.to, { historySelection }),
     { $match: filter },
     {
       $facet: {
@@ -502,7 +527,7 @@ async function report(input = {}) {
         ],
         rows: [
           { $match: { ...outcomeFilter, reportRecord: { $ne: false } } },
-          { $sort: { createdAt: -1, _id: 1 } },
+          { $sort: { ...(historySelection ? { historyRemovable: -1 } : {}), createdAt: -1, _id: 1 } },
           { $skip: (page - 1) * limit },
           { $limit: limit },
         ],

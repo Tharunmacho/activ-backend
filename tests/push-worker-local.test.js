@@ -82,6 +82,7 @@ let mongo;
     await push.register(owner, { token: tokens.ios, platform: 'ios', enabled: false });
     await worker();
     assert.equal((await latest(switched._id)).push.status, 'skipped');
+    assert.equal((await latest(switched._id)).push.lastError, push.skipReasons.noDevices);
     assert.equal(sent.length, 0);
     await push.register(owner, { token: tokens.web, platform: 'web' });
 
@@ -97,15 +98,18 @@ let mongo;
     await require('../src/modules/common/memberContext').memberSnapshot(String(owner));
     await Member.updateOne({ _id: owner }, { $set: { state: 'Kerala' } });
     assert.equal(await push.stillVisible(campaign), false, 'fresh region rejects stale cached audience');
+    assert.equal(await push.visibilityReason(campaign), push.skipReasons.noAccess);
     await Member.updateOne({ _id: owner }, { $set: { state: 'Tamil Nadu', membershipExpiresAt: new Date(Date.now() - 86400000) } });
     assert.equal(await push.stillVisible(campaign), false, 'expired member cannot receive paid content');
     await Member.updateOne({ _id: owner }, { $set: { membershipExpiresAt: new Date(Date.now() + 86400000) } });
     await Announcement.findByIdAndUpdate(update._id, { $set: { title: 'Revision three' } }, { new: true });
     assert.equal(await push.stillVisible(campaign), false, 'superseded push is skipped');
+    assert.equal(await push.visibilityReason(campaign), push.skipReasons.sourceChanged);
     await Announcement.findByIdAndUpdate(update._id, { $set: { status: 'draft' } }, { new: true });
     assert.equal(await push.stillVisible(campaign), false, 'withdrawn content cannot send');
     await worker();
     assert.equal((await latest(campaign._id)).push.status, 'skipped');
+    assert.equal((await latest(campaign._id)).push.lastError, push.skipReasons.sourceUnavailable);
 
     // Default findOneAndUpdate returns its old draft; the hook still sees the
     // committed publication. Saving an unchanged row does not enqueue twice.
@@ -167,7 +171,48 @@ let mongo;
     await Notification.updateOne({ _id: leased._id }, { $set: { 'push.status': 'sending', 'push.leaseUntil': new Date(0) } });
     await worker();
     assert.equal((await latest(expired._id)).push.status, 'skipped');
+    assert.equal((await latest(expired._id)).push.lastError, push.skipReasons.expired);
     assert.equal((await latest(leased._id)).push.status, 'sent');
+    assert.equal((await latest(once._id)).push.lastError || '', '', 'historical skipped rows are not rewritten or replayed');
+
+    // A channel edit stops an already queued notification and records why,
+    // even though it also changes the publication revision.
+    const channelUpdate = await Announcement.create({ title: 'Channel test', body: 'Worker fixture', status: 'published', audience: 'all', deliveryChannels: { email: false, whatsapp: false, push: true } });
+    const channelRow = await service.createNotification(owner, { title: 'Channel test', message: 'Worker fixture', data: {
+        kind: 'announcement', sourceId: String(channelUpdate._id), broadcastKey: broadcast.sourceKey('announcement', channelUpdate.toObject()),
+    } });
+    await Announcement.updateOne({ _id: channelUpdate._id }, { $set: { 'deliveryChannels.push': false } });
+    const beforeChannelCheck = sent.length;
+    await worker();
+    assert.equal((await latest(channelRow._id)).push.status, 'skipped');
+    assert.equal((await latest(channelRow._id)).push.lastError, push.skipReasons.channelOff);
+    assert.equal(sent.length, beforeChannelCheck, 'disabled channels make no provider calls');
+
+    const inactiveRow = await service.createNotification(owner, { title: 'Inactive', message: 'Worker fixture' });
+    await Member.updateOne({ _id: owner }, { $set: { isActive: false } });
+    await worker();
+    assert.equal((await latest(inactiveRow._id)).push.lastError, push.skipReasons.accountInactive);
+    assert.equal(sent.length, beforeChannelCheck, 'inactive accounts make no provider calls');
+    await Member.updateOne({ _id: owner }, { $set: { isActive: true } });
+
+    // All invalid registrations retain their existing skip semantics, with a
+    // clear reason and only the exact expired token removed.
+    const invalidToken = 'local-invalid-worker-token-123456789';
+    await push.register(members.other._id, { token: invalidToken, platform: 'web' });
+    const invalidRow = await service.createNotification(members.other._id, { title: 'Invalid device', message: 'Worker fixture' });
+    let invalidCalls = 0;
+    await push.processPushBatch({ client: { sendEach: async messages => {
+        invalidCalls++;
+        assert.deepEqual(messages.map(message => message.token), [invalidToken]);
+        return { responses: [{ success: false, error: { code: 'messaging/registration-token-not-registered' } }] };
+    } } });
+    assert.equal(invalidCalls, 1);
+    assert.equal((await latest(invalidRow._id)).push.status, 'skipped');
+    assert.equal((await latest(invalidRow._id)).push.lastError, push.skipReasons.invalidDevices);
+    assert.equal(await Device.countDocuments({ token: invalidToken }), 0);
+    assert.equal(await Device.countDocuments({ user: owner, token: tokens.web }), 1, 'unrelated live registrations are preserved');
+    await worker();
+    assert.equal(invalidCalls, 1, 'skipped invalid registrations do not automatically retry');
     console.log('PASS: persistent push worker across web/Android/iOS, partial retries, account ownership, publication revisions, fresh audience/region, messaging access, payment state, expiry and test prerequisites. No external delivery.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     await mongoose.disconnect(); if (mongo) await mongo.stop(); process.exit(process.exitCode || 0);

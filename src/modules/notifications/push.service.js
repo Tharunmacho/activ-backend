@@ -7,6 +7,19 @@ const Broadcast = require('./contentBroadcast');
 let firebase;
 let timer;
 let running = false;
+const skipReasons = Object.freeze({
+    noDevices: 'No phone or browser is currently set up to receive push notifications for this account.',
+    expired: 'This push notification is more than 24 hours old.',
+    accountInactive: 'This account is no longer active.',
+    noAccess: 'This notification no longer applies to this account or its access has changed.',
+    sourceUnavailable: 'This update is no longer published or available.',
+    sourceChanged: 'This update changed after the notification was prepared.',
+    channelOff: 'Push notifications were not selected for this update.',
+    invalidDevices: 'The registered phones or browsers can no longer receive push notifications. Enable notifications again.',
+    noAcceptance: 'No phone or browser accepted this push notification.',
+    visitorDisabled: 'Notifications are off for this visitor device, or its registration has expired.',
+    visitorSignedIn: 'This device is now signed in and uses account notifications.',
+});
 
 function isConfigured() {
     return process.env.PUSH_ENABLED === 'true' && !!(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
@@ -55,20 +68,20 @@ function payload(notification, device) {
         apns: { headers: { 'apns-priority': '10', 'apns-collapse-id': String(notification._id), 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) },
             payload: { aps: { sound: 'default' } } } };
 }
-async function stillVisible(row) {
+async function visibilityReason(row) {
     // Do not use the feed cache: a block, expiry, region change or logout must
     // take effect before a queued alert is handed to Firebase.
     const member = await require('../members/memberdetails.model').findById(row.user).lean();
     if (!member) {
-        if (row.data?.sourceId || row.data?.kind === 'message') return false;
+        if (row.data?.sourceId || row.data?.kind === 'message') return skipReasons.noAccess;
         const admin = await require('../admin/admin.repository').findById(String(row.user));
-        return !!admin?.active;
+        return admin?.active ? '' : skipReasons.accountInactive;
     }
-    if (member.isActive === false || member.deletedAt) return false;
+    if (member.isActive === false || member.deletedAt) return skipReasons.accountInactive;
     const { memberAccess, paidMembership } = require('../common/memberAudience');
     if (!row.data?.sourceId && row.data?.kind !== 'message') {
         const reason = await require('./retryEligibility').reasonToSkip({ ...row, event: row.data?.event }, { throwOnReadError: true });
-        return !reason;
+        return reason || '';
     }
     // Match payment reconciliation without mutating membership from this
     // worker. A failed read throws, so the queued push retries instead of
@@ -81,40 +94,50 @@ async function stillVisible(row) {
     const profile = missingReceipt ? { ...member, membershipStatus: 'pending' } : member;
     const context = { ...member, ...memberAccess({ ...profile, ...await paidMembership(profile) }) };
     if (row.data?.kind === 'message') {
-        if (!context.canNetwork || !row.data.conversationId) return false;
+        if (!context.canNetwork || !row.data.conversationId) return skipReasons.noAccess;
         const { Message, Conversation } = require('../messages/message.model');
-        if (row.data.messageId && !await Message.exists({ _id: row.data.messageId, deletedAt: null, hiddenFor: { $ne: row.user } })) return false;
-        return !!await Conversation.exists({ _id: row.data.conversationId, participants: row.user });
+        if (row.data.messageId && !await Message.exists({ _id: row.data.messageId, deletedAt: null, hiddenFor: { $ne: row.user } })) return skipReasons.noAccess;
+        return await Conversation.exists({ _id: row.data.conversationId, participants: row.user }) ? '' : skipReasons.noAccess;
     }
     const model = Broadcast.sourceModel(row.data.kind);
-    if (!model) return false;
+    if (!model) return skipReasons.sourceUnavailable;
     const source = await model.findById(row.data.sourceId).lean();
-    if (!source || (row.data.broadcastKey && Broadcast.sourceKey(row.data.kind, source) !== row.data.broadcastKey)) return false;
-    if (row.data.kind === 'announcement' && !require('../announcements/announcementChannels').enabled(source, 'push')) return false;
-    return Broadcast.visibleTo(row.data.kind, source, context);
+    if (!source || !Broadcast.published(row.data.kind, source)) return skipReasons.sourceUnavailable;
+    if (row.data.kind === 'announcement' && !require('../announcements/announcementChannels').enabled(source, 'push')) return skipReasons.channelOff;
+    if (row.data.broadcastKey && Broadcast.sourceKey(row.data.kind, source) !== row.data.broadcastKey) return skipReasons.sourceChanged;
+    return Broadcast.visibleTo(row.data.kind, source, context) ? '' : skipReasons.noAccess;
 }
+async function stillVisible(row) { return !(await visibilityReason(row)); }
 const invalidTokenCodes = new Set(['messaging/registration-token-not-registered', 'messaging/invalid-registration-token']);
 const transientCodes = new Set(['messaging/internal-error', 'messaging/server-unavailable', 'messaging/unknown-error', 'messaging/quota-exceeded', 'messaging/message-rate-exceeded', 'app/network-error', 'app/network-timeout']);
 async function deliver(row, devices, client) {
     // Recheck after device lookup as well as in the worker/report eligibility.
-    if (row.data?.kind === 'announcement' && !await stillVisible(row)) return { status: 'skipped' };
+    if (row.data?.kind === 'announcement') {
+        const reason = await visibilityReason(row);
+        if (reason) return { status: 'skipped', lastError: reason };
+    }
     const sent = new Set(row.push?.sentTokens || []);
     const targets = devices.filter(d => d.enabled && String(d.user) === String(row.user) && !sent.has(tokenHash(d.token)));
-    if (!targets.length) return { status: sent.size ? 'sent' : 'skipped', sentTokens: [...sent] };
+    if (!targets.length) return { status: sent.size ? 'sent' : 'skipped', sentTokens: [...sent], lastError: sent.size ? '' : skipReasons.noDevices };
     const response = await (client || messaging()).sendEach(targets.map(d => payload(row, d)));
     let retry = false;
     let failed = false;
     let lastError = '';
+    let invalidDevices = 0;
     for (let i = 0; i < response.responses.length; i++) {
         const result = response.responses[i];
         const device = targets[i];
         if (result.success) sent.add(tokenHash(device.token));
         else {
             const code = result.error?.code || 'messaging/unknown-error';
-            if (invalidTokenCodes.has(code)) await Device.deleteOne({ _id: device._id, user: row.user, token: device.token });
+            if (invalidTokenCodes.has(code)) {
+                invalidDevices++;
+                await Device.deleteOne({ _id: device._id, user: row.user, token: device.token });
+            }
             else { retry ||= transientCodes.has(code); failed = true; lastError = code; }
         }
     }
+    if (!retry && !failed && !sent.size) lastError = invalidDevices === targets.length ? skipReasons.invalidDevices : skipReasons.noAcceptance;
     return { status: retry ? 'pending' : failed ? 'failed' : sent.size ? 'sent' : 'skipped', sentTokens: [...sent], lastError };
 }
 async function processPushBatch({ client } = {}) {
@@ -136,8 +159,9 @@ async function processPushBatch({ client } = {}) {
             const attempts = (row.push?.attempts || 0) + 1;
             let result;
             try {
-                if (row.createdAt < new Date(Date.now() - 86400000) || !(await stillVisible(row))) {
-                    result = { status: 'skipped' };
+                const reason = row.createdAt < new Date(Date.now() - 86400000) ? skipReasons.expired : await visibilityReason(row);
+                if (reason) {
+                    result = { status: 'skipped', lastError: reason };
                 } else {
                     // A token may be removed or switch accounts while earlier
                     // rows are processed. Resolve its owner at delivery time.
@@ -192,4 +216,4 @@ async function queueTest(user) {
         message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
     return { queued: true };
 }
-module.exports = { messaging, register, unregister, isConfigured, payload, deliver, stillVisible, processPushBatch, start, stop, health, validToken, queueTest };
+module.exports = { messaging, register, unregister, isConfigured, payload, deliver, stillVisible, visibilityReason, skipReasons, processPushBatch, start, stop, health, validToken, queueTest };

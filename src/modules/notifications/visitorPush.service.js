@@ -18,8 +18,16 @@ async function source(notice) {
     return publicEligible(notice.kind, doc) && Broadcast.sourceKey(notice.kind, doc) === notice.key ? doc : null;
 }
 async function pushSource(notice) {
-    const doc = await source(notice);
-    return doc && (notice.kind !== 'announcement' || require('../announcements/announcementChannels').enabled(doc, 'push')) ? doc : null;
+    return (await pushEligibility(notice)).doc || null;
+}
+async function pushEligibility(notice) {
+    const reasons = require('./push.service').skipReasons;
+    if (!notice) return { reason: reasons.sourceUnavailable };
+    const doc = await Broadcast.sourceModel(notice.kind)?.findById(notice.sourceId).lean();
+    if (!publicEligible(notice.kind, doc)) return { reason: reasons.sourceUnavailable };
+    if (notice.kind === 'announcement' && !require('../announcements/announcementChannels').enabled(doc, 'push')) return { reason: reasons.channelOff };
+    if (Broadcast.sourceKey(notice.kind, doc) !== notice.key) return { reason: reasons.sourceChanged };
+    return { doc, reason: '' };
 }
 async function install() {
     const key = crypto.randomBytes(32).toString('hex');
@@ -130,10 +138,15 @@ async function processBatch(client) {
         if (!row) return;
         let status = 'skipped', lastError = '', sentAt, attemptedToken;
         try {
+            const reasons = require('./push.service').skipReasons;
             const device = await VisitorDevice.findById(row.device).select('+token').lean();
             const notice = await PublicNotice.findById(row.notice).lean();
-            if (notice && notice.createdAt >= new Date(Date.now() - 86400000) && device?.enabled && device.token
-                && device.lastSeenAt >= new Date(Date.now() - 90 * 86400000) && !await MemberDevice.exists({ token: device.token }) && await pushSource(notice)) {
+            if (!notice || !notice.createdAt) lastError = reasons.sourceUnavailable;
+            else if (notice.createdAt < new Date(Date.now() - 86400000)) lastError = reasons.expired;
+            else if (!device?.enabled || !device.token || !device.lastSeenAt || device.lastSeenAt < new Date(Date.now() - 90 * 86400000)) lastError = reasons.visitorDisabled;
+            else if (await MemberDevice.exists({ token: device.token })) lastError = reasons.visitorSignedIn;
+            else lastError = (await pushEligibility(notice)).reason;
+            if (!lastError) {
                 const data = { audience: 'visitor', publicNotificationId: String(notice._id), visitorId: String(device._id) };
                 // A web worker validates the opted-in installation before showing
                 // a notification. Firebase must not auto-display after opt-out/login.

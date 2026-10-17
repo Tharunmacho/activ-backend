@@ -23,6 +23,12 @@ router.use(verifyToken);
 router.get('/reports', requireRole('super_admin'), asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./deliveryReport').report(req.query)));
 }));
+router.post('/history/delete-preview', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./notificationHistory').preview(req.body, req.user.userId)));
+}));
+router.post('/history/delete', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./notificationHistory').execute(req.body, req.user.userId)));
+}));
 router.post('/reports/retry-preview', requireRole('super_admin'), asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./deliveryRetry').preview(req.body, req.user.userId)));
 }));
