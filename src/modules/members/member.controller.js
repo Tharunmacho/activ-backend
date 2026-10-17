@@ -897,6 +897,7 @@ const getMyProfile = asyncHandler(async(req, res) => {
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     
+    Object.assign(profileData, await require('../auth/accountCapabilities').forMemberEmail(member.email));
     res.json(ApiResponse.success(profileData));
 });
 

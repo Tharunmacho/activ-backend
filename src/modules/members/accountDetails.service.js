@@ -27,7 +27,10 @@ async function update(member, body, { admin = false } = {}) {
     const creatingAuth = !auth;
     if (!auth && admin && password) auth = new Auth({ email: oldEmail, password, isActive: member.isActive !== false });
     if (!auth) throw ApiError.conflict('This account has no login record. A Super Admin must save a new password to restore sign-in.');
-    if (password && !admin && !await auth.comparePassword(body.currentPassword || '')) throw ApiError.badRequest('Current password is incorrect.');
+    if (password && !admin) {
+        if (!require('../auth/accountCapabilities').hasPassword(auth)) throw ApiError.badRequest('Use the email password reset link to choose your first ACTIV password. You can continue signing in with your linked provider.');
+        if (!await auth.comparePassword(body.currentPassword || '')) throw ApiError.badRequest('Current password is incorrect.');
+    }
     if (email !== oldEmail) {
         const [profileTaken, loginTaken] = await Promise.all([
             Member.exists({ email, _id: { $ne: member._id } }), Auth.exists({ email, _id: { $ne: auth._id } }),
@@ -41,7 +44,7 @@ async function update(member, body, { admin = false } = {}) {
     const previous = Object.fromEntries(Object.keys(changes).map(key => [key, member[key]]));
     Object.assign(member, changes);
     await member.validate();
-    const oldAuth = { email: auth.email, password: auth.password, resetPasswordToken: auth.resetPasswordToken, resetPasswordExpires: auth.resetPasswordExpires };
+    const oldAuth = { email: auth.email, password: auth.password, passwordLoginEnabled: auth.passwordLoginEnabled, resetPasswordToken: auth.resetPasswordToken, resetPasswordExpires: auth.resetPasswordExpires };
     const credentialsChanged = creatingAuth || email !== oldEmail || Boolean(password);
     if (credentialsChanged) {
         auth.email = email;
@@ -58,9 +61,9 @@ async function update(member, body, { admin = false } = {}) {
         if (creatingAuth) {
             await Auth.deleteOne({ _id: auth._id, email, password: auth.password });
         } else if (credentialsChanged) {
-            const set = { email: oldAuth.email, password: oldAuth.password };
+            const set = { email: oldAuth.email };
             const unset = {};
-            for (const key of ['resetPasswordToken', 'resetPasswordExpires']) {
+            for (const key of ['password', 'passwordLoginEnabled', 'resetPasswordToken', 'resetPasswordExpires']) {
                 if (oldAuth[key] === undefined) unset[key] = '';
                 else set[key] = oldAuth[key];
             }

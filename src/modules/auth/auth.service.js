@@ -15,6 +15,7 @@ const regionService = require('../regions/region.service');
 const { internationalFromPhone, validateMobile } = require('../common/phoneNumber');
 const mailer = require('../../core/utils/mailer');
 const notificationService = require('../notifications/notification.service');
+const accountCapabilities = require('./accountCapabilities');
 
 /**
  * What a blocked member is told at sign-in.
@@ -338,6 +339,7 @@ class AuthService {
         return {
             user: {
                 loginMethod: 'password',
+                hasPassword: true, linkedProviders: [], passwordStatus: 'set',
                 id: memberDetails._id,
                 memberId: memberDetails._id,
                 email: memberDetails.email,
@@ -479,6 +481,7 @@ class AuthService {
         return {
             user: {
                 loginMethod: provider,
+                ...await accountCapabilities.forMemberEmail(memberDetails.email),
                 id: memberDetails._id,
                 memberId: memberDetails._id,
                 email: memberDetails.email,
@@ -629,6 +632,7 @@ class AuthService {
             );
 
             adminObj.loginMethod = 'password';
+            Object.assign(adminObj, { hasPassword: true, linkedProviders: [], passwordStatus: 'set' });
             await require('../audit/audit.service').record({
                 action: 'auth.signed_in', category: 'authentication',
                 summary: `${adminObj.fullName} signed in using password`,
@@ -694,13 +698,17 @@ class AuthService {
     async getCurrentUser(userId, user = {}) {
         const cached = await cacheClient.get(CACHE_KEYS.USER(userId));
         if (cached && (cached.email || cached.fullName)) {
-            return cached;
+            // Profile caches may predate a newly linked provider or password.
+            const credentials = !cached.role || ['member', 'business', 'student', 'aspirant'].includes(cached.role)
+                ? await accountCapabilities.forMemberEmail(cached.email)
+                : { hasPassword: true, linkedProviders: [], passwordStatus: 'set' };
+            return { ...cached, ...credentials, ...(cached.details && { details: { ...cached.details, ...credentials } }) };
         }
 
         const memberDetails = await MemberDetails.findById(userId).catch(() => null);
 
         if (memberDetails) {
-            const profile = memberDetails.toJSON();
+            const profile = { ...memberDetails.toJSON(), ...await accountCapabilities.forMemberEmail(memberDetails.email) };
             const result = {
                 ...profile,
                 id: memberDetails._id,
@@ -723,6 +731,7 @@ class AuthService {
                 const row = adminRepository.toAdminRow(hit.doc, hit.source);
                 const result = {
                     id: String(hit.objectId),
+                    hasPassword: true, linkedProviders: [], passwordStatus: 'set',
                     memberId: String(hit.objectId),
                     fullName: row.fullName,
                     email: row.email,
@@ -732,7 +741,7 @@ class AuthService {
                     district: row.district,
                     block: row.block
                 };
-                result.details = result;
+                result.details = { ...result };
 
                 await cacheClient.set(CACHE_KEYS.USER(userId), result, CACHE_TTL.HOUR);
                 return result;
@@ -863,7 +872,8 @@ class AuthService {
                 resetPasswordExpires: { $gt: new Date() }
             }).catch(() => null);
             if (memberAuth && memberAuth.isActive !== false) {
-                return { valid: true, email: maskEmail(memberAuth.email), kind: 'member' };
+                const profile = await MemberDetails.findOne({ email: memberAuth.email }).select('isActive').lean();
+                if (profile?.isActive !== false) return { valid: true, email: maskEmail(memberAuth.email), kind: 'member' };
             }
         }
 
@@ -906,14 +916,20 @@ class AuthService {
 
             if (memberAuth) {
                 if (memberAuth.isActive === false) throw ApiError.badRequest(invalid);
-                // Assigned, not updated in place, so the model's pre-save hook
-                // does the hashing.
-                memberAuth.password = password;
-                memberAuth.resetPasswordToken = undefined;
-                memberAuth.resetPasswordExpires = undefined;
-                await memberAuth.save();
+                const profile = await MemberDetails.findOne({ email: memberAuth.email }).select('_id isActive').lean();
+                if (profile?.isActive === false) throw ApiError.badRequest(invalid);
+                // A first password needs the same mailbox proof as a reset.
+                // Consume its hash atomically: concurrent submissions must not
+                // both choose a password with the same emailed token.
+                const passwordHash = await bcrypt.hash(password, 10);
+                const updated = await MemberAuth.findOneAndUpdate({
+                    _id: memberAuth._id, isActive: { $ne: false },
+                    resetPasswordToken: tokenHash, resetPasswordExpires: { $gt: new Date() },
+                }, { $set: { password: passwordHash, passwordLoginEnabled: true },
+                    $unset: { resetPasswordToken: '', resetPasswordExpires: '' } }, { new: true });
+                if (!updated) throw ApiError.badRequest(invalid);
 
-                await cacheClient.del(CACHE_KEYS.USER(memberAuth._id.toString()));
+                await cacheClient.del(CACHE_KEYS.USER(String(profile?._id || memberAuth._id)));
                 logger.info('Password reset completed', { email: memberAuth.email, kind: 'member' });
                 return { email: memberAuth.email, kind: 'member' };
             }
@@ -947,6 +963,7 @@ class AuthService {
     }
 
     async changePassword(userId, oldPassword, newPassword) {
+        if (typeof newPassword !== 'string' || newPassword.length < 6) throw ApiError.badRequest('Password must be at least 6 characters long');
         // Tokens carry the profile ID; the credential document has its own ID.
         const member = await MemberDetails.findById(userId).select('email');
         const memberAuth = member
@@ -979,7 +996,10 @@ class AuthService {
             return true;
         }
 
-        // Verify old password
+        if (!accountCapabilities.hasPassword(memberAuth)) {
+            throw ApiError.badRequest('You do not have an ACTIV password. Continue with your linked sign-in provider, or use the email password reset link to choose your first password.');
+        }
+        // A linked provider never bypasses an existing password check.
         const isPasswordValid = await memberAuth.comparePassword(oldPassword);
         if (!isPasswordValid) {
             throw ApiError.badRequest('Current password is incorrect');

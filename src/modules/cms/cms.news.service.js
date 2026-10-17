@@ -26,6 +26,7 @@ const {
     cleanFields, toFields, actorOf, cleanSections,
 } = require('./cms.contentHelpers');
 const { cleanScheme, toScheme } = require('./cms.schemes.service');
+const { cleanPhotos, cleanAttachments, cleanLinks, readPhotos, readAttachments, readLinks } = require('./cms.news.assets');
 
 /* ---------------------------------------------------------------- articles */
 
@@ -34,7 +35,9 @@ const cleanArticle = (payload = {}) => ({
     ...pick(payload, 'summary', (v) => long(v, 1200)),
     ...pick(payload, 'body', (v) => long(v)),
     ...pick(payload, 'image', cleanMedia),
-    ...pick(payload, 'photos', (v) => asArray(v).map(cleanMedia).filter((m) => m.url)),
+    ...pick(payload, 'photos', cleanPhotos),
+    ...pick(payload, 'attachments', cleanAttachments),
+    ...pick(payload, 'links', cleanLinks),
     ...pick(payload, 'externalUrl', str),
     ...pick(payload, 'sourceName', str),
     ...pick(payload, 'displayDate', str),
@@ -56,7 +59,9 @@ const toArticle = (doc = {}) => ({
     summary: doc.summary || '',
     body: doc.body || '',
     image: toMedia(doc.image),
-    photos: (doc.photos || []).map(toMedia),
+    photos: readPhotos(doc.photos),
+    attachments: readAttachments(doc.attachments),
+    links: readLinks(doc.links),
     externalUrl: doc.externalUrl || '',
     sourceName: doc.sourceName || '',
     displayDate: doc.displayDate || '',
@@ -158,7 +163,11 @@ const service = {
     },
 
     async getArticle(slug, { includeDrafts = false } = {}) {
-        const doc = await NewsArticle.findOne({ slug: String(slug || '') }).lean();
+        const key = String(slug || '');
+        // Existing clients fall back to the record ID for articles predating
+        // slugs. Both addresses must pass the same publication check.
+        const filter = /^[a-f\d]{24}$/i.test(key) ? { $or: [{ slug: key }, { _id: key }] } : { slug: key };
+        const doc = await NewsArticle.findOne(filter).lean();
         if (!doc || (!includeDrafts && doc.status !== 'published')) {
             throw ApiError.notFound('That article is not published');
         }
@@ -222,7 +231,7 @@ const service = {
             if (updates.title && updates.title !== existing.title) {
                 updates.slug = await uniqueSlug(NewsArticle, updates.title, id);
             }
-            const doc = await NewsArticle.findByIdAndUpdate(id, { $set: updates }, { new: true }).lean();
+            const doc = await NewsArticle.findByIdAndUpdate(id, { $set: updates }, { new: true, runValidators: true }).lean();
             return toArticle(doc);
         }
 

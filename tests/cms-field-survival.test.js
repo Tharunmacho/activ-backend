@@ -373,10 +373,12 @@ const stat = { icon: 'users', value: '10', label: 'Members' };
     section('News');
     await verify('news article', models.NewsArticle, () => news.saveArticle(null, {
         title: 'T', summary: 'S', body: '<p>b</p>', image: media, photos: [media], externalUrl: 'https://x',
+        attachments: [{ url: '/uploads/documents/probe/report.pdf', label: 'Report', filename: 'report.pdf', mimeType: 'application/pdf', size: 12 }],
+        links: [{ url: 'https://youtu.be/example', label: 'Video' }],
         sourceName: 'Src', displayDate: '10 Oct', category: 'C', location: 'L', state: 'Kerala', district: 'D',
         featured: true, extraFields: extra, status: 'published',
     }, { email: 'probe@x.in' }), [
-        'title', 'summary', 'body', 'image.url', 'photos', 'externalUrl', 'sourceName', 'displayDate',
+        'title', 'summary', 'body', 'image.url', 'photos', 'attachments', 'links', 'externalUrl', 'sourceName', 'displayDate',
         'category', 'location', 'featured', 'extraFields', 'status',
     ]);
     await verify('news settings', models.NewsSettings, () => news.saveSettings({

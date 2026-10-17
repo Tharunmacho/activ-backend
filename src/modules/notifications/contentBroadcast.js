@@ -6,7 +6,7 @@ const logger = require('../../config/logger');
 const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district block tier targets reachEveryone expiresAt startAt endAt days archivedAt deletedAt recipientMode memberIds';
 const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets', 'recipientMode', 'memberIds', 'variables',
     'startAt', 'endAt', 'days', 'mode', 'venue', 'venueAddress', 'venueMapUrl', 'onlinePlatform', 'onlineUrl', 'language', 'category', 'topic',
-    'content', 'image', 'images', 'media', 'photos', 'attachments', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
+    'content', 'image', 'images', 'media', 'photos', 'attachments', 'links', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
     'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote', 'includeVisitors', 'channel', 'showOnOnboarding'];
 
 function published(kind, doc) {

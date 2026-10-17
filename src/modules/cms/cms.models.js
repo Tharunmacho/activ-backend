@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const dataLayout = require('../../config/dataLayout');
+const newsAssets = require('./cms.news.assets');
 
 /**
  * Content for the public onboarding site, stored in `activ_website`.
@@ -1073,7 +1074,23 @@ const newsArticleSchema = new mongoose.Schema({
 
     image: media(),
     /** Further pictures, shown under the article. */
-    photos: [media()],
+    photos: { type: [media()], validate: { validator: value => value.length <= newsAssets.PHOTO_LIMIT, message: 'Use no more than 20 photos per article.' } },
+    attachments: {
+        type: [new mongoose.Schema({
+            url: { type: String, required: true, maxlength: 2048, validate: value => newsAssets.allowedUrl(value, 'attachment') },
+            label: { type: String, default: '', maxlength: 160 }, filename: { type: String, default: '', maxlength: 160 },
+            mimeType: { type: String, enum: Object.values(newsAssets.DOCUMENT_MIMES), required: true },
+            size: { type: Number, min: 0, max: newsAssets.DOCUMENT_LIMIT, default: 0 },
+        }, { _id: false })],
+        validate: { validator: value => value.length <= newsAssets.ATTACHMENT_LIMIT, message: 'Use no more than 10 documents per article.' },
+    },
+    links: {
+        type: [new mongoose.Schema({
+            url: { type: String, required: true, maxlength: 2048, validate: value => newsAssets.allowedUrl(value, 'link') },
+            label: { type: String, default: '', maxlength: 160 },
+        }, { _id: false })],
+        validate: { validator: value => value.length <= newsAssets.LINK_LIMIT, message: 'Use no more than 10 supporting links per article.' },
+    },
 
     /**
      * ======================================================================

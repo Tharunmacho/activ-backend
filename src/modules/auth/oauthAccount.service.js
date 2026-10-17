@@ -94,7 +94,7 @@ async function accountFor(flow, email, expectedLinkedAuthId) {
             }
         }
         try {
-            auth = await Auth.create({ email, password: crypto.randomBytes(48).toString('hex'), isActive: true });
+            auth = await Auth.create({ email, passwordLoginEnabled: false, isActive: true });
         } catch (error) {
             if (error?.code === 11000) auth = await Auth.findOne({ email }).select('email isActive').lean();
             if (!auth) {

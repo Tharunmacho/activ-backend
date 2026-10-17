@@ -123,8 +123,7 @@ const canSeeDrafts = (req) =>
  * Events and the gallery: the content editors, plus the EVENTS ADMIN, whose
  * portal is the programme, the gallery, the news and the schemes. Kept apart
  * from `canSeeDrafts` so that role never sees a draft policy or region page.
- * (News and schemes need nothing here — they show drafts to any signed-in
- * reader already.)
+ * News uses its own editing roles below; schemes keep their existing policy.
  */
 const canSeeEventDrafts = (req) =>
     canSeeDrafts(req) || !!(req.user && ['events_admin', 'attendance_admin'].includes(req.user.role));
@@ -505,13 +504,13 @@ const listNews = asyncHandler(async(req, res) => {
         state: req.query.state || '',
         district: req.query.district || '',
         category: req.query.category || '',
-        includeDrafts: !!req.user,
+        includeDrafts: !!req.user && ['super_admin', 'cms_admin', 'events_admin'].includes(req.user.role),
     });
     res.json(ApiResponse.success(data));
 });
 
 const getArticle = asyncHandler(async(req, res) => {
-    const data = await news.getArticle(req.params.slug, { includeDrafts: !!req.user });
+    const data = await news.getArticle(req.params.slug, { includeDrafts: !!req.user && ['super_admin', 'cms_admin', 'events_admin'].includes(req.user.role) });
     res.json(ApiResponse.success(data));
 });
 
