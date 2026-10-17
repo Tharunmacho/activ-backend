@@ -15,6 +15,11 @@ function basicLogReason(row) {
     if (row.data?.outcomeUnknown || ['partial', 'unknown', 'accepted'].includes(row.data?.smtpRecipientStatus)) return 'Provider acceptance is uncertain or partial; review provider history before sending again.';
     if (row.data?.autoRetryDisabled) return row.data.skipReason || 'Retries are disabled for this delivery.';
     if (['PASSWORD_RESET', 'ADMIN_WELCOME'].includes(row.event)) return 'This message contains an expired or one-time credential. Create a fresh credential through the account workflow.';
+    // This refusal names the stored destination, which a retry deliberately
+    // preserves. Editing a profile cannot safely retarget an old log entry.
+    if (row.channel === 'whatsapp' && /^Not sent: this is ACTIV's own WhatsApp number\b/.test(String(row.failureReason || row.lastError || ''))) {
+        return "This message is addressed to ACTIV's own WhatsApp number. Correct the person's saved number, then create a new alert. Resending this entry would use the old number.";
+    }
     return '';
 }
 

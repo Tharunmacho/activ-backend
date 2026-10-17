@@ -220,7 +220,9 @@ router.post('/retry-failed', requireRole('super_admin'), asyncHandler(async(req,
 
 /** Send one failed row again. */
 router.post('/retry/:id', requireRole('super_admin'), asyncHandler(async(req, res) => {
-    const result = await notificationService.retryLog(req.params.id);
+    // The direct row action must enforce the same current-recipient/source
+    // checks as the report preview/confirm path, including unknown outcomes.
+    const result = await notificationService.retryLog(req.params.id, { strict: true });
     if (!result) throw ApiError.notFound('No such notification log entry');
 
     const { withEffectiveStatus } = require('./deliveryQuery');

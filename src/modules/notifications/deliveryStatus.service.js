@@ -104,7 +104,16 @@ const applyStatus = async({ id, status, timestamp, errors } = {}) => {
 
     const at = toDate(timestamp);
     const history = Array.isArray(row.statusHistory) ? row.statusHistory : [];
-    if (history.some((h) => h && h.status === status)) return { matched: true, changed: false };
+    // A direct retry keeps the audit history on this row but starts another
+    // provider message at `accepted`. Old failures/delivery steps must not
+    // suppress callbacks for the new message. The lookup above also ensures
+    // delayed callbacks for its former provider ID cannot change this attempt.
+    let attemptStart = 0;
+    for (let index = history.length - 1; index >= 0; index--) {
+        if (history[index]?.status === 'accepted') { attemptStart = index; break; }
+    }
+    const attemptHistory = history.slice(attemptStart);
+    if (attemptHistory.some((h) => h && h.status === status)) return { matched: true, changed: false };
 
     const { code, title, detail } = status === 'failed' ? describeError(errors) : { code: '', title: '', detail: '' };
     const step = { status, at, ...(code ? { code } : {}), ...(title ? { title } : {}), ...(detail ? { detail: detail.slice(0, 500) } : {}) };
@@ -128,13 +137,15 @@ const applyStatus = async({ id, status, timestamp, errors } = {}) => {
     if (status === 'read') {
         set.readAt = at;
         // A read message was delivered, even if that callback never came.
-        if (!history.some((h) => h && h.status === 'delivered')) set.deliveredAt = at;
+        if (!attemptHistory.some((h) => h && h.status === 'delivered')) set.deliveredAt = at;
     }
 
-    await NotificationLog.updateOne(
-        { _id: row._id },
+    const written = await NotificationLog.updateOne(
+        { _id: row._id, providerMessageId: String(id) },
         { $set: set, $push: { statusHistory: step } }
     ).catch((error) => logger.warn('Delivery status not recorded', { id, status, error: error && error.message }));
+
+    if (!written?.modifiedCount) return { matched: !!written?.matchedCount, changed: false };
 
     if (status === 'failed') {
         logger.warn('WhatsApp message FAILED after it was accepted', { providerMessageId: id, code, title, detail });

@@ -105,11 +105,80 @@ let mongo;
         makeLog({ data: { emailHtml: '<p>Opt-out</p>', autoRetryDisabled: true, skipReason: 'Recipient opted out.' } }),
         makeLog({ lastError: 'ETIMEDOUT after provider contact' }), makeLog({ event: 'PASSWORD_RESET' }),
         makeLog({ createdAt: new Date(Date.now() - 31 * 86400000) }),
+        makeLog({ channel: 'whatsapp', recipient: '919123456780', templateId: 'fixture-approved',
+            lastError: "Not sent: this is ACTIV's own WhatsApp number — save the person's own mobile number on their record" }),
     ]);
     review = await preview(protectedRows.map(id));
     assert.equal(review.eligible, 0); assert.equal(review.skipped, protectedRows.length);
     for (const row of protectedRows.slice(0, 6)) assert((await service.retryLog(row._id)).skipped);
+    assert((await service.retryLog(protectedRows.at(-1)._id)).skipped, 'the wrong stored recipient is never retried through another sender path');
+    assert.match(review.reasons.find(item => item.reason.includes("ACTIV's own WhatsApp number"))?.reason || '', /create a new alert/);
     assert.equal(calls.length, 1, 'accepted/read/partial/unknown/disabled rows cannot send via old retry path either');
+    for (const row of protectedRows) {
+        await request(app).post(`/notifications/retry/${row._id}`).set('Authorization', auth()).send({}).expect(200);
+        assert.equal((await Log.findById(row._id).lean()).attempts, 4);
+    }
+    assert.equal(calls.length, 1, 'direct HTTP resend also rejects uncertain network outcomes, expired messages and credentials');
+    await request(app).post(`/notifications/retry/${protectedRows[0]._id}`)
+        .set('Authorization', auth(String(member._id), 'member')).send({}).expect(403);
+
+    // Real callback persistence, with only the sender mocked: a second failure
+    // after resending must replace the current status without losing history.
+    const statusService = require('../src/modules/notifications/deliveryStatus.service');
+    const mediaFailure = await makeLog({ channel: 'whatsapp', recipient: '919123456780', provider: 'meta',
+        providerMessageId: 'fixture-original-media-message', templateId: 'fixture-approved',
+        failureCode: '131053', failedAt: new Date(), lastError: 'Media upload error: HTTP 503',
+        failureReason: 'Media upload error: Downloading media from weblink failed with http code 503 (code 131053)',
+        data: { params: ['Fixture'] }, statusHistory: [
+            { status: 'accepted', at: new Date(Date.now() - 2000) },
+            { status: 'failed', at: new Date(Date.now() - 1000), code: '131053', detail: 'HTTP 503' },
+        ] });
+    const beforeMediaReview = calls.length;
+    const mediaReview = await preview([id(mediaFailure)]);
+    assert.equal(mediaReview.eligible, 1, 'a confirmed media failure can be reviewed for a single-message retry');
+    assert.equal(calls.length, beforeMediaReview, 'media failure review does not send');
+    const directMedia = (await request(app).post(`/notifications/retry/${mediaFailure._id}`)
+        .set('Authorization', auth()).send({}).expect(200)).body;
+    assert.equal(directMedia.data.deliveryStatus, 'accepted');
+    assert.equal(calls.length, beforeMediaReview + 1);
+    const acceptedMedia = await Log.findById(mediaFailure._id).lean();
+    assert.equal(acceptedMedia.failureCode, undefined); assert.equal(acceptedMedia.failedAt, undefined);
+    assert.equal(acceptedMedia.statusHistory.filter(step => step.status === 'failed').length, 1, 'old failure stays in audit history');
+    assert.equal((await statusService.applyStatus({ id: 'fixture-original-media-message', status: 'failed', errors: [{ code: 131053 }] })).matched, false,
+        'an old provider message callback cannot overwrite the new attempt');
+    const callback = { id: acceptedMedia.providerMessageId, status: 'failed', errors: [{ code: 131053,
+        title: 'Media upload error', error_data: { details: 'Downloading media from weblink failed with http code 503' } }] };
+    assert.equal((await statusService.applyStatus(callback)).changed, true, 'new attempt failure is recorded despite the prior failed attempt');
+    assert.equal((await statusService.applyStatus(callback)).changed, false, 'duplicate callback within this attempt stays idempotent');
+    const failedAgain = await Log.findById(mediaFailure._id).lean();
+    assert.equal(failedAgain.status, 'failed'); assert.equal(failedAgain.deliveryStatus, 'failed');
+    assert.equal(failedAgain.failureCode, '131053');
+    assert.equal(failedAgain.statusHistory.filter(step => step.status === 'failed').length, 2);
+    assert.equal(failedAgain.attempts, 5);
+
+    const callbackRace = await makeLog({ channel: 'whatsapp', status: 'sent', deliveryStatus: 'accepted',
+        providerMessageId: 'fixture-callback-race-old', statusHistory: [{ status: 'accepted', at: new Date() }] });
+    const originalUpdateOne = Log.updateOne;
+    let interruptedCallback = false;
+    Log.updateOne = function (filter, update, ...options) {
+        if (String(filter._id) === String(callbackRace._id) && update.$push?.statusHistory?.status === 'delivered') {
+            interruptedCallback = true;
+            // Reproduce a replacement attempt being saved between the webhook's
+            // read and write; the old provider ID must no longer match.
+            return originalUpdateOne.call(this, { _id: callbackRace._id }, {
+                $set: { providerMessageId: 'fixture-callback-race-new' },
+                $push: { statusHistory: { status: 'accepted', at: new Date() } },
+            }).then(() => originalUpdateOne.call(this, filter, update, ...options));
+        }
+        return originalUpdateOne.call(this, filter, update, ...options);
+    };
+    try {
+        assert.equal((await statusService.applyStatus({ id: 'fixture-callback-race-old', status: 'delivered' })).changed, false);
+    } finally { Log.updateOne = originalUpdateOne; }
+    assert(interruptedCallback);
+    const raceAfter = await Log.findById(callbackRace._id).lean();
+    assert.equal(raceAfter.deliveryStatus, 'accepted'); assert.equal(raceAfter.deliveredAt, undefined);
+    assert(!raceAfter.statusHistory.some(step => step.status === 'delivered'));
 
     const changed = await makeLog(); review = await preview([id(changed)]);
     await Log.updateOne({ _id: changed._id }, { $set: { deliveryStatus: 'accepted', status: 'sent' } });

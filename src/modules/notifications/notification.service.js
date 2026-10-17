@@ -1044,6 +1044,12 @@ class NotificationService {
             row.deliveryStatus = outcome.success ? 'accepted' : 'failed';
             row.statusHistory = [...(row.statusHistory || []), { status: row.deliveryStatus, at: new Date(), detail: outcome.success ? 'Re-sent' : String(outcome.error || '').slice(0, 500) }];
             row.failureReason = outcome.success ? undefined : String(outcome.error || '').slice(0, 1000);
+            if (outcome.success) {
+                // Historical failure details remain in statusHistory; these
+                // fields describe only the newly accepted attempt.
+                row.failureCode = undefined;
+                row.failedAt = undefined;
+            }
         }
         await row.save().catch(() => null);
 
