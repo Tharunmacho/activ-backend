@@ -122,8 +122,11 @@ const sendTemplateMessage = async(phone, templateName, params = [], languageCode
     const chosen = provider();
     const name = providerName();
     const safeParams = sanitizeParams(params);
+    const safeOptions = options?.headerImage && !options?.headerDocument?.link
+        ? { ...options, headerImage: require('./whatsappMedia').whatsappImageUrl(options.headerImage) }
+        : options;
 
-    const result = await chosen.sendTemplateMessage(phone, templateName, safeParams, languageCode, textFallback, options);
+    const result = await chosen.sendTemplateMessage(phone, templateName, safeParams, languageCode, textFallback, safeOptions);
 
     /*
      * A Meta failure is NOT retried through BotBee.
@@ -141,7 +144,7 @@ const sendTemplateMessage = async(phone, templateName, params = [], languageCode
         });
     }
 
-    return { ...result, provider: name };
+    return { ...result, provider: name, ...(safeOptions?.headerImage ? { headerImage: safeOptions.headerImage } : {}) };
 };
 
 /** Whether any provider can send a template at all. */

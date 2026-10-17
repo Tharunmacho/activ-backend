@@ -22,7 +22,9 @@ const logger = require('../../config/logger');
  *
  * NEVER BREAKS AN IMAGE. No `?w`, not an image, `sharp` missing on the host,
  * an unreadable file — every one of those falls through to the original, served
- * exactly as before.
+ * exactly as before. An explicit `format=jpeg` request instead fails closed
+ * when conversion is unavailable, so WhatsApp never receives an unsupported
+ * original image under a JPEG conversion URL.
  */
 
 let sharp = null;
@@ -118,7 +120,20 @@ const readOriginal = async(uploadsDir, name, store) => {
         })().finally(() => reading.delete(file));
         reading.set(file, job);
     }
-    const buffer = await job.pending;
+    let buffer = await job.pending;
+    if (!buffer && store.legacyRead) {
+        const legacyKey = `legacy:${file}`;
+        let legacy = reading.get(legacyKey);
+        if (!legacy) {
+            legacy = { pending: (async() => {
+                const recovered = await store.legacyRead(name);
+                if (recovered) await cacheBuffer(file, recovered);
+                return recovered;
+            })().finally(() => reading.delete(legacyKey)) };
+            reading.set(legacyKey, legacy);
+        }
+        buffer = await legacy.pending;
+    }
     if (job.unavailable) store.onUnavailable?.();
     return buffer;
 };
@@ -126,17 +141,24 @@ const readOriginal = async(uploadsDir, name, store) => {
 /** Requests already rendering a variant, so a burst of visitors renders it once. */
 const rendering = new Map();
 
-const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req, res, next) => {
-    if (!sharp || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket, legacyRead }) => async(req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
 
-    const width = snap(req.query && req.query.w);
-    const name = cleanName(decodeURIComponent(req.path || ''));
-    if (!width || !name || !RESIZABLE.test(name)) return next();
+    const forceJpeg = req.query?.format === 'jpeg';
+    const unavailable = () => res.status(503).set('Cache-Control', 'no-store')
+        .send('The image could not be prepared. Please try again.');
+    if (!sharp) return forceJpeg ? unavailable() : next();
 
-    const webp = /image\/webp/.test(String(req.headers.accept || ''));
+    const width = snap(req.query && req.query.w) || (forceJpeg ? 1600 : 0);
+    let name;
+    try { name = cleanName(decodeURIComponent(req.path || '')); } catch { return forceJpeg ? unavailable() : next(); }
+    const supported = forceJpeg ? /\.(jpe?g|png|webp|avif|gif)$/i.test(name) : RESIZABLE.test(name);
+    if (!width || !name || !supported) return forceJpeg ? unavailable() : next();
+
+    const webp = !forceJpeg && /image\/webp/.test(String(req.headers.accept || ''));
     const ext = webp ? 'webp' : 'jpg';
     const dir = path.join(uploadsDir, '.variants');
-    const file = path.join(dir, `${name.split('/').join('__')}.${width}.${ext}`);
+    const file = path.join(dir, `${name.split('/').join('__')}.${width}${forceJpeg ? '.whatsapp' : ''}.${ext}`);
 
     const send = (buffer) => {
         res.setHeader('Content-Type', webp ? 'image/webp' : 'image/jpeg');
@@ -156,13 +178,18 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
             const state = job;
             job.pending = (async() => {
                 const original = await readOriginal(uploadsDir, name, {
-                    objectStore, bucket, onUnavailable: () => { state.unavailable = true; }
+                    objectStore, bucket, onUnavailable: () => { state.unavailable = true; },
+                    // Only the configured legacy source may recover an image.
+                    // Never forward a request already sent by legacy recovery.
+                    legacyRead: forceJpeg && !req.headers[require('./legacyUploads').LOOP_HEADER] ? legacyRead : undefined,
                 });
                 if (!original) return null;
                 let pipeline = sharp(original, { failOn: 'none' }).rotate()
-                    .resize({ width, withoutEnlargement: true });
+                    .resize({ width, ...(forceJpeg ? { height: 1600, fit: 'inside' } : {}), withoutEnlargement: true });
+                if (forceJpeg) pipeline = pipeline.flatten({ background: '#ffffff' });
                 pipeline = webp ? pipeline.webp({ quality: 78, effort: 4 }) : pipeline.jpeg({ quality: 80, mozjpeg: true });
                 const out = await pipeline.toBuffer();
+                if (forceJpeg && out.length > 5 * 1024 * 1024) throw Error('The WhatsApp image exceeds the supported size.');
                 // Keep it for next time. A failed write only costs a re-render.
                 await cacheBuffer(file, out);
                 return out;
@@ -176,11 +203,13 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
             // second GET deadline on the same unavailable bucket in one request.
             if (job.unavailable) req.uploadStorageUnavailable = true;
         }
-        if (!buffer) return next();
+        // An explicit JPEG request must never fall back to the original WebP.
+        // Meta accepts the send first and only reports that format failure later.
+        if (!buffer) return forceJpeg ? unavailable() : next();
         return send(buffer);
     } catch (error) {
-        logger.warn('Image variant not produced; serving the original', { name, width, error: error && error.message });
-        return next();
+        logger.warn('Image variant not produced', { name, width, format: ext, error: error && error.message });
+        return forceJpeg ? unavailable() : next();
     }
 };
 

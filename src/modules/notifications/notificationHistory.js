@@ -6,8 +6,9 @@ const Batch = require('./notificationHistoryBatch.model');
 const Log = require('./notificationLog.model');
 const Notification = require('./notification.model');
 const { VisitorDelivery } = require('./visitorPush.models');
-const { buildLogQuery } = require('./deliveryQuery');
+const { buildLogQuery, matchLegacyRows } = require('./deliveryQuery');
 const LIMIT = 500;
+const ALL_LIMIT = 10000;
 const AUDIENCE = 'activ-notification-history-cleanup';
 const CHANNELS = ['email', 'whatsapp', 'push', 'in_app'];
 const hexId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
@@ -26,8 +27,8 @@ const retain = {
 };
 const actorRequired = actor => { if (!actor) throw ApiError.unauthorized('An authenticated administrator is required.'); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-function cleanIds(ids, view) {
-    if (!Array.isArray(ids) || !ids.length || ids.length > LIMIT || ids.some(id => typeof id !== 'string')) throw ApiError.badRequest(`Choose between 1 and ${LIMIT} history entries.`);
+function cleanIds(ids, view, limit = LIMIT) {
+    if (!Array.isArray(ids) || !ids.length || ids.length > limit || ids.some(id => typeof id !== 'string')) throw ApiError.badRequest(`Choose between 1 and ${limit} history entries.`);
     const selected = ids.map(id => view === 'logs' && hexId(id) ? `log:${id}` : id);
     if (selected.some(id => !rowId(id) || (view === 'logs' && !/^log:/i.test(id)))) throw ApiError.badRequest('Choose valid history entry IDs.');
     return [...new Set(selected)];
@@ -118,18 +119,34 @@ async function parallel(items, callback) {
 }
 async function preview(input = {}, actor) {
     actorRequired(actor);
-    if (!object(input) || !['reports', 'logs'].includes(input.view) || Object.keys(input).some(key => !['view', 'ids', 'filters'].includes(key))
+    if (!object(input) || !['reports', 'logs'].includes(input.view) || Object.keys(input).some(key => !['view', 'ids', 'filters', 'all'].includes(key))
+        || (input.all !== undefined && typeof input.all !== 'boolean')
         || (input.ids !== undefined && input.filters !== undefined)) throw ApiError.badRequest('Choose one history view and either entries or filters.');
     const { view } = input;
+    const all = input.all === true;
+    const selectionLimit = all ? ALL_LIMIT : LIMIT;
+    // Read one extra ID to reject an oversized full selection instead of
+    // silently clearing only part of it. Never fetch a new page while clearing.
+    const readLimit = selectionLimit + (all ? 1 : 0);
     let ids, matched;
-    if (input.ids !== undefined) { ids = cleanIds(input.ids, view); matched = ids.length; }
+    if (input.ids !== undefined) { ids = cleanIds(input.ids, view, selectionLimit); matched = ids.length; }
     else {
         const filters = filtersFor(view, input.filters === undefined ? {} : input.filters);
         if (view === 'reports') {
-            const report = await require('./deliveryReport').report({ ...filters, page: 1, limit: LIMIT }, { maxRows: LIMIT, historySelection: true });
+            const report = await require('./deliveryReport').report({ ...filters, page: 1, limit: readLimit }, { maxRows: readLimit, historySelection: true });
             ids = report.rows.map(row => row._id); matched = report.pagination.total;
         } else {
-            const query = { $and: [{ adminHistoryHiddenAt: null }, buildLogQuery(filters)] };
+            let query = { $and: [{ adminHistoryHiddenAt: null }, buildLogQuery(filters)] };
+            if (all && filters.bookingRef) {
+                const ref = filters.bookingRef.toUpperCase();
+                const otherFilters = buildLogQuery({ ...filters, bookingRef: '' });
+                // Booking screens also include old rows matched by recipient.
+                // Use that same matcher without its normal display-page cap;
+                // otherwise clearing a booking would silently miss old logs.
+                const legacy = await matchLegacyRows([ref], { limit: readLimit, filter: otherFilters, throwOnReadError: true });
+                query = { $and: [{ adminHistoryHiddenAt: null }, otherFilters, { channel: { $in: ['email', 'whatsapp'] } },
+                    { $or: [{ bookingRef: ref }, { 'data.bookingRef': ref }, { _id: { $in: (legacy.get(ref) || []).map(row => row._id) } }] }] };
+            }
             const [rows, count] = await Promise.all([
                 Log.aggregate([
                     { $match: query },
@@ -143,13 +160,15 @@ async function preview(input = {}, actor) {
                             { $not: [{ $in: ['$historyQueue.status', ['pending', 'sending']] }] }] },
                     ] } } },
                     { $sort: { historyRemovable: -1, createdAt: -1, _id: 1 } },
-                    { $limit: LIMIT }, { $project: { _id: 1 } },
+                    { $limit: readLimit }, { $project: { _id: 1 } },
                 ]).allowDiskUse(true).option({ maxTimeMS: 20000 }),
-                Log.countDocuments(query).maxTimeMS(20000),
+                all ? Promise.resolve(null) : Log.countDocuments(query).maxTimeMS(20000),
             ]);
-            ids = rows.map(row => `log:${row._id}`); matched = count;
+            ids = rows.map(row => `log:${row._id}`); matched = all ? ids.length : count;
         }
     }
+    if (all && (matched > ALL_LIMIT || ids.length > ALL_LIMIT)) throw ApiError.badRequest(
+        `More than ${ALL_LIMIT.toLocaleString('en-US')} logs match. Narrow the dates or filters, then clear each selection. No logs have been cleared.`);
     const checked = await parallel(ids, async id => { try { return await resolve(id); } catch { return { id, reason: retain.unavailable }; } });
     const reasons = [], eligible = [], versions = [], seen = new Set();
     for (const item of checked) {
@@ -157,11 +176,20 @@ async function preview(input = {}, actor) {
         if (reason) reasonCount(reasons, reason);
         else { eligible.push(item.id); versions.push(item.version); seen.add(item.key); }
     }
-    const token = eligible.length ? jwt.sign({ ids: eligible, versions }, config.jwt.secret, {
+    const sign = (batchIds, batchVersions) => jwt.sign({ ids: batchIds, versions: batchVersions }, config.jwt.secret, {
         algorithm: 'HS256', audience: AUDIENCE, subject: String(actor), jwtid: crypto.randomUUID(), expiresIn: 600,
-    }) : '';
+    });
+    const batches = [];
+    if (all) for (let offset = 0; offset < eligible.length; offset += LIMIT) {
+        const batchIds = eligible.slice(offset, offset + LIMIT);
+        batches.push({ ids: batchIds, token: sign(batchIds, versions.slice(offset, offset + LIMIT)), eligible: batchIds.length });
+    }
+    // Full clear has one reviewed selection, sent in bounded immutable chunks.
+    // An empty top-level token prevents accidentally confirming only one part.
+    const token = !all && eligible.length ? sign(eligible, versions) : '';
     return { matched, reviewed: ids.length, eligible: eligible.length, retained: ids.length - eligible.length,
-        remaining: matched - ids.length, truncated: matched > ids.length, ids: eligible, token, reasons };
+        remaining: matched - ids.length, truncated: matched > ids.length, ids: eligible, token, reasons,
+        ...(all ? { batches } : {}) };
 }
 const guard = item => {
     const row = item.row;
@@ -244,4 +272,4 @@ async function execute(input = {}, actor) {
     await Batch.updateOne({ _id: batch._id }, { $set: { status: 'done', summary } });
     return summary;
 }
-module.exports = { preview, execute, LIMIT };
+module.exports = { preview, execute, LIMIT, ALL_LIMIT };

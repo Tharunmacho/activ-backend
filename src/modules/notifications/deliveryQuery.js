@@ -174,12 +174,12 @@ const phoneKey = (value) => String(value || '').replace(/\D/g, '').slice(-10);
  * to — booker or participant, email exactly or the last ten digits of the
  * phone — and (b) existed when it was sent. Resolves `Map<ref, rows[]>`.
  */
-const matchLegacyRows = async(refs = []) => {
+const matchLegacyRows = async(refs = [], { limit = 2000, filter = {}, throwOnReadError = false } = {}) => {
     const EventBooking = require('../events/eventbooking.model');
     const bookings = await EventBooking.find({ bookingRef: { $in: refs } })
         .select('bookingRef createdAt bookedBy participants')
         .lean()
-        .catch(() => []);
+        .catch(error => { if (throwOnReadError) throw error; return []; });
     const out = new Map();
     if (!bookings || !bookings.length) return out;
 
@@ -205,8 +205,9 @@ const matchLegacyRows = async(refs = []) => {
         event: { $regex: BOOKING_EVENT_RE.source },
         channel: { $in: ['email', 'whatsapp'] },
         recipient: { $in: recipients },
-        createdAt: { $gte: since }
-    }).sort({ createdAt: -1 }).limit(2000).lean().catch(() => []);
+        createdAt: { $gte: since },
+        ...(Object.keys(filter).length ? { $and: [filter] } : {}),
+    }).sort({ createdAt: -1 }).limit(limit).lean().catch(error => { if (throwOnReadError) throw error; return []; });
 
     for (const row of rows || []) {
         const r = String(row.recipient || '').trim().toLowerCase();

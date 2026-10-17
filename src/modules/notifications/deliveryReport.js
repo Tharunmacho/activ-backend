@@ -530,6 +530,7 @@ async function report(input = {}, { maxRows = 100, historySelection = false } = 
           { $sort: { ...(historySelection ? { historyRemovable: -1 } : {}), createdAt: -1, _id: 1 } },
           { $skip: (page - 1) * limit },
           { $limit: limit },
+          ...(historySelection ? [{ $project: { _id: 1 } }] : []),
         ],
         rowCount: [
           { $match: { ...outcomeFilter, reportRecord: { $ne: false } } },
@@ -541,6 +542,12 @@ async function report(input = {}, { maxRows = 100, historySelection = false } = 
     .allowDiskUse(true)
     .option({ maxTimeMS: 20000 });
   const result = results[0] || {};
+  // Cleanup needs only a frozen set of IDs. Keep large selections out of the
+  // facet's document-size limit and skip recipient/campaign enrichment.
+  if (historySelection) {
+    const count = Number(result.rowCount?.[0]?.total || 0);
+    return { rows: result.rows || [], pagination: { page, limit, total: count, pages: Math.max(1, Math.ceil(count / limit)) } };
+  }
   const users = (result.rows || []).map((row) => row.user).filter(Boolean);
   const members = users.length
     ? await Member.find({ _id: { $in: users } })

@@ -31,7 +31,7 @@ let mongo;
     require('../src/modules/notifications/push.service').messaging = () => { providerCalls++; throw Error('No send permitted'); };
     const admin = String(new mongoose.Types.ObjectId()), other = String(new mongoose.Types.ObjectId());
     const auth = (id = admin, role = 'super_admin') => `Bearer ${jwt.sign({ userId: id, role }, process.env.JWT_SECRET)}`;
-    const app = express(); app.use(express.json());
+    const app = express(); app.use(express.json({ limit: '10mb' }));
     app.use('/notifications', require('../src/modules/notifications/notification.routes'));
     app.use((error, _req, res, _next) => res.status(error.statusCode || 500).json({ message: error.message }));
     const post = (route, body, actor = admin) => request(app).post(`/notifications/history/${route}`).set('Authorization', auth(actor)).send(body);
@@ -50,6 +50,9 @@ let mongo;
         { view: 'logs', filters: { bookingRef: { $ne: null } } },
         { view: 'logs', filters: null }, { view: 'logs', filters: false },
         { view: 'reports', ids: Array.from({ length: 501 }, () => id(first)) },
+        { view: 'logs', filters: {}, all: 'true' },
+        { view: 'logs', filters: {}, all: 1 },
+        { view: 'logs', ids: Array.from({ length: 10001 }, () => id(first)), all: true },
     ]) await post('delete-preview', body).expect(400);
     let review = await preview([String(first._id)], 'logs');
     assert.equal(review.eligible, 1); assert.equal(review.retained, 0);
@@ -166,6 +169,30 @@ let mongo;
     assert.deepEqual((await service.deliverySummary([bookingRef])).summaries[bookingRef], {});
     assert.equal(await Log.countDocuments({ _id: { $in: [tracked._id, legacy._id] } }), 2);
 
+    // Full booking cleanup is canonical, not the screen's bounded loaded list:
+    // include tracked and recipient-matched legacy records beyond both caps.
+    await Log.collection.insertMany(Array.from({ length: 7002 }, (_, index) => ({ user, channel: 'email',
+        event: 'EVENT_BOOKING_REMINDER', recipient: 'booking-fixture@example.test',
+        subject: 'Complete booking history fixture', status: 'failed', deliveryStatus: 'failed',
+        createdAt: new Date(), ...(index < 5001 ? { bookingRef } : {}) })));
+    assert.equal((await service.bookingDelivery(bookingRef)).rows.length, 7000, 'normal booking history display remains bounded');
+    const completeBooking = await history.preview({ view: 'logs', filters: { bookingRef: bookingRef.toLowerCase() }, all: true }, admin);
+    assert.equal(completeBooking.matched, 7002); assert.equal(completeBooking.eligible, 7002);
+    assert.equal(completeBooking.remaining, 0); assert.equal(completeBooking.batches.length, 15);
+    assert.equal(new Set(completeBooking.ids).size, 7002);
+    const bookingFind = Booking.find;
+    Booking.find = () => ({ select: () => ({ lean: () => Promise.reject(Error('Booking read unavailable')) }) });
+    try {
+        await assert.rejects(history.preview({ view: 'logs', filters: { bookingRef }, all: true }, admin), /Booking read unavailable/,
+            'a failed legacy lookup cannot silently omit old booking history');
+    } finally { Booking.find = bookingFind; }
+    await Log.collection.insertMany(Array.from({ length: 3000 }, () => ({ user, channel: 'email',
+        event: 'EVENT_BOOKING_REMINDER', bookingRef, recipient: 'booking-fixture@example.test',
+        subject: 'Complete booking history fixture', status: 'failed', createdAt: new Date() })));
+    const oversizedBooking = await post('delete-preview', { view: 'logs', filters: { bookingRef }, all: true }).expect(400);
+    assert.match(oversizedBooking.body.message, /10,000/);
+    assert.equal(await Log.countDocuments({ subject: 'Complete booking history fixture', adminHistoryHiddenAt: { $exists: true } }), 0);
+
     // Clear a bounded exact snapshot. Messages arriving after review survive;
     // the next review finds the remainder, not the just-hidden entries.
     await Log.insertMany(Array.from({ length: 503 }, (_, index) => ({ user, channel: 'email', event: 'CUSTOM', recipient: 'batch@example.test',
@@ -185,6 +212,70 @@ let mongo;
     assert.equal((await service.listLogs({ search: 'Bulk history cleanup fixture' })).counts.total, 4);
     assert.equal((await reports.report({ search: 'Bulk history cleanup fixture' })).pagination.total, 4);
 
+    // One manual clear reviews the whole category once, then confirms exact
+    // chunks. It never selects another page or adds new arrivals mid-clear.
+    const fullLogs = await Log.insertMany(Array.from({ length: 503 }, (_, index) => ({ user, channel: index % 2 ? 'whatsapp' : 'email',
+        event: 'EVENT_BOOKING_REMINDER', recipient: 'full-log@example.test', subject: 'Complete event history fixture',
+        status: 'failed', deliveryStatus: 'failed', createdAt: new Date(Date.now() - index) })));
+    const fullWaiting = await makeLog({ event: 'EVENT_BOOKING_REMINDER', subject: 'Complete event history fixture', status: 'queued', deliveryStatus: undefined });
+    const otherCategory = await makeLog({ event: 'PASSWORD_RESET', subject: 'Complete event history fixture' });
+    const fullReview = (await post('delete-preview', { view: 'logs', filters: { group: 'booking', search: 'Complete event history fixture' }, all: true }).expect(200)).body.data;
+    assert.equal(fullReview.matched, 504); assert.equal(fullReview.reviewed, 504); assert.equal(fullReview.eligible, 503);
+    assert.equal(fullReview.retained, 1); assert.equal(fullReview.remaining, 0); assert.equal(fullReview.truncated, false);
+    assert.equal(fullReview.token, '', 'full clear cannot accidentally confirm only the first batch');
+    assert.deepEqual(fullReview.batches.map(batch => batch.eligible), [500, 3]);
+    assert.deepEqual(fullReview.batches.flatMap(batch => batch.ids), fullReview.ids, 'every reviewed eligible ID is included exactly once');
+    for (const batch of fullReview.batches) {
+        const signed = jwt.decode(batch.token);
+        assert.deepEqual(signed.ids, batch.ids); assert.equal(signed.sub, admin);
+        assert.equal(signed.versions.length, batch.ids.length);
+        assert(Buffer.byteLength(JSON.stringify({ ids: batch.ids, token: batch.token })) < 100 * 1024);
+    }
+    assert.equal(new Set(fullReview.batches.map(batch => jwt.decode(batch.token).jti)).size, 2, 'each chunk has its own idempotency key');
+    const explicitFull = (await post('delete-preview', { view: 'logs', ids: fullLogs.map(row => String(row._id)), all: true }).expect(200)).body.data;
+    assert.equal(explicitFull.eligible, 503); assert.equal(explicitFull.batches.length, 2, 'booking details may review more than500 explicit IDs');
+    assert.equal(await Log.countDocuments({ subject: 'Complete event history fixture', adminHistoryHiddenAt: { $exists: true } }), 0, 'full review performs no writes');
+    await post('delete', { ids: fullReview.batches[1].ids, token: fullReview.batches[1].token }, other).expect(400);
+    assert.equal((await confirm(fullReview.batches[0])).removed, 500);
+    assert.equal((await confirm(fullReview.batches[0])).alreadySubmitted, true, 'resuming a completed chunk returns its durable result');
+    const changedId = fullReview.batches[1].ids[0].slice(4);
+    await Log.updateOne({ _id: changedId }, { $set: { deliveryStatus: 'delivered', status: 'sent' } });
+    const fullArrival = await makeLog({ event: 'EVENT_BOOKING_REMINDER', subject: 'Complete event history fixture' });
+    const finalChunk = await confirm(fullReview.batches[1]);
+    assert.equal(finalChunk.removed, 2); assert.equal(finalChunk.retained, 1, 'later chunks still verify the original reviewed versions');
+    for (const row of [fullWaiting, fullArrival, otherCategory]) assert.equal((await Log.findById(row._id)).adminHistoryHiddenAt, undefined);
+    assert.equal((await Log.findById(changedId)).adminHistoryHiddenAt, undefined);
+    assert.equal((await service.listLogs({ group: 'booking', search: 'Complete event history fixture' })).pagination.total, 3);
+    assert.equal((await Log.findById(fullLogs[0]._id)).data?.autoRetryDisabled, undefined, 'clearing history does not change retry policy');
+
+    // Full report clearing uses the same complete snapshot and zeroes report
+    // and log counts. The next new message is counted as the first message.
+    await Log.insertMany(Array.from({ length: 503 }, () => ({ user, channel: 'email', event: 'CUSTOM', recipient: 'full-report@example.test',
+        subject: 'Complete report history fixture', status: 'failed', deliveryStatus: 'failed' })));
+    const fullReport = (await post('delete-preview', { view: 'reports', filters: { search: 'Complete report history fixture' }, all: true }).expect(200)).body.data;
+    assert.equal(fullReport.matched, 503); assert.equal(fullReport.eligible, 503); assert.equal(fullReport.remaining, 0);
+    assert.deepEqual(fullReport.batches.map(batch => batch.eligible), [500, 3]);
+    for (const batch of fullReport.batches) assert.equal((await confirm(batch)).removed, batch.eligible);
+    assert.equal((await reports.report({ search: 'Complete report history fixture' })).pagination.total, 0);
+    assert.equal((await service.listLogs({ search: 'Complete report history fixture' })).counts.total, 0);
+    await makeLog({ subject: 'Complete report history fixture', status: 'sent', deliveryStatus: 'accepted' });
+    const restarted = await service.listLogs({ search: 'Complete report history fixture' });
+    assert.equal(restarted.pagination.total, 1); assert.equal(restarted.counts.byChannel.email.accepted, 1);
+    assert.equal((await reports.report({ search: 'Complete report history fixture' })).pagination.total, 1);
+    const emptyFull = await history.preview({ view: 'logs', filters: { search: 'No matching history fixture' }, all: true }, admin);
+    assert.equal(emptyFull.eligible, 0); assert.deepEqual(emptyFull.batches, []); assert.equal(emptyFull.token, '');
+
+    // Oversized selections fail before signing or clearing anything. Full
+    // report selection projects just IDs so large stored content is not copied
+    // into the aggregation facet used to build the review.
+    await Log.collection.insertMany(Array.from({ length: 10001 }, () => ({ user, channel: 'email', event: 'CUSTOM',
+        recipient: 'oversize@example.test', subject: 'Oversized history fixture', status: 'sent', createdAt: new Date() })));
+    for (const view of ['logs', 'reports']) {
+        const tooLarge = await post('delete-preview', { view, filters: { search: 'Oversized history fixture' }, all: true }).expect(400);
+        assert.match(tooLarge.body.message, /10,000.*Narrow.*No logs have been cleared/);
+    }
+    assert.equal(await Log.countDocuments({ subject: 'Oversized history fixture', adminHistoryHiddenAt: { $exists: true } }), 0);
+
     // More than a full page of waiting messages must not trap an older
     // completed row forever behind the same first500 unremovable entries.
     await Log.insertMany(Array.from({ length: 501 }, () => ({ user, channel: 'email', event: 'CUSTOM', recipient: 'waiting@example.test',
@@ -200,5 +291,5 @@ let mongo;
     assert.equal(onlyWaiting.eligible, 0); assert.equal(onlyWaiting.retained, 500);
     assert.equal(onlyWaiting.token, '', 'waiting-only filters cannot authorize removal');
     assert.equal(providerCalls, 0, 'history cleanup never queues or sends a notification');
-    console.log('PASS history cleanup: super-admin access, strict IDs/filters, 500-row signed snapshots, duplicates/replays, changed/in-flight protection, channel isolation, association counterparts/rollback, visitor rows, booking legacy matching, inbox/dedupe/callback preservation, new arrivals, counts and no provider calls.');
+    console.log('PASS history cleanup: super-admin access, strict IDs/filters, legacy500-row and full10,000-bound signed snapshots, sequential chunks/replays, changed/in-flight protection, channel isolation, association counterparts/rollback, visitor rows, booking legacy matching, inbox/dedupe/callback preservation, new arrivals, count reset and no provider calls.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); process.exit(process.exitCode || 0); });

@@ -546,7 +546,7 @@ class NotificationService {
                     // The values that went WITH the template that went — a
                     // retry must replay those, not the first step's.
                     let usedParams = rendered.whatsapp.params;
-                    let usedHeader = rendered.whatsapp.headerImage || '';
+                    let usedHeader = sent.headerImage || rendered.whatsapp.headerImage || '';
                     let fb = rendered.whatsapp.fallback;
                     const refused = [];
                     while (!sent.success && fb && fb.template && require('./templateFallback')(sent.error)) {
@@ -561,7 +561,7 @@ class NotificationService {
                             );
                             tried = fb.template;
                             usedParams = fb.params;
-                            usedHeader = fb.headerImage || '';
+                            usedHeader = sent.headerImage || fb.headerImage || '';
                         }
                         fb = fb.fallback;
                     }
@@ -1036,6 +1036,10 @@ class NotificationService {
         row.mock = !!outcome.mock;
         row.providerMessageId = outcome.messageId || row.providerMessageId;
         row.lastError = outcome.error;
+        if (row.channel === 'whatsapp' && outcome.headerImage) {
+            row.data = { ...row.data, headerImage: outcome.headerImage };
+            if (typeof row.markModified === 'function') row.markModified('data');
+        }
         if (row.channel === 'email') {
             row.data = { ...row.data, ...require('../../core/utils/smtpRecipientResult').smtpLogData(outcome) };
             if (typeof row.markModified === 'function') row.markModified('data');

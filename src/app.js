@@ -27,7 +27,15 @@ app.use('/uploads', require('./modules/messages/messageAttachments').blockPublic
 app.use('/uploads', makeVariantMiddleware({
     uploadsDir: uploadStore.UPLOADS_DIR,
     objectStore: uploadStore.objectStore,
-    bucket: uploadStore.bucket
+    bucket: uploadStore.bucket,
+    legacyRead: async name => {
+        const recovered = await require('./core/storage/legacyUploads').fetchLegacy(name, {
+            timeoutMs: 5000, maxBytes: 25 * 1024 * 1024, maxOrigins: 2,
+        });
+        if (!recovered) return null;
+        uploadStore.persistBuffer(recovered.buffer, name, { contentType: recovered.contentType }).catch(() => null);
+        return recovered.buffer;
+    },
 }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
     // Unique names, never reused: a month, and no re-check on every visit.

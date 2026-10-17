@@ -47,25 +47,28 @@ const looksLikeFile = (contentType) => {
  * Fetch `/uploads/<name>` from the first legacy origin that has it.
  * Resolves `{ buffer, contentType, origin }` or null. Never throws.
  */
-const fetchLegacy = async(name) => {
+const fetchLegacy = async(name, { timeoutMs = TIMEOUT_MS, maxBytes = MAX_BYTES, maxOrigins } = {}) => {
     if (!name || !isEnabled()) return null;
     let axios;
     try { axios = require('axios'); } catch { return null; }
 
-    for (const origin of origins()) {
+    const timeout = Math.max(1, Math.min(TIMEOUT_MS, Number(timeoutMs) || TIMEOUT_MS));
+    const byteLimit = Math.max(1, Math.min(MAX_BYTES, Number(maxBytes) || MAX_BYTES));
+    const candidates = Number.isFinite(maxOrigins) ? origins().slice(0, Math.max(0, Math.floor(maxOrigins))) : origins();
+    for (const origin of candidates) {
         const url = `${origin}/uploads/${name.split('/').map(encodeURIComponent).join('/')}`;
         try {
             const res = await axios.get(url, {
                 responseType: 'arraybuffer',
-                timeout: TIMEOUT_MS,
-                maxContentLength: MAX_BYTES,
-                maxBodyLength: MAX_BYTES,
+                timeout,
+                maxContentLength: byteLimit,
+                maxBodyLength: byteLimit,
                 maxRedirects: 2,
                 validateStatus: () => true,
                 headers: { [LOOP_HEADER]: '1', Accept: '*/*' },
             });
             const type = res.headers && res.headers['content-type'];
-            if (res.status === 200 && res.data && res.data.length && looksLikeFile(type)) {
+            if (res.status === 200 && res.data && res.data.length && res.data.length <= byteLimit && looksLikeFile(type)) {
                 return { buffer: Buffer.from(res.data), contentType: String(type || '').split(';')[0].trim(), origin };
             }
         } catch (err) {
