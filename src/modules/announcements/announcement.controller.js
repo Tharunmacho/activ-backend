@@ -55,4 +55,6 @@ const remove = asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(data, 'Update deleted'));
 });
 
-module.exports = { listForMember, getForMember, listForAdmin, create, update, setStatus, remove };
+const recipientOptions = asyncHandler(async (req, res) => res.json(ApiResponse.success(await announcementService.recipientOptions(req.query || {}))));
+const preview = asyncHandler(async (req, res) => res.json(ApiResponse.success(await announcementService.preview(req.body || {}))));
+module.exports = { listForMember, getForMember, listForAdmin, create, update, setStatus, remove, recipientOptions, preview };

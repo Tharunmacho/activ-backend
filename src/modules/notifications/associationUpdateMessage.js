@@ -1,6 +1,6 @@
 const config = require('../../config');
 const email = require('./email.service');
-const { personalizeUpdate, recipientName } = require('../common/recipientPersonalization');
+const { personalizeUpdate, personalizeText } = require('../common/recipientPersonalization');
 
 const line = (value, max) => email.htmlToText(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 const templateName = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE || 'activ_association_update_v2';
@@ -18,7 +18,7 @@ function mediaUrl(value) {
 
 function render(update, member) {
     update = personalizeUpdate(update, member);
-    const name = line(recipientName(member), 60) || 'ACTIVian';
+    const name = line(personalizeText('{name}', member, update), 60) || 'ACTIVian';
     const title = line(update?.title, 200) || 'Association update';
     const text = email.htmlToText(update?.body || update?.summary || 'Please open the update to view the poster or document.');
     const summary = line(update?.summary || text, 350) || 'Please open the update to view the poster or document.';

@@ -1,0 +1,52 @@
+// Isolated loopback Mongo + HTTP. No production policy or Play writes.
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server-core');
+const express = require('express');
+const request = require('supertest');
+const jwt = require('jsonwebtoken');
+Object.assign(process.env, { NODE_ENV: 'test', JWT_SECRET: 'local-update-policy-test-only' });
+let mongo;
+(async () => {
+    mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1' } });
+    assert.match(mongo.getUri(), /^mongodb:\/\/127\.0\.0\.1:/);
+    process.env.MONGODB_URI = mongo.getUri();
+    await mongoose.connect(mongo.getUri());
+    const Policy = require('../src/modules/appUpdates/appUpdate.model');
+    const Audit = require('../src/modules/audit/audit.model');
+    const app = express(); app.use(express.json());
+    app.use('/app-updates', require('../src/modules/appUpdates/appUpdate.routes'));
+    app.use(require('../src/core/middleware/errorHandler').errorHandler);
+    const token = role => `Bearer ${jwt.sign({ role, userId: 'local-admin' }, process.env.JWT_SECRET)}`;
+    const payload = { enabled: true, requireLatestAvailable: true, minimumVersionCode: 27, message: 'Install the latest ACTIV update.', productionAvailableConfirmed: true };
+    let response = await request(app).get('/app-updates/android').expect(200);
+    assert.equal(response.body.data.enabled, true);
+    assert.equal(response.body.data.requireLatestAvailable, true);
+    assert.equal(response.body.data.minimumVersionCode, 1);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    assert.equal(await Policy.countDocuments(), 0, 'launch reads do not insert or activate stored policies');
+    await request(app).get('/app-updates/admin').expect(401);
+    await request(app).put('/app-updates/admin').send(payload).expect(401);
+    await request(app).put('/app-updates/admin').set('Authorization', token('district_admin')).send(payload).expect(403);
+    for (const bad of [0, -1, 2.5, '27', 2100000001]) {
+        await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, minimumVersionCode: bad }).expect(400);
+    }
+    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, productionAvailableConfirmed: false }).expect(400);
+    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, requireLatestAvailable: 'true' }).expect(400);
+    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send(payload).expect(200);
+    response = await request(app).get('/app-updates/android').expect(200);
+    assert.equal(response.body.data.minimumVersionCode, 27);
+    assert.equal(response.body.data.packageName, 'in.activ.membership');
+    assert.equal(response.body.data.playUrl, 'https://play.google.com/store/apps/details?id=in.activ.membership');
+    assert.equal(response.body.data.updatedBy, undefined);
+    assert.equal(response.body.data.productionAvailableConfirmedAt, undefined);
+    assert.equal(await Audit.countDocuments({ action: 'app_update_policy.saved' }), 1);
+    const audit = await Audit.findOne({ action: 'app_update_policy.saved' }).lean();
+    assert.equal(audit.category, 'admin');
+    assert.equal(audit.metadata.requireLatestAvailable, true);
+    assert.equal(audit.metadata.minimumVersionCode, 27);
+    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, enabled: false, productionAvailableConfirmed: false }).expect(200);
+    assert.equal((await request(app).get('/app-updates/android')).body.data.enabled, false, 'policy can disable a previously required update');
+    console.log('PASS: launch policy defaults/read-only behavior, admin authorization, positive version validation, release acknowledgement, private metadata projection, auditing and disable.');
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); });

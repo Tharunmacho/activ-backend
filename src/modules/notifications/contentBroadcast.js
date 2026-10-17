@@ -3,8 +3,8 @@ const { memberAccess, matchesAudience } = require('../common/memberAudience');
 const { targetsMember, multiTargetsViewer } = require('../common/regionMatch');
 const { isPastEvent } = require('../events/eventLifecycle');
 const logger = require('../../config/logger');
-const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district block tier targets reachEveryone expiresAt startAt endAt days archivedAt deletedAt';
-const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets',
+const VISIBILITY_FIELDS = 'slug status visible audience planKeys state district block tier targets reachEveryone expiresAt startAt endAt days archivedAt deletedAt recipientMode memberIds';
+const MATERIAL_FIELDS = ['title', 'summary', 'body', 'description', 'caption', 'status', 'visible', 'audience', 'state', 'district', 'block', 'targets', 'recipientMode', 'memberIds', 'variables',
     'startAt', 'endAt', 'days', 'mode', 'venue', 'venueAddress', 'venueMapUrl', 'onlinePlatform', 'onlineUrl', 'language', 'category', 'topic',
     'content', 'image', 'images', 'media', 'photos', 'attachments', 'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel', 'planKeys', 'expiresAt', 'reachEveryone', 'tier', 'link', 'url', 'location',
     'benefits', 'eligibility', 'howToApply', 'agenda', 'speakers', 'registrationFee', 'memberFee', 'capacity', 'registrationEnabled', 'registrationDeadline', 'registrationNote', 'includeVisitors', 'channel', 'showOnOnboarding'];
@@ -25,7 +25,7 @@ function sourceModel(kind) {
 function visibleTo(kind, doc, context) {
     if (!published(kind, doc) || !matchesAudience(doc.audience, context, kind === 'announcement' ? doc.planKeys : [])) return false;
     if (kind === 'event') return doc.reachEveryone === true || multiTargetsViewer(doc, context);
-    if (kind === 'announcement') return multiTargetsViewer(doc, context);
+    if (kind === 'announcement') return multiTargetsViewer(doc, context) && require('../announcements/announcementRecipients').matchesSelected(doc, context);
     if (kind === 'scheme' && ['central', 'national'].includes(doc.tier)) return true;
     return targetsMember(doc, context);
 }

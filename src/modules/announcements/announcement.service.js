@@ -6,6 +6,8 @@ const { multiTargetClause, multiTargetsViewer, targetsLabel, targetDepth } = req
 const { AUDIENCES, announcementAudienceClause, matchesAudience } = require('../common/memberAudience');
 const { personalizeUpdate } = require('../common/recipientPersonalization');
 const { sanitizeHtml } = require('../cms/richText');
+const recipients = require('./announcementRecipients');
+const { BUILTINS, missingVariables, variableValues } = require('../common/updateVariables');
 
 const FEED_LIMIT = 50;
 const ADMIN_LIMIT = 200;
@@ -54,10 +56,15 @@ const toAnnouncement = (doc = {}) => ({
     createdBy: doc.createdBy || '',
     createdAt: doc.createdAt || null
 });
+// Personal values and recipient IDs belong only in the authenticated admin editor.
+const toAdminAnnouncement = doc => ({ ...toAnnouncement(doc), recipientMode: doc.recipientMode || 'audience',
+    memberIds: (doc.memberIds || []).map(String), variables: (doc.variables || []).map(row => ({ key: row.key,
+        defaultValue: row.defaultValue || '', overrides: (row.overrides || []).map(entry => ({ memberId: String(entry.memberId), value: entry.value || '' })) })) });
 
 /** Only the fields a client may set, coerced. Throws on anything malformed. */
 const sanitize = (payload = {}) => {
     const out = {};
+    recipients.sanitizeRecipients(payload, out);
 
     ['title', 'summary', 'body', 'state', 'district', 'block',
         'bannerUrl', 'bannerAlt', 'attachmentUrl', 'attachmentLabel'
@@ -158,6 +165,7 @@ const sanitize = (payload = {}) => {
 
 /** Validate the resulting document, including edits that omit status/audience. */
 const validateDocument = async (data, current = {}) => {
+    await recipients.validateRecipients(data, current);
     const merged = { ...current, ...data };
     if (!str(merged.title)) throw ApiError.badRequest('An update needs a title');
     if (merged.district && !merged.state) throw ApiError.badRequest('Choose a state before choosing a district.');
@@ -235,6 +243,7 @@ class AnnouncementService {
         // the paid-only items, or they cannot check what they just published.
         if (!context.isAdmin) {
             query.$and.push(announcementAudienceClause(context));
+            query.$and.push(recipients.selectedClause(context));
         }
 
         if (filters.category && CATEGORIES.includes(str(filters.category).toLowerCase())) {
@@ -249,7 +258,8 @@ class AnnouncementService {
             .lean()
             .catch(() => []);
 
-        const rows = (documents || []).map(doc => personalizeUpdate(toAnnouncement(doc), context));
+        const recipient = documents.length ? await recipients.loadRecipient(context) : context;
+        const rows = (documents || []).map(doc => toAnnouncement(personalizeUpdate(doc, recipient)));
 
         rows.sort((a, b) => {
             if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
@@ -275,13 +285,13 @@ class AnnouncementService {
 
         if (!isAdmin) {
             if (doc.status !== 'published') throw ApiError.notFound('Update not found');
-            if (!matchesAudience(doc.audience, context, doc.planKeys) || !multiTargetsViewer(doc, context)
+            if (!matchesAudience(doc.audience, context, doc.planKeys) || !multiTargetsViewer(doc, context) || !recipients.matchesSelected(doc, context)
                 || (doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now())) {
                 throw ApiError.notFound('Update not found');
             }
         }
 
-        return personalizeUpdate(toAnnouncement(doc), context);
+        return toAnnouncement(personalizeUpdate(doc, await recipients.loadRecipient(context)));
     }
 
     /** Everything, drafts included. Super admin only — the route enforces it. */
@@ -300,7 +310,44 @@ class AnnouncementService {
             .lean()
             .catch(() => []);
 
-        return { announcements: (documents || []).map(toAnnouncement), total: (documents || []).length };
+        return { announcements: (documents || []).map(toAdminAnnouncement), total: (documents || []).length };
+    }
+
+    async recipientOptions(filters = {}) {
+        const query = { ...recipients.MEMBER_FILTER };
+        if (filters.ids) {
+            const ids = String(filters.ids).split(',');
+            if (ids.length > 500 || ids.some(id => !recipients.idValid(id))) throw ApiError.badRequest('Choose valid member IDs.');
+            query._id = { $in: ids };
+        } else {
+            const term = str(filters.search).slice(0, 100);
+            if (term.length < 2) return { members: [], variables: BUILTINS };
+            const pattern = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            query.$or = ['fullName', 'email', 'membershipNumber', 'phoneNumber'].map(key => ({ [key]: { $regex: pattern, $options: 'i' } }));
+        }
+        const rows = await require('../members/memberdetails.model').find(query).sort({ fullName: 1, _id: 1 })
+            .select('fullName email membershipNumber state district block').limit(filters.ids ? 500 : 30).lean();
+        return { members: rows.map(row => ({ id: String(row._id), fullName: row.fullName, email: row.email,
+            membershipNumber: row.membershipNumber || '', region: [row.state, row.district, row.block].filter(Boolean).join(' / ') })), variables: BUILTINS };
+    }
+
+    async preview(payload = {}) {
+        const update = sanitize({ ...payload, status: 'draft' });
+        // A draft preview may be incomplete. Saving/publishing validates the complete configuration.
+        const id = str(payload.previewMemberId);
+        if (id && !recipients.idValid(id)) throw ApiError.badRequest('Choose a valid preview member.');
+        const recipient = id ? await recipients.loadRecipient({ id }) : {};
+        if (id && (!recipient._id || recipient.isActive === false || recipient.deletedAt || /admin$/.test(recipient.role || ''))) throw ApiError.notFound('Preview member is unavailable.');
+        update.publishedAt = new Date();
+        if (payload.announcementId) {
+            requireId(payload.announcementId);
+            const existing = await Announcement.findById(payload.announcementId).select('publishedAt').lean();
+            if (existing?.publishedAt) update.publishedAt = existing.publishedAt;
+        }
+        const eligible = id ? matchesAudience(update.audience, recipient, update.planKeys) && multiTargetsViewer(update, recipient) && recipients.matchesSelected(update, recipient)
+            : update.recipientMode !== 'selected' && update.includeVisitors === true && (update.audience || 'all') === 'all' && !update.targets?.length && !update.state;
+        return { announcement: toAnnouncement(personalizeUpdate(update, recipient)), eligible, missing: missingVariables(update, recipient),
+            values: variableValues(update, recipient), recipient: id ? { id, fullName: recipient.fullName } : null };
     }
 
     async create(payload = {}, actor = {}) {
@@ -313,7 +360,7 @@ class AnnouncementService {
             status: data.status || 'draft'
         }, null));
 
-        const announcement = toAnnouncement(created.toObject());
+        const announcement = toAdminAnnouncement(created.toObject());
 
         await auditService.record({
             action: 'announcement.created',
@@ -347,7 +394,7 @@ class AnnouncementService {
         ).lean().catch(() => null);
 
         if (!updated) throw ApiError.notFound('Update not found');
-        return toAnnouncement(updated);
+        return toAdminAnnouncement(updated);
     }
 
     async setStatus(id, status, actor = {}) {

@@ -38,6 +38,9 @@ router.get('/health', (req, res) => {
 
 // API routes
 router.use('/auth', authRoutes);
+// The Android launch check must work before sign-in. Admin policy writes carry
+// their own token and super-admin role guards in this router.
+router.use('/app-updates', require('./modules/appUpdates/appUpdate.routes'));
 
 // Public region discovery — unauthenticated, because the registration screen
 // calls these before an applicant has an account.

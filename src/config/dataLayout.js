@@ -106,6 +106,7 @@ const MODELS = {
     DistrictAdmin: ['admins', 'district_admins', W, 'districtadmins'],
     BlockAdmin: ['admins', 'block_admins', W, 'blockadmins'],
     AuditLog: ['admins', 'admin_audit_logs', A, 'audit_logs'],
+    AppUpdatePolicy: ['admins', 'app_update_policies', A, 'app_update_policies'],
 
     // ---- website: the public site's CMS content
     CmsSiteSettings: ['website', 'site_settings', W, 'web_site_settings'],

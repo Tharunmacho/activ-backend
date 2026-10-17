@@ -16,6 +16,8 @@ router.use(verifyToken);
  * `/discover` and `/stats`.
  */
 router.get('/admin', requireRole('super_admin'), controller.listForAdmin);
+router.get('/admin/recipients', requireRole('super_admin'), controller.recipientOptions);
+router.post('/admin/preview', requireRole('super_admin'), controller.preview);
 
 // Read: any signed-in member. The service applies the region and paid-audience
 // rules — the client never gets to ask for someone else's feed.

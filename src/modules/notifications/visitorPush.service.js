@@ -9,7 +9,7 @@ const idValid = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 function publicEligible(kind, doc) {
     if (!Broadcast.published(kind, doc) || String(doc.audience || 'all') !== 'all') return false;
     if (kind === 'event') return require('../events/onboardingVisibility').isOnboardingContent(doc);
-    return kind === 'announcement' && doc.includeVisitors === true
+    return kind === 'announcement' && doc.includeVisitors === true && doc.recipientMode !== 'selected'
         && ![doc.state, doc.district, doc.block].some(Boolean) && !(doc.targets || []).some(t => t.state || t.district || t.block);
 }
 async function source(notice) {

@@ -58,6 +58,12 @@ const announcementSchema = new mongoose.Schema({
     }, { _id: false })], default: [] },
     // Public visitors are a deliberate opt-in, never implied by audience=all.
     includeVisitors: { type: Boolean, default: false },
+    recipientMode: { type: String, enum: ['audience', 'selected'], default: 'audience' },
+    memberIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    variables: { type: [new mongoose.Schema({
+        key: { type: String, required: true }, defaultValue: { type: String, default: '' },
+        overrides: { type: [new mongoose.Schema({ memberId: { type: mongoose.Schema.Types.ObjectId, required: true }, value: { type: String, default: '' } }, { _id: false })], default: [] },
+    }, { _id: false })], default: [] },
 
     /**
      * Who may read it.

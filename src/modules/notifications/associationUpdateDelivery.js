@@ -36,7 +36,9 @@ async function current(row, channel) {
     if (!preferences(member)[channel]) return { reason: channel === 'whatsapp' ? 'WhatsApp update messages are not enabled for this number.' : 'Email update messages are turned off.' };
     const recipient = channel === 'email' ? String(member.email || '').trim() : phoneFor(member);
     if (channel === 'email' ? !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient) : !/^\d{8,15}$/.test(recipient)) return { reason: 'No usable recipient address is available.' };
-    return { member, update, recipient };
+    const enriched = await require('../announcements/announcementRecipients').loadRecipient(member);
+    if (!enriched._id || enriched.isActive === false || enriched.deletedAt || !broadcast.visibleTo('announcement', update, enriched)) return { reason: 'The update no longer applies to this member.' };
+    return { member: { ...member, ...enriched }, update, recipient };
 }
 
 async function sendPrepared(channel, member, update, recipient) {
