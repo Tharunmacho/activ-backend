@@ -77,9 +77,17 @@ async function preview(input = {}, actor) {
     const reviewed = reviewedRows.filter(Boolean).length;
     const remaining = matched - reviewed;
     truncated ||= remaining > 0;
-    const token = eligible.length ? jwt.sign({ ids: eligible, versions }, config.jwt.secret,
-        { algorithm: 'HS256', audience, subject: String(actor), expiresIn: '10m', jwtid: crypto.randomUUID() }) : '';
-    return { matched, reviewed, remaining, eligible: eligible.length, skipped: reviewed - eligible.length, reasons, ids: eligible, token, truncated };
+    let token = '', statusToken = '';
+    if (eligible.length) {
+        const iat = Math.floor(Date.now() / 1000);
+        const lifetime = { iat, exp: iat + 600 };
+        const options = { algorithm: 'HS256', audience, subject: String(actor), jwtid: crypto.randomUUID() };
+        token = jwt.sign({ ...lifetime, purpose: 'retry', ids: eligible, versions }, config.jwt.secret, options);
+        // A full 100-row review belongs in the request body. Keep status polling
+        // comfortably below proxy single-header limits, with the same batch ID.
+        statusToken = jwt.sign({ ...lifetime, purpose: 'status' }, config.jwt.secret, options);
+    }
+    return { matched, reviewed, remaining, eligible: eligible.length, skipped: reviewed - eligible.length, reasons, ids: eligible, token, statusToken, truncated };
 }
 
 async function retryRecord(record) {
@@ -107,7 +115,10 @@ async function execute(input = {}, actor) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw ApiError.badRequest('Submit the reviewed delivery rows and token.');
     const ids = cleanIds(input.ids);
     const snapshot = verifyReview(input.token, actor);
-    if (!snapshot.jti || JSON.stringify(ids) !== JSON.stringify(snapshot.ids)) throw ApiError.badRequest('Retry only the exact deliveries in the reviewed selection.');
+    if (snapshot.purpose === 'status' || !snapshot.jti || !Array.isArray(snapshot.versions)
+        || snapshot.versions.length !== ids.length || JSON.stringify(ids) !== JSON.stringify(snapshot.ids)) {
+        throw ApiError.badRequest('Retry only the exact deliveries in the reviewed selection. A status token cannot authorize retries.');
+    }
     await ensureIndexes();
     const key = batchKey(snapshot);
     let batch;

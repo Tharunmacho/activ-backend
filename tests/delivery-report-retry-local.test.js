@@ -74,6 +74,8 @@ let mongo;
     assert.equal(review.eligible, 1); assert.equal(review.reviewed, 1); assert.equal(review.remaining, 0);
     assert.equal(calls.length, 0, 'preview is read-only and never sends');
     assert.equal(await Batch.countDocuments({}), 0, 'preview does not create a job or consume a retry');
+    assert(review.statusToken.length < 512, 'status token fits well within proxy header limits');
+    await post('retry', { ids: review.ids, token: review.statusToken }).expect(400);
     await post('retry', { ids: review.ids, token: review.token }, otherAdmin).expect(400);
     await post('retry', { ids: ['log:' + new mongoose.Types.ObjectId()], token: review.token }).expect(400);
     const decoded = jwt.decode(review.token);
@@ -85,10 +87,12 @@ let mongo;
     assert(duplicate.some(result => result.alreadySubmitted));
     assert.equal((await Log.findById(first._id).lean()).attempts, 5, 'cumulative attempts retained');
     let status = (await request(app).get('/notifications/reports/retry-status').set('Authorization', auth())
-        .set('X-Delivery-Retry-Token', review.token).expect(200)).body.data;
+        .set('X-Delivery-Retry-Token', review.statusToken).expect(200)).body.data;
     assert.equal(status.sent, 1); assert.equal(status.processing, false); assert.equal(status.found, true);
     await request(app).get('/notifications/reports/retry-status').set('Authorization', auth(otherAdmin))
-        .set('X-Delivery-Retry-Token', review.token).expect(400);
+        .set('X-Delivery-Retry-Token', review.statusToken).expect(400);
+    assert.equal((await request(app).get('/notifications/reports/retry-status').set('Authorization', auth())
+        .set('X-Delivery-Retry-Token', review.token).expect(200)).body.data.sent, 1, 'full review tokens remain compatible with older clients');
     assert.equal(calls.length, 1, 'status lookups never retry');
     const audit = await Batch.findOne({}).lean();
     assert.equal(audit.requestedBy, admin); assert.equal(audit.results[0].previousAttempts, 4);
@@ -170,6 +174,27 @@ let mongo;
     const currentNotice = await Notification.findById(notice._id).lean();
     assert.equal(currentNotice.updateDelivery.email.attempts, 6); assert.equal(currentNotice.updateDelivery.whatsapp.attempts, 6);
     assert((await Log.findById(associationLog._id).lean()).resentAs, 'association retries link the new audit attempt');
+
+    const largeIds = Array.from({ length: 100 }, () => ({ noticeId: new mongoose.Types.ObjectId(), logId: new mongoose.Types.ObjectId() }));
+    await Notification.insertMany(largeIds.map(ids => ({ _id: ids.noticeId, user: member._id, title: 'Large retry review', message: 'Fixture',
+        data: { kind: 'announcement', sourceId: String(update._id), broadcastKey: key }, push: { status: 'skipped' },
+        updateDelivery: { email: { status: 'failed', attempts: 5, logId: ids.logId } } })));
+    await Log.insertMany(largeIds.map(ids => ({ _id: ids.logId, user: member._id, event: 'ASSOCIATION_UPDATE', channel: 'email', recipient: member.email,
+        status: 'failed', deliveryStatus: 'failed', lastError: 'SMTP 535 authentication refused',
+        data: { notificationId: String(ids.noticeId), sourceId: String(update._id), broadcastKey: key } })));
+    const beforeLargePreview = calls.length;
+    const largeReview = await preview(largeIds.map(ids => `${ids.noticeId}:email`));
+    assert.equal(largeReview.eligible, 100, JSON.stringify(largeReview.reasons));
+    assert(largeReview.token.length > 8192, 'fixture covers the formerly oversized 100-row association review');
+    assert(largeReview.statusToken.length < 512, 'compact status token size is independent of reviewed row count');
+    const largeClaims = jwt.decode(largeReview.token), statusClaims = jwt.decode(largeReview.statusToken);
+    for (const claim of ['sub', 'aud', 'jti', 'iat', 'exp']) assert.equal(statusClaims[claim], largeClaims[claim]);
+    assert.equal(statusClaims.purpose, 'status'); assert.equal(statusClaims.ids, undefined); assert.equal(statusClaims.versions, undefined);
+    await post('retry', { ids: largeReview.ids, token: largeReview.statusToken }).expect(400);
+    const statusOfLarge = (await request(app).get('/notifications/reports/retry-status').set('Authorization', auth())
+        .set('X-Delivery-Retry-Token', largeReview.statusToken).expect(200)).body.data;
+    assert.equal(statusOfLarge.found, false, 'a compact token cannot read another reviewed batch');
+    assert.equal(calls.length, beforeLargePreview, 'large preview and status lookup do not send or queue any messages');
 
     await Device.create({ user: member._id, token: 'local-member-push-token-123456789', platform: 'web' });
     const push = await Notification.create({ user: member._id, title: 'Push retry', message: 'Original notice', data: { event: 'CUSTOM' },
