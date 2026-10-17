@@ -6,7 +6,8 @@ const logger = require('../../config/logger');
 const CHANNELS = ['in_app', 'email', 'whatsapp'];
 const LEASE_MS = 5 * 60000;
 const errorText = error => String(error?.message || error || '').slice(0, 500);
-const uncertain = outcome => !outcome?.success && /timed?\s*out|timeout|ECONNRESET|EPIPE|ESOCKET|socket (?:hang up|closed)|connection.*(?:closed|lost|terminated)/i.test(outcome?.error || '');
+const uncertain = outcome => !outcome?.success && (outcome?.outcomeUnknown === true
+    || /timed?\s*out|timeout|ECONNRESET|EPIPE|ESOCKET|socket (?:hang up|closed)|connection.*(?:closed|lost|terminated)/i.test(outcome?.error || ''));
 const plain = value => JSON.parse(JSON.stringify(value));
 let indexesReady;
 function ensureIndexes() {

@@ -31,7 +31,7 @@ const emailEvents = [];
 const waEvents = [];
 let activeEvent;
 email.getTransporter = () => ({ sendMail: async mail => {
-    emailEvents.push({ event: activeEvent, ...mail }); return { messageId: `email-${activeEvent}` };
+    emailEvents.push({ event: activeEvent, ...mail }); return { messageId: `email-${activeEvent}`, accepted: [mail.to], rejected: [] };
 } });
 config.email.host = 'smtp.example.test'; config.email.user = 'test'; config.email.password = 'test';
 config.email.isConfigured = true;

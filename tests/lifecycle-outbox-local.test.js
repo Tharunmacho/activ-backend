@@ -33,9 +33,10 @@ let mongo;
     }
     const sends = [];
     let emailError = '';
+    let emailOutcome;
     require('../src/modules/notifications/email.service').sendEmail = async options => {
         assert.equal(options.to, recipient.email); sends.push('email');
-        return emailError ? { success: false, error: emailError } : { success: true, messageId: `email-${sends.length}`, provider: 'smtp' };
+        return emailOutcome || (emailError ? { success: false, error: emailError } : { success: true, messageId: `email-${sends.length}`, provider: 'smtp' });
     };
     require('../src/modules/notifications/whatsappTemplate').sendTemplateMessage = async phone => {
         assert.equal(phone, recipient.phone); sends.push('whatsapp');
@@ -90,6 +91,22 @@ let mongo;
     const pipe = await enqueue('uncertain-result'); await worker.processOne(pipe.outboxId); emailError = '';
     assert.equal((await Outbox.findById(pipe.outboxId)).channels.email.status, 'held');
     assert.equal((await Log.findOne({ 'data.outboxId': pipe.outboxId, channel: 'email' })).data.outcomeUnknown, true);
+
+    for (const smtpRecipientStatus of ['unknown', 'partial']) {
+        emailOutcome = { success: false, outcomeUnknown: true, autoRetryDisabled: true, smtpRecipientStatus,
+            error: 'SMTP acceptance needs review before sending again.' };
+        const review = await enqueue(`smtp-${smtpRecipientStatus}`);
+        await worker.processOne(review.outboxId);
+        assert.equal((await Outbox.findById(review.outboxId)).channels.email.status, 'held');
+        const reviewLog = await Log.findOne({ 'data.outboxId': review.outboxId, channel: 'email' });
+        assert.equal(reviewLog.data.smtpRecipientStatus, smtpRecipientStatus);
+        assert.equal(reviewLog.data.autoRetryDisabled, true);
+        const before = sends.length;
+        await worker.processOne(review.outboxId);
+        assert((await service.retryLog(reviewLog._id)).skipped);
+        assert.equal(sends.length, before, 'uncertain SMTP metadata never replays through either retry owner');
+    }
+    emailOutcome = undefined;
 
     // A delayed checkout job is persisted independently of this process's timers.
     const payments = require('../src/modules/payment/paymentOrder.service');

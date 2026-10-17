@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer');
 const config = require('../../config');
 const logger = require('../../config/logger');
 const { accountFor } = require('./emailAccounts');
+const { smtpRecipientResult } = require('../../core/utils/smtpRecipientResult');
 
 /** The logo, attached inline to every message whose HTML refers to it. */
 const LOGO_CID = 'activ-logo';
@@ -240,8 +241,10 @@ class EmailService {
                 ]
             });
 
-            logger.info('Notification email sent', { ...envelope, messageId: info.messageId });
-            return { success: true, messageId: info.messageId, ...envelope };
+            const outcome = smtpRecipientResult(recipient, info);
+            if (outcome.success) logger.info('Notification email accepted for recipient', { ...envelope, messageId: info?.messageId });
+            else logger.warn('Notification email was not confirmed for recipient', { ...envelope, error: outcome.error });
+            return { ...outcome, messageId: info?.messageId, ...envelope };
         } catch (error) {
             logger.error('Notification email failed', { ...envelope, error: error && error.message });
             return { success: false, error: error && error.message, ...envelope };

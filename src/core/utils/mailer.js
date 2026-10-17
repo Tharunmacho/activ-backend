@@ -65,6 +65,7 @@ const getTransporter = () => {
  * Resolves to `{ sent, skipped, error }` — never rejects.
  */
 const { archiveFields } = require('./archiveCopy');
+const { smtpRecipientResult, smtpLogData } = require('./smtpRecipientResult');
 
 /**
  * Record one send in the delivery log (Super Admin -> Notifications), when the
@@ -95,7 +96,7 @@ const record = async(log, target, subject, result, messageId) => {
             lastError: result.sent ? undefined : result.error,
             provider: 'smtp',
             deliveryStatus: unconfigured ? undefined : (result.sent ? 'accepted' : 'failed'),
-            data: { ...(log.data || {}), via: 'mailer' }
+            data: { ...(log.data || {}), ...smtpLogData(result), via: 'mailer' }
         });
     } catch (err) {
         logger.warn('Mailer delivery-log row not written', { event: log.event, error: err && err.message });
@@ -131,7 +132,9 @@ const send = async({ to, subject, text, html, log }) => {
             text: text || '',
             html: html || undefined
         });
-        return finish({ sent: true, skipped: false, error: '' }, info && info.messageId);
+        const outcome = smtpRecipientResult(target, info);
+        const { success, ...details } = outcome;
+        return finish({ ...details, sent: success, skipped: false, error: outcome.error || '' }, info?.messageId);
     } catch (err) {
         logger.warn('Email delivery failed', { to: target, error: err && err.message });
         return finish({ sent: false, skipped: false, error: (err && err.message) || 'Delivery failed' });

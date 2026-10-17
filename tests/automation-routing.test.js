@@ -36,8 +36,8 @@ async function main() {
     config.email.password = 'test-only-password';
     const sent = [];
     email.initialised = true;
-    email.transporter = { sendMail: async mail => { sent.push({ category:'events', from:mail.from }); return {messageId:'event-test'}; } };
-    email.memberTransporter = { sendMail: async mail => { sent.push({ category:'membership', from:mail.from }); return {messageId:'member-test'}; } };
+    email.transporter = { sendMail: async mail => { sent.push({ category:'events', from:mail.from }); return {messageId:'event-test', accepted:[mail.to], rejected:[]}; } };
+    email.memberTransporter = { sendMail: async mail => { sent.push({ category:'membership', from:mail.from }); return {messageId:'member-test', accepted:[mail.to], rejected:[]}; } };
     await email.sendEmail({to:'test@example.com', subject:'Event', text:'Test', category:'events'});
     await email.sendEmail({to:'test@example.com', subject:'Membership', text:'Test', category:'membership'});
     assert.deepEqual(sent.map(row => row.category), ['events','membership']);

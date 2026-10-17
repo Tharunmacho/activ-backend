@@ -99,7 +99,8 @@ async function run(row, channel, worker, resendOf) {
         // All provider results are recorded, including missing credentials and
         // a rejected template. A successful mock is never called delivered.
         const failure = accepted ? '' : errorText(outcome.error || 'Provider did not send this message.');
-        const uncertain = !accepted && /timed?\s*out|timeout|ECONNRESET|EPIPE|ESOCKET|socket (?:hang up|closed)|connection.*(?:closed|lost|terminated)/i.test(failure);
+        const uncertain = !accepted && (outcome.outcomeUnknown === true
+            || /timed?\s*out|timeout|ECONNRESET|EPIPE|ESOCKET|socket (?:hang up|closed)|connection.*(?:closed|lost|terminated)/i.test(failure));
         log.status = accepted ? 'sent' : 'failed';
         log.deliveryStatus = accepted ? 'accepted' : 'failed';
         log.provider = outcome.provider || (channel === 'email' ? 'smtp' : whatsapp.providerName());
@@ -108,6 +109,7 @@ async function run(row, channel, worker, resendOf) {
         log.providerMessageId = outcome.messageId;
         log.lastError = failure || undefined;
         log.failureReason = failure || undefined;
+        if (channel === 'email') log.data = { ...log.data, ...require('../../core/utils/smtpRecipientResult').smtpLogData(outcome) };
         if (uncertain) log.data = { ...log.data, autoRetryDisabled: true, outcomeUnknown: true };
         log.statusHistory = [{ status: log.deliveryStatus, at: new Date(), detail: failure || undefined }];
         await log.save();

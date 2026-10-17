@@ -33,7 +33,7 @@ let mongo;
         assert(channel === 'email' ? to.endsWith('@example.test') : /^919123450\d{3}$/.test(to), 'only fake recipients');
         calls.push({ channel, to, title });
         const error = failures.get(`${channel}:${title}`);
-        return error ? { success: false, error } : { success: true, messageId: `local-${calls.length}`, provider: channel === 'email' ? 'smtp' : 'meta' };
+        return error && typeof error === 'object' ? error : error ? { success: false, error } : { success: true, messageId: `local-${calls.length}`, provider: channel === 'email' ? 'smtp' : 'meta' };
     };
     require('../src/modules/notifications/email.service').sendEmail = async payload => send('email', payload.to, payload.subject.replace(/^ACTIV update: /, ''));
     require('../src/modules/notifications/whatsappTemplate').isConfigured = () => true;
@@ -218,6 +218,21 @@ let mongo;
     log = await Log.findOne({ 'data.notificationId': String(item.row._id), channel: 'email' });
     assert.equal(log.data.outcomeUnknown, true, 'a broken transport cannot prove the provider rejected a send');
     assert((await notifications.retryLog(log._id)).skipped, 'a broken pipe is held for review instead of duplicated');
+
+    for (const smtpRecipientStatus of ['unknown', 'partial']) {
+        item = await queued(`SMTP ${smtpRecipientStatus}`);
+        failures.set(`email:SMTP ${smtpRecipientStatus}`, { success: false, outcomeUnknown: true,
+            autoRetryDisabled: true, smtpRecipientStatus, error: 'SMTP acceptance needs review before sending again.' });
+        await delivery.processBatch();
+        log = await Log.findOne({ 'data.notificationId': String(item.row._id), channel: 'email' });
+        assert.equal(log.data.smtpRecipientStatus, smtpRecipientStatus);
+        assert.equal(log.data.autoRetryDisabled, true);
+        assert.equal((await Notification.findById(item.row._id)).updateDelivery.email.status, 'failed');
+        const before = calls.length;
+        await delivery.processBatch();
+        assert((await notifications.retryLog(log._id)).skipped);
+        assert.equal(calls.length, before, 'uncertain SMTP metadata never replays through association retries');
+    }
 
     item = await queued('Acceptance persisted'); await delivery.processBatch();
     const beforeRecovery = calls.length;

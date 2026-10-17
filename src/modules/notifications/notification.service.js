@@ -467,6 +467,7 @@ class NotificationService {
                         deliveryStatus: sent.mock ? undefined : (sent.success ? 'accepted' : 'failed'),
                         ...trace,
                         data: {
+                            ...require('../../core/utils/smtpRecipientResult').smtpLogData(sent),
                             lifecycleData: payload.data || {},
                             emailHtml: html,
                             recipientName: ctx.name,
@@ -1030,6 +1031,10 @@ class NotificationService {
         row.mock = !!outcome.mock;
         row.providerMessageId = outcome.messageId || row.providerMessageId;
         row.lastError = outcome.error;
+        if (row.channel === 'email') {
+            row.data = { ...row.data, ...require('../../core/utils/smtpRecipientResult').smtpLogData(outcome) };
+            if (typeof row.markModified === 'function') row.markModified('data');
+        }
         row.attempts = Number(row.attempts || 1) + 1;
         // A replay is a new message: its delivery starts again from `accepted`.
         if (!outcome.mock) {

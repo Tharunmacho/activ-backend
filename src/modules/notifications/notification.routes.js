@@ -282,7 +282,8 @@ router.post('/test-send', requireRole('super_admin'), asyncHandler(async(req, re
             status: result.success ? 'sent' : 'failed',
             mock: !!result.mock,
             providerMessageId: result.messageId,
-            lastError: result.error
+            lastError: result.error,
+            data: require('../../core/utils/smtpRecipientResult').smtpLogData(result)
         });
 
         return res.json(ApiResponse.success(result, result.success

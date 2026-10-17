@@ -21,6 +21,8 @@ Super Admin → Notifications → **Delivery reports** (website) or **Reports** 
 
 WhatsApp open rate uses confirmed deliveries as its denominator. Push tap rate uses accepted sends. Email inbox delivery and opens are not measured by the current SMTP integration. A missing open receipt does **not** prove a person has not read the message. New tap instrumentation starts at deployment; historical opens cannot be reconstructed.
 
+Email acceptance is checked against the intended recipient addresses. Acceptance of an office archive copy alone does not count as success for the recipient; an archive rejection does not override confirmed recipient acceptance. Partial or unconfirmed recipient acceptance is recorded for review and excluded from retries that could duplicate a send. This follows Nodemailer's [partial-recipient result contract](https://nodemailer.com/errors#handling-partial-failures).
+
 Anonymous app visitors are shown as `Visitor · <installation suffix>`. They receive only public content under the separate visitor eligibility rules. Their secret installation key and FCM token never appear in reports. Current content titles/audience labels can differ from an older revision; the revision key and recipient delivery records retain their own identity.
 
 ## Implementation and verification
