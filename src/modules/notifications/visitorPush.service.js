@@ -128,7 +128,7 @@ async function processBatch(client) {
         const row = await VisitorDelivery.findOneAndUpdate({ nextAttemptAt: { $lte: now }, $or: [{ status: 'pending' }, { status: 'sending', leaseUntil: { $lt: now } }] },
             { $set: { status: 'sending', worker, leaseUntil: new Date(Date.now() + 300000) } }, { new: true }).lean();
         if (!row) return;
-        let status = 'skipped', lastError = '', sentAt;
+        let status = 'skipped', lastError = '', sentAt, attemptedToken;
         try {
             const device = await VisitorDevice.findById(row.device).select('+token').lean();
             const notice = await PublicNotice.findById(row.notice).lean();
@@ -142,13 +142,17 @@ async function processBatch(client) {
                     notification: { title: 'ACTIV', body: 'Dear ACTIVian, explore a new public update from ACTIV.' },
                     android: { priority: 'high', ttl: 86400000, notification: { channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notice._id) } },
                     apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) }, payload: { aps: { sound: 'default' } } } };
+                attemptedToken = device.token;
                 await (client || require('./push.service').messaging()).send(payload);
                 status = 'sent'; sentAt = new Date();
             }
         } catch (error) {
             lastError = error.code || 'visitor/unavailable';
             if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
-                await VisitorDevice.updateOne({ _id: row.device }, { $set: { enabled: false }, $unset: { token: 1 } }); status = 'failed';
+                // A token refresh may finish while Firebase rejects the old
+                // token. Revoke only the registration actually attempted.
+                if (attemptedToken) await VisitorDevice.updateOne({ _id: row.device, token: attemptedToken }, { $set: { enabled: false }, $unset: { token: 1 } });
+                status = 'failed';
             } else status = row.attempts >= 4 ? 'failed' : 'pending';
         }
         await VisitorDelivery.updateOne({ _id: row._id, worker }, { $set: { status, lastError, ...(sentAt ? { sentAt } : {}), attempts: row.attempts + 1,

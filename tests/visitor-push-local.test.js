@@ -89,6 +89,25 @@ let mongo;
     await service.processBatch({ send: async () => { const error = new Error('gone'); error.code = 'messaging/registration-token-not-registered'; throw error; } });
     assert.equal((await VisitorDevice.findById(fixture.id)).enabled, false);
     assert.equal((await VisitorDelivery.findOne({ notice: invalid._id })).status, 'failed');
+    // A delayed response for the old token must not revoke a refreshed registration.
+    await service.register(fixture.key, { token, platform: 'android' });
+    const refreshedToken = 'local-refreshed-visitor-token-123456789';
+    const rotating = await createPublic();
+    await service.processBatch({ send: async payload => {
+        assert.equal(payload.token, token);
+        await service.register(fixture.key, { token: refreshedToken, platform: 'android' });
+        const error = new Error('old token expired during refresh');
+        error.code = 'messaging/registration-token-not-registered'; throw error;
+    } });
+    const refreshed = await VisitorDevice.findById(fixture.id).select('+token').lean();
+    assert.equal(refreshed.enabled, true, 'an old-token failure preserves the refreshed registration');
+    assert.equal(refreshed.token, refreshedToken);
+    assert.equal((await VisitorDelivery.findOne({ notice: rotating._id })).status, 'failed');
+    const afterRefresh = await createPublic();
+    const refreshedPayloads = [];
+    await service.processBatch({ send: async payload => { refreshedPayloads.push(payload); return 'fake-refreshed-id'; } });
+    assert(refreshedPayloads.some(payload => payload.token === refreshedToken && payload.data.publicNotificationId === String(afterRefresh._id)), 'subsequent publications reach the refreshed token');
+    await service.unregister(fixture.key);
     // Revision replaces the old public record; previously targeted IDs cannot leak it.
     const revision = await updates.update(notice.sourceId, { title: 'Revised public notice' });
     const revisedFeed = await service.feed();
