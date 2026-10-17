@@ -23,6 +23,15 @@ router.use(verifyToken);
 router.get('/reports', requireRole('super_admin'), asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./deliveryReport').report(req.query)));
 }));
+router.post('/reports/retry-preview', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./deliveryRetry').preview(req.body, req.user.userId)));
+}));
+router.post('/reports/retry', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./deliveryRetry').execute(req.body, req.user.userId)));
+}));
+router.get('/reports/retry-status', requireRole('super_admin'), asyncHandler(async(req, res) => {
+    res.json(ApiResponse.success(await require('./deliveryRetry').status(req.get('X-Delivery-Retry-Token'), req.user.userId)));
+}));
 
 router.patch('/:id/open', asyncHandler(async(req, res) => {
     res.json(ApiResponse.success(await require('./deliveryReport').recordOpen(req.user.userId, req.params.id, req.body?.channel)));
@@ -216,7 +225,7 @@ router.post('/retry/:id', requireRole('super_admin'), asyncHandler(async(req, re
 
     const { withEffectiveStatus } = require('./deliveryQuery');
     const plain = (row) => (row && row.toObject ? row.toObject() : row);
-    if (result.skipped) {
+    if (result.skipped || result.waiting) {
         return res.json(ApiResponse.success(withEffectiveStatus(plain(result.row) || {}), result.reason));
     }
 

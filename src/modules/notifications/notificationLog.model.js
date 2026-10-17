@@ -193,6 +193,9 @@ const notificationLogSchema = new mongoose.Schema({
     /** A resend writes a new row; the two point at each other. */
     resendOf: { type: mongoose.Schema.Types.ObjectId },
     resentAs: { type: mongoose.Schema.Types.ObjectId },
+    // A retry that loses its provider outcome stays claimed for review; an
+    // expired HTTP request must never become permission to send it again.
+    retryClaim: { token: String, at: Date },
     /**
      * Automatic retries (notifications/deliveryGuard.js), kept on the ORIGINAL
      * message of a resend chain: how many, and when the last one ran. Declared

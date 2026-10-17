@@ -9,6 +9,7 @@ const service = require('../src/modules/notifications/notification.service');
 const logId = '1234567890abcdef12345678';
 let current, reason = '', guardCalls = 0, sends = 0, bookingRebuilds = 0;
 Log.findById = async () => current;
+require('./fixtures/retryClaimStore')(Log, () => current);
 changes.reasonToSkipRegistrationNotice = async () => { guardCalls++; return reason; };
 bookings.resendLoggedMessage = async () => { bookingRebuilds++; return { skipped: true, reason: 'Fixture modern booking missing' }; };
 sender.sendTemplateMessage = email.sendEmail = async () => { sends++; return { success: true, messageId: 'fixture-message' }; };

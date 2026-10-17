@@ -35,6 +35,7 @@ Log.updateOne = async (filter, update) => {
     row.autoRetry = { count: expected + update.$inc['autoRetry.count'], lastAt: update.$set['autoRetry.lastAt'] };
     return { matchedCount: 1 };
 };
+require('./fixtures/retryClaimStore')(Log, id => rows.find(row => String(row._id) === String(id)));
 meta.sendTextMessage = async (...args) => {
     sends.push(args);
     return { success: true, messageId: `accepted-${sends.length}`, to: args[0], provider: 'meta' };

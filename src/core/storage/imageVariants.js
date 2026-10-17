@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const logger = require('../../config/logger');
 
 /**
@@ -61,32 +62,65 @@ const streamToBuffer = (stream) => new Promise((resolve, reject) => {
     stream.on('end', () => resolve(Buffer.concat(chunks)));
 });
 
+/** Publish only complete cache files; another request must never read a partial image. */
+const cacheBuffer = async(file, buffer) => {
+    const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.tmp`);
+    try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        await fs.promises.writeFile(temporary, buffer);
+        await fs.promises.rename(temporary, file);
+    } catch { /* A read-only/full disk must not prevent media delivery. */ }
+    finally { await fs.promises.unlink(temporary).catch(() => null); }
+};
+
+// Different widths/formats of one cold upload share its remote read. Keep only
+// in-flight work: a failure is retried by the next request, never cached here.
+const reading = new Map();
+
 /**
  * The original's bytes, wherever it lives: the disk folder, the S3 bucket, then
  * GridFS — the same order `app.js` serves originals in.
  */
 const readOriginal = async(uploadsDir, name, store) => {
+    const file = path.join(uploadsDir, name);
     try {
-        return await fs.promises.readFile(path.join(uploadsDir, name));
+        return await fs.promises.readFile(file);
     } catch { /* not on disk — try the stores */ }
 
-    try {
-        if (store.objectStore && store.objectStore.isEnabled()) {
-            const obj = await store.objectStore.getObject(name);
-            if (obj && obj.unavailable) store.onUnavailable?.();
-            if (obj && obj.body) return await streamToBuffer(obj.body);
-        }
-    } catch { store.onUnavailable?.(); /* try the database after a failed bucket read */ }
+    let job = reading.get(file);
+    if (!job) {
+        job = { unavailable: false, pending: null };
+        const state = job;
+        job.pending = (async() => {
+            let buffer = null;
+            try {
+                if (store.objectStore && store.objectStore.isEnabled()) {
+                    const obj = await store.objectStore.getObject(name);
+                    if (obj && obj.unavailable) state.unavailable = true;
+                    if (obj && obj.body) buffer = await streamToBuffer(obj.body);
+                }
+            } catch { state.unavailable = true; /* try GridFS after a failed bucket read */ }
 
-    try {
-        const bucket = store.bucket && store.bucket();
-        if (bucket) {
-            const [file] = await bucket.find({ filename: name }).sort({ uploadDate: -1 }).limit(1).toArray();
-            if (file) return await streamToBuffer(bucket.openDownloadStream(file._id));
-        }
-    } catch { /* not in GridFS */ }
+            if (!buffer) {
+                try {
+                    const bucket = store.bucket && store.bucket();
+                    if (bucket) {
+                        const [stored] = await bucket.find({ filename: name }).sort({ uploadDate: -1 }).limit(1).toArray();
+                        if (stored) buffer = await streamToBuffer(bucket.openDownloadStream(stored._id));
+                    }
+                } catch { /* not in GridFS */ }
+            }
 
-    return null;
+            // Keep the successful source too, so subsequent widths and original
+            // requests need neither another bucket download nor another DB read.
+            if (buffer) await cacheBuffer(file, buffer);
+            return buffer;
+        })().finally(() => reading.delete(file));
+        reading.set(file, job);
+    }
+    const buffer = await job.pending;
+    if (job.unavailable) store.onUnavailable?.();
+    return buffer;
 };
 
 /** Requests already rendering a variant, so a burst of visitors renders it once. */
@@ -107,9 +141,9 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
     const send = (buffer) => {
         res.setHeader('Content-Type', webp ? 'image/webp' : 'image/jpeg');
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        res.setHeader('Vary', 'Accept');
-        res.setHeader('Content-Length', String(buffer.length));
-        return req.method === 'HEAD' ? res.end() : res.end(buffer);
+        res.vary('Accept');
+        // Express supplies ETag/304 and HEAD semantics for cached variants too.
+        return res.send(buffer);
     };
 
     try {
@@ -130,9 +164,7 @@ const makeVariantMiddleware = ({ uploadsDir, objectStore, bucket }) => async(req
                 pipeline = webp ? pipeline.webp({ quality: 78, effort: 4 }) : pipeline.jpeg({ quality: 80, mozjpeg: true });
                 const out = await pipeline.toBuffer();
                 // Keep it for next time. A failed write only costs a re-render.
-                fs.promises.mkdir(dir, { recursive: true })
-                    .then(() => fs.promises.writeFile(file, out))
-                    .catch(() => null);
+                await cacheBuffer(file, out);
                 return out;
             })().finally(() => rendering.delete(file));
             rendering.set(file, job);

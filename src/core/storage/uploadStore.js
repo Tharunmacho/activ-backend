@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const mongoose = require('mongoose');
 const dataLayout = require('../../config/dataLayout');
 const express = require('express');
@@ -208,12 +209,23 @@ const restoreDiskCopy = (readable, name) => {
     try {
         const target = path.join(UPLOADS_DIR, name);
         fs.mkdirSync(path.dirname(target), { recursive: true });
-        const tmp = path.join(path.dirname(target), `.${path.basename(name)}.${Date.now()}.tmp`);
-        readable
-            .on('error', () => fs.unlink(tmp, () => {}))
-            .pipe(fs.createWriteStream(tmp))
-            .on('finish', () => fs.rename(tmp, target, () => {}))
-            .on('error', () => fs.unlink(tmp, () => {}));
+        const tmp = path.join(path.dirname(target), `.${path.basename(name)}.${randomUUID()}.tmp`);
+        const cached = fs.createWriteStream(tmp);
+        const discard = () => {
+            readable.unpipe(cached);
+            cached.destroy();
+            fs.unlink(tmp, () => {});
+        };
+        // The stream is also serving a client. Aborts/errors must never publish
+        // its partial bytes as the next visitor's complete disk copy.
+        readable.once('error', discard);
+        readable.once('close', () => { if (!readable.readableEnded) discard(); });
+        cached.once('error', discard);
+        cached.once('close', () => { if (!cached.writableFinished) fs.unlink(tmp, () => {}); });
+        cached.once('finish', () => fs.rename(tmp, target, error => {
+            if (error) fs.unlink(tmp, () => {});
+        }));
+        readable.pipe(cached);
     } catch { /* the cache is an optimisation */ }
 };
 
@@ -254,6 +266,9 @@ const serveFromBucket = async(req, res, next) => {
         return res.end();
     }
 
+    // Tee the response into the cache instead of downloading the upload twice.
+    // Partial/range responses are never cached as complete originals.
+    if (!range) restoreDiskCopy(obj.body, name);
     obj.body
         .on('error', () => {
             req.uploadStorageUnavailable = true;
@@ -268,12 +283,6 @@ const serveFromBucket = async(req, res, next) => {
         .pipe(res);
     res.on('close', () => obj.body.destroy());
 
-    // Restore the disk cache from a full read only — a partial one is not the file.
-    if (!range) {
-        objectStore.getObject(name).then((full) => {
-            if (full && full.body) restoreDiskCopy(full.body, name);
-        }).catch(() => {});
-    }
     return undefined;
 };
 
@@ -325,12 +334,12 @@ const serveFromDatabase = async(req, res, next) => {
     res.setHeader('Content-Length', String(size ? end - start + 1 : 0));
     if (req.method === 'HEAD' || !size) return res.end();
 
-    store.openDownloadStream(file._id, { start, end: end + 1 })
+    const stream = store.openDownloadStream(file._id, { start, end: end + 1 });
+    if (!range) restoreDiskCopy(stream, name);
+    stream
         .on('error', () => { if (!res.headersSent) next(); else res.end(); })
         .pipe(res);
-
-    // Restore the disk cache from a full read only — a partial one is not the file.
-    if (!range) restoreDiskCopy(store.openDownloadStream(file._id), name);
+    res.on('close', () => stream.destroy());
     return undefined;
 };
 

@@ -883,9 +883,12 @@ class NotificationService {
      * that happened once. What failed to leave the building is the stored
      * subject, body and template parameters, and that is what gets another try.
      */
-    async retryLog(logId) {
+    async retryLog(logId, options = {}) {
         if (!mongoose.Types.ObjectId.isValid(String(logId || ''))) return null;
+        return require('./deliveryRetryClaim').run(logId, options, () => this._retryLog(logId));
+    }
 
+    async _retryLog(logId) {
         const row = await NotificationLog.findById(logId);
         if (!row) return null;
         if (row.event === 'ASSOCIATION_UPDATE') return require('./associationUpdateDelivery').retryLog(row);
