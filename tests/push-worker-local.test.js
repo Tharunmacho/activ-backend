@@ -63,7 +63,8 @@ let mongo;
     assert.equal(sent.find(message => message.token === tokens.android).android.notification.channelId, 'activ_updates');
     assert.equal(sent.find(message => message.token === tokens.android).android.notification.priority, 'high', 'pre-O notification display requests heads-up priority');
     assert.equal(sent.find(message => message.token === tokens.ios).apns.payload.aps.sound, 'default');
-    assert(!JSON.stringify(sent).includes('Private account content'));
+    assert(sent.every(message => message.data.title === 'Account update' && message.data.body === 'Private account content'));
+    assert.deepEqual(sent.find(message => message.token === tokens.android).notification, { title: 'Account update', body: 'Private account content' });
 
     // A partial provider outage retries only the device that failed.
     sent.length = 0;
@@ -92,12 +93,15 @@ let mongo;
 
     // Only the latest published revision produces a campaign, even if an
     // editor saves twice before the worker wakes up.
-    const update = await Announcement.create({ title: 'Revision one', body: 'A member update', status: 'published', audience: 'paid', state: 'Tamil Nadu', deliveryChannels: { email: false, whatsapp: false, push: true } });
+    const update = await Announcement.create({ title: 'Revision one', body: '<p>Dear {name}, your <strong>meeting</strong> starts at 10 AM.</p>', status: 'published', audience: 'paid', state: 'Tamil Nadu', deliveryChannels: { email: false, whatsapp: false, push: true } });
     await Announcement.findByIdAndUpdate(update._id, { $set: { title: 'Revision two' } }, { new: true });
     for (let index = 0; index < 3; index++) await broadcast.processBatch();
     assert.equal(await Notification.countDocuments({ user: owner, 'data.sourceId': String(update._id) }), 1);
     const campaign = await Notification.findOne({ user: owner, 'data.sourceId': String(update._id) }).lean();
     assert.equal(await push.stillVisible(campaign), true);
+    await push.deliver(campaign, await Device.find({ user: owner }).lean(), client);
+    assert.equal(sent.at(-1).data.title, 'Revision two');
+    assert.equal(sent.at(-1).data.body, 'Dear owner, your meeting starts at 10 AM.', 'push uses the actual personalized source instead of the generic stored campaign');
     // Populate the feed cache, then change the member without invalidating it.
     await require('../src/modules/common/memberContext').memberSnapshot(String(owner));
     await Member.updateOne({ _id: owner }, { $set: { state: 'Kerala' } });
@@ -133,6 +137,10 @@ let mongo;
     // Message notices must still belong to this member and require a paid
     // non-student membership when the queued push is processed.
     const conversation = await Conversation.create({ participants: sortedPair(owner, members.other._id), pairKey: pairKeyOf(owner, members.other._id) });
+    const message = await require('../src/modules/messages/message.model').Message.create({ conversationId: conversation._id, senderId: members.other._id, body: 'We will meet at 10 AM.' });
+    const chat = { _id: new mongoose.Types.ObjectId(), user: owner, title: 'New message from other', message: 'Open Messages', data: { kind: 'message', conversationId: String(conversation._id), messageId: String(message._id) } };
+    await push.deliver(chat, await Device.find({ user: owner }).lean(), client);
+    assert.equal(sent.at(-1).data.body, 'We will meet at 10 AM.', 'chat push shows the current message text');
     const messageRow = { user: owner, data: { kind: 'message', conversationId: String(conversation._id) } };
     assert.equal(await push.stillVisible(messageRow), true);
     assert.equal(await push.stillVisible({ ...messageRow, user: members.student._id }), false);

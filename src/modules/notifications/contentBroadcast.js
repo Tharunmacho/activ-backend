@@ -65,7 +65,8 @@ const labels = { announcement: 'association update', event: 'event programme', n
 function notice(job, doc, user) {
     const kind = job.kind;
     const channels = kind === 'announcement' ? require('../announcements/announcementChannels').effective(doc) : { push: true };
-    // No private headline/body on a lock screen, including after a membership changes.
+    // Store routing context here. Push resolves the current source and recipient
+    // again before rendering the actual title/body for the notification preview.
     return { user: user._id, deliveryKey: `${job._id}:${user._id}`, title: 'ACTIV · ' + labels[kind],
         message: `Dear member, there is a new or revised ${labels[kind]} for you. Thank you for being part of ACTIV.`,
         type: 'info', isRead: false,

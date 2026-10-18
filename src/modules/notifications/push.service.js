@@ -5,6 +5,7 @@ const Device = require('./pushDevice.model');
 const Notification = require('./notification.model');
 const Broadcast = require('./contentBroadcast');
 const readiness = require('./pushReadiness');
+const pushContent = require('./pushContent');
 let firebase;
 let timer;
 let running = false;
@@ -54,19 +55,19 @@ async function unregister(user, token) {
     return { removed: true };
 }
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
-function payload(notification, device) {
+function payload(notification, device, preview = notification) {
     const data = { notificationId: String(notification._id), userId: String(notification.user) };
     for (const key of ['kind', 'event', 'sourceId', 'eventId', 'announcementId', 'conversationId', 'messageId', 'orderId', 'bookingRef', 'slug']) {
-        if (notification.data?.[key]) data[key] = String(notification.data[key]).slice(0, 300);
+        if (notification.data?.[key]) data[key] = pushContent.clip(notification.data[key], 180);
     }
     // Data-only web messages let the worker check the current account before display.
     // A notification payload would be displayed automatically, even after logout.
-    if (device.platform === 'web') return { token: device.token, data,
-        webpush: { headers: { TTL: '86400', Urgency: 'high' } } };
-    return { token: device.token, notification: { title: 'ACTIV', body: 'Dear member, you have an update from ACTIV. Open the app to view it.' }, data,
+    if (device.platform === 'web') return pushContent.apply({ token: device.token, data,
+        webpush: { headers: { TTL: '86400', Urgency: 'high' } } }, preview);
+    return pushContent.apply({ token: device.token, notification: {}, data,
         android: { priority: 'high', ttl: 86400000, notification: { priority: 'high', channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notification._id), visibility: 'private' } },
         apns: { headers: { 'apns-priority': '10', 'apns-collapse-id': String(notification._id), 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) },
-            payload: { aps: { sound: 'default' } } } };
+            payload: { aps: { sound: 'default' } } } }, preview);
 }
 async function visibilityReason(row) {
     // Do not use the feed cache: a block, expiry, region change or logout must
@@ -112,14 +113,16 @@ const invalidTokenCodes = new Set(['messaging/registration-token-not-registered'
 const transientCodes = new Set(['messaging/internal-error', 'messaging/server-unavailable', 'messaging/unknown-error', 'messaging/quota-exceeded', 'messaging/message-rate-exceeded', 'app/network-error', 'app/network-timeout']);
 async function deliver(row, devices, client) {
     // Recheck after device lookup as well as in the worker/report eligibility.
-    if (row.data?.kind === 'announcement') {
+    if (row.data?.sourceId || row.data?.kind === 'message') {
         const reason = await visibilityReason(row);
         if (reason) return { status: 'skipped', lastError: reason };
     }
     const sent = new Set(row.push?.sentTokens || []);
     const targets = devices.filter(d => d.enabled && String(d.user) === String(row.user) && !sent.has(tokenHash(d.token)));
     if (!targets.length) return { status: sent.size ? 'sent' : 'skipped', sentTokens: [...sent], lastError: sent.size ? '' : skipReasons.noDevices };
-    const response = await (client || messaging()).sendEach(targets.map(d => payload(row, d)));
+    const preview = await pushContent.memberPreview(row);
+    if (!preview) return { status: 'skipped', lastError: skipReasons.sourceUnavailable };
+    const response = await (client || messaging()).sendEach(targets.map(d => payload(row, d, preview)));
     let retry = false;
     let failed = false;
     let lastError = '';

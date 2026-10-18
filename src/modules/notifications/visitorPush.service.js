@@ -136,7 +136,7 @@ async function processBatch(client) {
         const row = await VisitorDelivery.findOneAndUpdate({ nextAttemptAt: { $lte: now }, $or: [{ status: 'pending' }, { status: 'sending', leaseUntil: { $lt: now } }] },
             { $set: { status: 'sending', worker, leaseUntil: new Date(Date.now() + 300000) } }, { new: true }).lean();
         if (!row) return;
-        let status = 'skipped', lastError = '', sentAt, attemptedToken;
+        let status = 'skipped', lastError = '', sentAt, attemptedToken, content;
         try {
             const reasons = require('./push.service').skipReasons;
             const device = await VisitorDevice.findById(row.device).select('+token').lean();
@@ -145,16 +145,16 @@ async function processBatch(client) {
             else if (notice.createdAt < new Date(Date.now() - 86400000)) lastError = reasons.expired;
             else if (!device?.enabled || !device.token || !device.lastSeenAt || device.lastSeenAt < new Date(Date.now() - 90 * 86400000)) lastError = reasons.visitorDisabled;
             else if (await MemberDevice.exists({ token: device.token })) lastError = reasons.visitorSignedIn;
-            else lastError = (await pushEligibility(notice)).reason;
+            else { const eligible = await pushEligibility(notice); lastError = eligible.reason; content = eligible.doc; }
             if (!lastError) {
                 const data = { audience: 'visitor', publicNotificationId: String(notice._id), visitorId: String(device._id) };
                 // A web worker validates the opted-in installation before showing
                 // a notification. Firebase must not auto-display after opt-out/login.
-                const payload = device.platform === 'web' ? { token: device.token, data,
+                const payload = require('./pushContent').apply(device.platform === 'web' ? { token: device.token, data,
                     webpush: { headers: { TTL: '86400', Urgency: 'high' } } } : { token: device.token, data,
-                    notification: { title: 'ACTIV', body: 'Dear ACTIVian, explore a new public update from ACTIV.' },
+                    notification: {},
                     android: { priority: 'high', ttl: 86400000, notification: { priority: 'high', channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notice._id) } },
-                    apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) }, payload: { aps: { sound: 'default' } } } };
+                    apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) }, payload: { aps: { sound: 'default' } } } }, toPublic(notice, content));
                 attemptedToken = device.token;
                 await (client || require('./push.service').messaging()).send(payload);
                 require('./pushReadiness').recordProviderSuccess();
