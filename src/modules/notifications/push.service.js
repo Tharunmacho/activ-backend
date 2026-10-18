@@ -4,6 +4,7 @@ const logger = require('../../config/logger');
 const Device = require('./pushDevice.model');
 const Notification = require('./notification.model');
 const Broadcast = require('./contentBroadcast');
+const readiness = require('./pushReadiness');
 let firebase;
 let timer;
 let running = false;
@@ -22,13 +23,12 @@ const skipReasons = Object.freeze({
 });
 
 function isConfigured() {
-    return process.env.PUSH_ENABLED === 'true' && !!(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    return readiness.configurationPresent();
 }
 function messaging() {
     if (!firebase) {
-        const { initializeApp, cert, applicationDefault } = require('firebase-admin/app');
-        const credential = process.env.FIREBASE_SERVICE_ACCOUNT_JSON
-            ? cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)) : applicationDefault();
+        const { initializeApp } = require('firebase-admin/app');
+        const credential = readiness.credential();
         const app = initializeApp({ credential, ...(process.env.FIREBASE_PROJECT_ID ? { projectId: process.env.FIREBASE_PROJECT_ID } : {}) }, 'activ-push');
         firebase = require('firebase-admin/messaging').getMessaging(app);
     }
@@ -47,7 +47,7 @@ async function register(user, body = {}) {
     await require('./visitorPush.models').VisitorDevice.updateMany({ token }, { $set: { enabled: false }, $unset: { token: 1 } });
     const older = await Device.find({ user }).sort({ lastSeenAt: -1 }).skip(20).select('_id').lean();
     if (older.length) await Device.deleteMany({ user, _id: { $in: older.map(d => d._id) } });
-    return { registered: true, configured: isConfigured() };
+    return { registered: true, ...await readiness.check() };
 }
 async function unregister(user, token) {
     await Device.deleteOne({ user, token: validToken(token) });
@@ -64,7 +64,7 @@ function payload(notification, device) {
     if (device.platform === 'web') return { token: device.token, data,
         webpush: { headers: { TTL: '86400', Urgency: 'high' } } };
     return { token: device.token, notification: { title: 'ACTIV', body: 'Dear member, you have an update from ACTIV. Open the app to view it.' }, data,
-        android: { priority: 'high', ttl: 86400000, notification: { channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notification._id), visibility: 'private' } },
+        android: { priority: 'high', ttl: 86400000, notification: { priority: 'high', channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notification._id), visibility: 'private' } },
         apns: { headers: { 'apns-priority': '10', 'apns-collapse-id': String(notification._id), 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) },
             payload: { aps: { sound: 'default' } } } };
 }
@@ -130,6 +130,7 @@ async function deliver(row, devices, client) {
         if (result.success) sent.add(tokenHash(device.token));
         else {
             const code = result.error?.code || 'messaging/unknown-error';
+            readiness.recordProviderFailure(result.error);
             if (invalidTokenCodes.has(code)) {
                 invalidDevices++;
                 await Device.deleteOne({ _id: device._id, user: row.user, token: device.token });
@@ -137,6 +138,7 @@ async function deliver(row, devices, client) {
             else { retry ||= transientCodes.has(code); failed = true; lastError = code; }
         }
     }
+    if (response.responses.some(result => result.success)) readiness.recordProviderSuccess();
     if (!retry && !failed && !sent.size) lastError = invalidDevices === targets.length ? skipReasons.invalidDevices : skipReasons.noAcceptance;
     return { status: retry ? 'pending' : failed ? 'failed' : sent.size ? 'sent' : 'skipped', sentTokens: [...sent], lastError };
 }
@@ -171,6 +173,7 @@ async function processPushBatch({ client } = {}) {
                     result = await deliver(row, devices, client);
                 }
             } catch (error) {
+                readiness.recordProviderFailure(error);
                 result = { status: 'pending', lastError: error.code || 'push/unavailable' };
             }
             if (result.status === 'pending' && attempts >= 5) result.status = 'failed';
@@ -202,7 +205,7 @@ async function health() {
         VisitorDevice.countDocuments({ enabled: true }), VisitorDelivery.countDocuments({ status: 'pending' }),
         VisitorDelivery.countDocuments({ status: 'failed' }), PublicNotice.countDocuments({ status: { $in: ['pending', 'processing'] } }),
     ]);
-    return { configured: isConfigured(), provider: 'Firebase Cloud Messaging', devices: devices + visitors, visitors,
+    return { ...await readiness.check(), provider: 'Firebase Cloud Messaging', devices: devices + visitors, visitors,
         queued: queued + visitorQueued, failed: failed + visitorFailed, broadcasts: broadcasts + visitorBroadcasts,
         workerEnabled: process.env.NOTIFICATION_WORKER_ENABLED !== 'false' };
 }
@@ -212,6 +215,10 @@ async function queueTest(user) {
     if (process.env.NOTIFICATION_WORKER_ENABLED === 'false') throw ApiError.badRequest('The notification worker is disabled. Enable it before testing.');
     const registered = await Device.exists({ user, enabled: true, lastSeenAt: { $gte: new Date(Date.now() - 90 * 86400000) } });
     if (!registered) throw ApiError.badRequest('Enable notifications in this browser or sign in to the ACTIV app and allow notifications before testing.');
+    const status = await readiness.check();
+    // An explicitly requested test can establish recovery after a cached FCM
+    // refusal, provided OAuth is currently valid. It never replays old notices.
+    if (!status.credentialReady) throw ApiError.badRequest(status.reason);
     await require('./notification.service').createNotification(user, { title: 'ACTIV notification test',
         message: 'Dear administrator, thank you for checking your ACTIV notifications.', data: { kind: 'test' } });
     return { queued: true };

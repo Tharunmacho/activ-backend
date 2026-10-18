@@ -22,7 +22,7 @@ const builtinKeys = new Set(BUILTINS.map(row => row.key));
 function variableValues(update = {}, recipient = {}) {
     const values = Object.assign(Object.create(null), {
         name: clean(recipient.fullName).replace(/\s+/g, ' ').slice(0, 160), title: '',
-        company_name: clean(recipient.companyName), date: formatDate(update.publishedAt),
+        company_name: clean(recipient.companyName), date: formatDate(update.publishedAt || update.createdAt),
         renewal_date: recipient.membershipType === 'lifetime' || recipient.isLifetime ? '' : formatDate(recipient.membershipExpiresAt),
         fee: '', renewal_fee: '', last_paid_fee: clean(recipient.lastPaidFee),
         membership_number: clean(recipient.membershipNumber), email: clean(recipient.email), phone: clean(recipient.phoneNumber),

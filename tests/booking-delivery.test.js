@@ -190,6 +190,12 @@ const fakeBookingStore = () => {
 
 const recordDispatches = () => {
     const sent = [];
+    const keys = new Set();
+    stub(notificationService, 'dispatchInBackground', async(eventName, recipient, payload) => {
+        const key = require('../src/modules/notifications/lifecycleOutbox').keyFor(eventName, recipient, payload);
+        if (!keys.has(key)) { keys.add(key); sent.push({ eventName, to: recipient.email || recipient.phone }); }
+        return { queued: true, outboxId: key };
+    });
     stub(notificationService, 'dispatchLifecycleEvent', async(eventName, recipient) => {
         sent.push({ eventName, to: recipient.email || recipient.phone });
         return { channels: {}, rows: {} };

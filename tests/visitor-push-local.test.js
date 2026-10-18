@@ -55,6 +55,7 @@ let mongo;
     await service.processBatch(client);
     assert.equal(sent.length, 2, 'completed jobs do not replay');
     assert(sent.every(payload => payload.token === token && payload.data.visitorId === fixture.id && !payload.data.userId));
+    assert(sent.every(payload => payload.android.notification.channelId === 'activ_updates' && payload.android.notification.priority === 'high'), 'visitor notification display matches account heads-up priority');
     assert.equal((await service.opened(fixture.key, notice._id, 'push')).recorded, true);
     assert.equal((await service.opened(fixture.key, notice._id, 'push')).recorded, false, 'open is idempotent');
     const notTargeted = await service.install();

@@ -6,6 +6,6 @@ const service = require('./appUpdate.service');
 const router = express.Router();
 router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.get('/android', asyncHandler(async (_req, res) => res.json(ApiResponse.success(await service.read()))));
-router.get('/admin', verifyToken, requireRole('super_admin'), asyncHandler(async (_req, res) => res.json(ApiResponse.success(await service.read()))));
+router.get('/admin', verifyToken, requireRole('super_admin'), asyncHandler(async (_req, res) => res.json(ApiResponse.success(await service.readSaved()))));
 router.put('/admin', verifyToken, requireRole('super_admin'), asyncHandler(async (req, res) => res.json(ApiResponse.success(await service.save(req.body || {}, req.user)))));
 module.exports = router;

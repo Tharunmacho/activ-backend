@@ -25,7 +25,17 @@ check('DNS hiccup', isHealable(row('getaddrinfo EAI_AGAIN smtp.example.com')));
 check('SMTP 421 try again later', isHealable(row('421 4.7.0 Try again later')));
 check('WhatsApp rate limit 130429', isHealable(row('(#130429) Rate limit hit')));
 check('WhatsApp generic 131000', isHealable(row('(#131000) Something went wrong')));
-check('WhatsApp spam-rate 131048', isHealable(row('(#131048) Spam rate limit hit')));
+check('WhatsApp pair rate 131056', isHealable(row('(#131056) Pair rate limit hit')));
+
+console.log('\nprovider restrictions need review');
+check('WhatsApp spam-rate 131048', !isHealable(row('(#131048) Spam rate limit hit')));
+check('spam restriction code overrides transient wording', !isHealable({ failureCode: 131048, lastError: 'Temporarily rate limited' }));
+check('string webhook code without an error message', !isHealable({ failureCode: '131048' }));
+check('spam-rate message without a code', !isHealable({ failureReason: 'Spam rate limit hit' }));
+check('spam restriction in lastError overrides a generic failureReason', !isHealable({ failureReason: 'Temporary rate limit', lastError: '(#131048) Spam rate limit hit' }));
+check('transient wording cannot override a webhook spam restriction', !isHealable({ failureReason: '(#131048) Spam rate limit hit', lastError: 'Try again later' }));
+check('throughput code still heals', isHealable({ failureCode: 130429, lastError: 'Rate limit hit' }));
+check('pair rate code still heals', isHealable({ failureCode: 131056, lastError: 'Rate limit hit' }));
 
 console.log('\nnever retried');
 check('not on WhatsApp 131026', !isHealable(row('(#131026) Message undeliverable')));

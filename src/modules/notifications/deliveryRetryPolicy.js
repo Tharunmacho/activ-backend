@@ -39,7 +39,14 @@ async function logReason(row) {
     if (stateReason) return stateReason;
     const data = row.data || {}, context = data.lifecycleData || data;
     if (row.user) {
-        const member = await require('../members/memberdetails.model').findById(row.user).lean();
+        const Member = require('../members/memberdetails.model');
+        let member = await Member.findById(row.user).lean();
+        // Application notices retain their original login ID. The state guard
+        // above verifies its explicit profile link and application ownership;
+        // resolve that same link here before treating the recipient as missing.
+        if (!member && ['APPLICATION_SUBMITTED', 'APPLICATION_ENDORSED', 'APPLICATION_APPROVED', 'CORRECTION_REQUESTED'].includes(row.event)) {
+            member = await Member.findOne({ userId: row.user }).lean();
+        }
         if (member && (member.isActive === false || member.deletedAt)) return 'The recipient account is no longer active.';
         if (!member) {
             const admin = await require('../admin/admin.repository').findById(String(row.user));

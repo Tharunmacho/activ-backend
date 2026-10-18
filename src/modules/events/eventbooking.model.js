@@ -304,12 +304,13 @@ const eventBookingSchema = new mongoose.Schema({
     eventChangesSent: { type: [String], default: [] },
 
     /**
-     * When the CONFIRMATION was sent. Claimed with a conditional update before
-     * sending (`announce`), so a paid booking is confirmed exactly once even
-     * when the Instamojo webhook, the payer's return page and the reconcile
-     * all settle it at the same moment.
+     * When every primary confirmation was durably queued. Provider acceptance
+     * and delivery remain on the notification/outbox rows, per recipient.
      */
     confirmationSentAt: { type: Date, default: null },
+    // Set with the free-booking/payment write; only new pending intents are
+    // swept. Existing historical bookings are never enrolled in a bulk resend.
+    confirmationPending: { type: Boolean, default: false, index: true },
 
     /**
      * The secret that lets a GUEST change their own booking.

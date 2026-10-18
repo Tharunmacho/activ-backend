@@ -53,7 +53,7 @@ async function register(key, body = {}) {
         await VisitorDevice.updateOne({ _id: device._id, token }, { $set: { enabled: false }, $unset: { token: 1 } });
         throw ApiError.conflict('This device is signed in. Use account notifications.');
     }
-    return { registered: true, configured: require('./push.service').isConfigured() };
+    return { registered: true, ...await require('./pushReadiness').check() };
 }
 async function unregister(key) {
     const device = await deviceFor(key);
@@ -153,13 +153,15 @@ async function processBatch(client) {
                 const payload = device.platform === 'web' ? { token: device.token, data,
                     webpush: { headers: { TTL: '86400', Urgency: 'high' } } } : { token: device.token, data,
                     notification: { title: 'ACTIV', body: 'Dear ACTIVian, explore a new public update from ACTIV.' },
-                    android: { priority: 'high', ttl: 86400000, notification: { channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notice._id) } },
+                    android: { priority: 'high', ttl: 86400000, notification: { priority: 'high', channelId: 'activ_updates', sound: 'default', icon: 'ic_notification', tag: String(notice._id) } },
                     apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400) }, payload: { aps: { sound: 'default' } } } };
                 attemptedToken = device.token;
                 await (client || require('./push.service').messaging()).send(payload);
+                require('./pushReadiness').recordProviderSuccess();
                 status = 'sent'; sentAt = new Date();
             }
         } catch (error) {
+            require('./pushReadiness').recordProviderFailure(error);
             lastError = error.code || 'visitor/unavailable';
             if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
                 // A token refresh may finish while Firebase rejects the old

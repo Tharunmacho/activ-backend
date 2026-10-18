@@ -22,8 +22,14 @@ function validate(payload = {}) {
     return { enabled: payload.enabled, requireLatestAvailable: payload.requireLatestAvailable, minimumVersionCode: code, message };
 }
 async function read() {
-    // No read writes a policy. The default requires only a newer release that
-    // Google Play has independently confirmed for this device/account.
+    // Existing policy-aware app builds must also use automatic Play updates.
+    // A retired admin switch or version threshold must not disable this path
+    // or demand a release Play cannot offer to the current device/account.
+    // This public read neither depends on nor changes the saved admin record.
+    return project();
+}
+async function readSaved() {
+    // Preserve the legacy admin API for clients that still show its controls.
     return project(await Policy.findById('android').lean() || {});
 }
 async function save(payload, actor = {}) {
@@ -38,4 +44,4 @@ async function save(payload, actor = {}) {
         metadata: { enabled: data.enabled, requireLatestAvailable: data.requireLatestAvailable, minimumVersionCode: data.minimumVersionCode } });
     return project(row);
 }
-module.exports = { read, save, validate, project, PACKAGE_NAME, PLAY_URL };
+module.exports = { read, readSaved, save, validate, project, PACKAGE_NAME, PLAY_URL };

@@ -24,8 +24,11 @@ function keyFor(event, recipient, payload) {
     // did not. Contact details and daysLeft can change between those attempts.
     const memberId = recipient?.id && String(recipient.id._id || recipient.id);
     const reminderKey = payload?.data?.renewalReminderKey;
+    const confirmation = /^EVENT_(BOOKING|PARTICIPANT)_CONFIRMED$/.test(event)
+        && !payload?.data?.nominationChange && payload?.data?.bookingConfirmation;
     const identity = event === 'MEMBERSHIP_RENEWAL_DUE' && memberId && reminderKey
-        ? { event, memberId, reminderKey: String(reminderKey) } : { event, recipient, payload };
+        ? { event, memberId, reminderKey: String(reminderKey) }
+        : confirmation?.bookingId ? { event, recipient, confirmation } : { event, recipient, payload };
     return 'lifecycle:' + crypto.createHash('sha256')
         .update(JSON.stringify(canonical(plain(identity)))).digest('hex');
 }
@@ -181,10 +184,19 @@ async function processOne(id) {
 }
 let running = false;
 let timer;
+let nextBookingSweep = 0;
 async function tick() {
     if (running) return;
     running = true;
-    try { for (let index = 0; index < 4; index++) if (!await processOne()) break; }
+    try {
+        if (Date.now() >= nextBookingSweep) {
+            nextBookingSweep = Date.now() + 30000;
+            await require('../events/eventbooking.service').queuePendingConfirmations().catch(error => {
+                logger.warn('Pending booking confirmation sweep deferred', { error: errorText(error) });
+            });
+        }
+        for (let index = 0; index < 4; index++) if (!await processOne()) break;
+    }
     catch (error) { logger.warn('Lifecycle outbox worker failed', { error: errorText(error) }); }
     finally { running = false; }
 }

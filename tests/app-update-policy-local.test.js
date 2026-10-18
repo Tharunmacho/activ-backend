@@ -36,7 +36,8 @@ let mongo;
     await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, requireLatestAvailable: 'true' }).expect(400);
     await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send(payload).expect(200);
     response = await request(app).get('/app-updates/android').expect(200);
-    assert.equal(response.body.data.minimumVersionCode, 27);
+    assert.equal(response.body.data.minimumVersionCode, 1, 'public launch policy cannot demand an arbitrary saved version');
+    assert.equal(response.body.data.message, 'Please update ACTIV to continue.', 'public launch message is stable');
     assert.equal(response.body.data.packageName, 'in.activ.membership');
     assert.equal(response.body.data.playUrl, 'https://play.google.com/store/apps/details?id=in.activ.membership');
     assert.equal(response.body.data.updatedBy, undefined);
@@ -46,7 +47,17 @@ let mongo;
     assert.equal(audit.category, 'admin');
     assert.equal(audit.metadata.requireLatestAvailable, true);
     assert.equal(audit.metadata.minimumVersionCode, 27);
-    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, enabled: false, productionAvailableConfirmed: false }).expect(200);
-    assert.equal((await request(app).get('/app-updates/android')).body.data.enabled, false, 'policy can disable a previously required update');
-    console.log('PASS: launch policy defaults/read-only behavior, admin authorization, positive version validation, release acknowledgement, private metadata projection, auditing and disable.');
+    assert.equal((await request(app).get('/app-updates/admin').set('Authorization', token('super_admin'))).body.data.minimumVersionCode, 27, 'legacy admin reads retain their saved values');
+    await request(app).put('/app-updates/admin').set('Authorization', token('super_admin')).send({ ...payload, enabled: false, requireLatestAvailable: false, productionAvailableConfirmed: false }).expect(200);
+    const storedBefore = await Policy.findById('android').lean();
+    const auditsBefore = await Audit.countDocuments();
+    response = await request(app).get('/app-updates/android').expect(200);
+    assert.deepEqual(response.body.data, { enabled: true, requireLatestAvailable: true, minimumVersionCode: 1,
+        message: 'Please update ACTIV to continue.', packageName: 'in.activ.membership',
+        playUrl: 'https://play.google.com/store/apps/details?id=in.activ.membership', updatedAt: null },
+    'already-installed policy-aware clients use automatic Play updates even when the saved switch is off');
+    assert.deepEqual(await Policy.findById('android').lean(), storedBefore, 'public reads never overwrite the retired policy');
+    assert.equal(await Audit.countDocuments(), auditsBefore, 'public reads do not create audit writes');
+    assert.equal((await request(app).get('/app-updates/admin').set('Authorization', token('super_admin'))).body.data.enabled, false, 'legacy admin API still reports its saved configuration');
+    console.log('PASS: automatic public Play policy despite saved disabled/high-version controls, read-only behavior, legacy admin compatibility, authorization, validation, private projection and auditing.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); if (mongo) await mongo.stop(); });

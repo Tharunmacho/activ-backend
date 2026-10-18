@@ -19,6 +19,9 @@ let mongo;
     const Device = require('../src/modules/notifications/pushDevice.model');
     const { Conversation, sortedPair, pairKeyOf } = require('../src/modules/messages/message.model');
     const push = require('../src/modules/notifications/push.service');
+    // This suite exercises queue/delivery state using its fake Firebase adapter.
+    // Authentication is separately covered by push-readiness.test.js.
+    require('../src/modules/notifications/pushReadiness').check = async () => ({ configured: true, ready: true, credentialReady: true });
     const broadcast = require('../src/modules/notifications/contentBroadcast');
     const service = require('../src/modules/notifications/notification.service');
     await Promise.all([Member, Order, Announcement, Notification, Job, Device, Conversation].map(model => model.createIndexes()));
@@ -58,6 +61,7 @@ let mongo;
     assert(sent.every(message => message.data.event === 'WELCOME'));
     assert.equal(sent.find(message => message.token === tokens.web).notification, undefined);
     assert.equal(sent.find(message => message.token === tokens.android).android.notification.channelId, 'activ_updates');
+    assert.equal(sent.find(message => message.token === tokens.android).android.notification.priority, 'high', 'pre-O notification display requests heads-up priority');
     assert.equal(sent.find(message => message.token === tokens.ios).apns.payload.aps.sound, 'default');
     assert(!JSON.stringify(sent).includes('Private account content'));
 

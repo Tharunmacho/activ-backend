@@ -127,7 +127,10 @@ let mongo;
 
     // A nominee can change while the durable notice waits for its worker.
     const Booking = require('../src/modules/events/eventbooking.model');
+    const Event = require('../src/modules/events/event.model');
     const eventId = new mongoose.Types.ObjectId();
+    await Event.collection.insertOne({ _id: eventId, title: 'Future fixture event', status: 'published',
+        startAt: new Date(Date.now() + 86400000), endAt: new Date(Date.now() + 90000000) });
     await Booking.collection.insertOne({ bookingRef: 'LOCAL-QUEUE', eventId, userId: id, status: 'active',
         payment: { status: 'paid' }, participants: [{ name: 'Replacement nominee', email: 'replacement@example.test', phone: '9123450001' }] });
     const staleNominee = await worker.enqueue('EVENT_PARTICIPANT_CONFIRMED', { ...recipient, id: '' }, {

@@ -22,6 +22,8 @@ const logger = require('../../config/logger');
  *           off, within 24 hours of the original. A PERMANENT failure (number
  *           not on WhatsApp, address refused, template missing) is never
  *           retried: trying again cannot change the answer.
+ *           Provider spam restrictions also stop automatic and bulk retries
+ *           until the sender is reviewed; an individual resend stays manual.
  *
  *   BULK    `retryFailed({ sinceHours })` — the Super Admin's "Retry all
  *           failed" button, for a backlog older than the automatic window.
@@ -43,9 +45,18 @@ const HEALABLE = new RegExp([
     '535', 'invalid login', 'authentication', 'auth', 'EAUTH',
     'ECONN', 'ETIMEDOUT', 'ESOCKET', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'socket', 'timed? ?out', 'network',
     '\\b421\\b', '\\b45[0-2]\\b', 'try again', 'temporar', 'rate', 'throttl', 'too many',
-    // WhatsApp Cloud: generic, service unavailable, spam-rate, per-user rate, throughput
-    '\\b131000\\b', '\\b131016\\b', '\\b131048\\b', '\\b131056\\b', '\\b130429\\b', '\\b133016\\b',
+    // WhatsApp Cloud: generic, service unavailable, per-user rate, throughput
+    '\\b131000\\b', '\\b131016\\b', '\\b131056\\b', '\\b130429\\b', '\\b133016\\b',
 ].join('|'), 'i');
+
+// A spam restriction needs sender-quality review, rather than another timed
+// send. This wins over generic "rate" / "temporarily" wording, including when
+// the webhook supplies a numeric code separately from its human-readable text.
+// Explicit individual resends remain available after provider remediation.
+const PROVIDER_RESTRICTED = /\b131048\b|\bspam[\s-]+rate(?:[\s-]+limit)?\b/i;
+const isProviderRestricted = (row = {}) => PROVIDER_RESTRICTED.test(
+    [row.failureCode, row.failureReason, row.lastError].filter(value => value !== undefined && value !== null).join(' ')
+);
 
 /** Causes no retry can fix. Checked first: a permanent cause wins. */
 const PERMANENT = new RegExp([
@@ -58,6 +69,7 @@ const PERMANENT = new RegExp([
 const reasonOf = (row = {}) => String(row.failureReason || row.lastError || '');
 
 const isHealable = (row = {}) => {
+    if (isProviderRestricted(row)) return false;
     const reason = reasonOf(row);
     if (!reason) return false;
     if (PERMANENT.test(reason)) return false;

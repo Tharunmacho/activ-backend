@@ -134,6 +134,24 @@ async function main() {
     assert.equal((await guard.retryFailed({ auto: false, sinceHours: 168, limit: 1 })).sent, 1,
         'An explicitly requested manual window remains supported');
     assert.deepEqual(providerAttempts, [old._id]);
+
+    for (const auto of [true, false]) {
+        reset();
+        const restrictions = [
+            ...add(1, { failureCode: 131048, lastError: 'Temporary rate limit hit' }),
+            ...add(1, { failureReason: 'Spam rate limit hit', lastError: 'Try again later' }),
+            ...add(1, { failureReason: 'Rate limited', lastError: '(#131048) Spam rate limit hit' }),
+        ];
+        const transient = [
+            ...add(1, { failureCode: 130429, lastError: '(#130429) Rate limit hit' }),
+            ...add(1, { failureCode: 131056, lastError: '(#131056) Pair rate limit hit' }),
+        ];
+        const restrictionResult = await guard.retryFailed({ auto, limit: 2 });
+        assert.equal(restrictionResult.permanent, 3, 'Automatic and bulk sends exclude provider restrictions');
+        assert.equal(restrictionResult.sent, 2, 'Genuine transient limits remain eligible');
+        assert.deepEqual(providerAttempts, transient.map(row => row._id));
+        assert(!restrictions.some(row => claims.includes(row._id)), 'Restricted messages do not spend retry attempts');
+    }
     console.log('PASS retry pagination: permanent/exhausted/deferred/stale pages, equal timestamps, attempt limits, changing failed set and unchanged history windows.');
 }
 

@@ -401,6 +401,22 @@ const participantMessageContext = (ctx, person, index) => {
     };
 };
 
+/** A shared phone must not suppress a participant's own email and entry pass. */
+const participantRecipients = (booking = {}) => {
+    const emails = new Set([str(booking.bookedBy?.email).toLowerCase()].filter(Boolean));
+    const phones = new Set([phoneKey(booking.bookedBy?.phone)].filter(Boolean));
+    return (booking.participants || []).map((person, index) => {
+        if (!person) return null;
+        const address = str(person.email).toLowerCase();
+        const number = phoneKey(person.phone);
+        const email = address && !emails.has(address) ? address : '';
+        const phone = number && !phones.has(number) ? str(person.phone) : '';
+        if (email) emails.add(address);
+        if (phone) phones.add(number);
+        return email || phone ? { person, index, recipient: { id: '', name: str(person.name), email, phone } } : null;
+    }).filter(Boolean);
+};
+
 /** What a client is allowed to see about a booking. */
 /** The overview's running totals, zeroed. A shape, so no caller invents one. */
 const EMPTY_OVERVIEW_TOTALS = () => ({
@@ -1220,6 +1236,8 @@ class EventBookingService {
                 recordedBy: ''
             },
             status: waitlisted ? 'waitlist' : 'active',
+            // Durable alongside the seat if this process stops before enqueue.
+            confirmationPending: !chargeable && !waitlisted,
             /*
              * The hold, and only on a booking that is actually waiting to be
              * paid. A confirmed booking does not expire and neither does a
@@ -1272,7 +1290,10 @@ class EventBookingService {
          * confirmed and then asking them to pay for it is two messages that
          * contradict each other.
          */
-        if (!chargeable) this.announce(booking);
+        if (!chargeable) {
+            if (waitlisted) this.announce(booking);
+            else await this.announce(booking);
+        }
 
         return {
             ...toBooking(booking),
@@ -1445,6 +1466,7 @@ class EventBookingService {
             },
             {
                 status: issue ? 'waitlist' : 'active',
+                confirmationPending: !issue,
                 expiresAt: null,
                 'payment.status': 'paid',
                 'payment.mode': ['online', 'offline', 'cash', 'upi', 'bank_transfer']
@@ -1466,7 +1488,7 @@ class EventBookingService {
         });
 
         if (issue) logger.warn('Paid event booking requires organiser reconciliation', { bookingRef: claimed.bookingRef, reason: issue });
-        else this.announce(claimed);
+        else await this.announce(claimed);
         return toBooking(claimed);
     }
 
@@ -1527,6 +1549,7 @@ class EventBookingService {
             },
             {
                 status: 'active',
+                confirmationPending: true,
                 expiresAt: null,
                 'payment.status': 'paid',
                 'payment.mode': ['offline', 'cash', 'upi', 'bank_transfer'].includes(str(mode))
@@ -1547,7 +1570,7 @@ class EventBookingService {
             previousStatus: existing.status
         });
 
-        this.announce(claimed);
+        await this.announce(claimed);
         return toBooking(claimed);
     }
 
@@ -1664,12 +1687,16 @@ class EventBookingService {
             if (!booking || booking.status !== 'active'
                 || !['paid', 'not_required'].includes((booking.payment || {}).status)) return;
             const changes = participantChanges(previous, booking.participants || []);
+            const initialPending = booking.confirmationPending && !booking.confirmationSentAt;
             // Distinguish a later re-nomination from replay of the same intent.
             const changeId = crypto.randomUUID();
             const notificationService = require('../notifications/notification.service');
             for (const kind of ['removed', 'confirmed']) {
                 if (!changes[kind].length) continue;
                 const removed = kind === 'removed';
+                // Recovery will issue the new nominee's initial confirmation;
+                // do not also enqueue a second nomination-change confirmation.
+                if (!removed && initialPending) continue;
                 const ctx = await this.messageContext(booking, removed ? 'cancelled' : 'confirmed', removed ? {
                     participantRemoved: true,
                     reason: 'The booker changed the nomination. Your seat is no longer reserved.'
@@ -1686,6 +1713,7 @@ class EventBookingService {
                     }));
                 }
             }
+            if (initialPending) await this.queueBookingConfirmation(booking);
         })().catch(error => logger.warn('Changed participant messages not sent', {
             bookingRef: booking && booking.bookingRef, error: error && error.message
         }));
@@ -1906,6 +1934,65 @@ class EventBookingService {
         };
     }
 
+    /** Persist every recipient before checkpointing the booking. Stable outbox
+     * keys make retries safe after a partial enqueue, concurrent payment
+     * callbacks, or a process restart before the final checkpoint. */
+    async queueBookingConfirmation(booking, extra = {}) {
+        try {
+            if (!booking || booking.deletedAt || booking.status !== 'active'
+                || !['paid', 'not_required'].includes(booking.payment?.status)
+                || (booking.confirmationSentAt && !booking.confirmationPending)) return { queued: true, skipped: true };
+            const ctx = await this.messageContext(booking, 'confirmed', extra);
+            const booker = booking.bookedBy || {};
+            const participants = (booking.participants || []).map(person => person.toObject ? person.toObject() : person);
+            const rosterKey = crypto.createHash('sha256').update(JSON.stringify(participants.map(person => ({
+                name: str(person.name), email: str(person.email).toLowerCase(), phone: phoneKey(person.phone),
+            })))).digest('hex');
+            const recipients = [];
+            if (booker.email || booker.phone) recipients.push({ event: 'EVENT_BOOKING_CONFIRMED', index: -1,
+                recipient: { id: booking.userId || '', name: str(booker.name), email: str(booker.email).toLowerCase(), phone: str(booker.phone) }, payload: ctx });
+            for (const { person, index, recipient } of participantRecipients(booking)) recipients.push({
+                event: 'EVENT_PARTICIPANT_CONFIRMED', index, recipient, payload: participantMessageContext(ctx, person, index),
+            });
+            const notifications = require('../notifications/notification.service');
+            const outcomes = await Promise.all(recipients.map(async notice => {
+                try {
+                    return await notifications.dispatchInBackground(notice.event, notice.recipient, {
+                        ...notice.payload, data: { ...notice.payload.data,
+                            bookingConfirmation: { bookingId: String(booking._id), participantIndex: notice.index,
+                                ...(notice.index === -1 ? { rosterKey } : {}) } },
+                    });
+                } catch (error) { return { queued: false, error: error.message }; }
+            }));
+            if (!recipients.length || outcomes.some(result => !result?.queued)) {
+                throw new Error(outcomes.find(result => !result?.queued)?.error || 'No reachable confirmation recipient');
+            }
+            const checkpoint = await EventBooking.updateOne({ _id: booking._id, confirmationSentAt: null,
+                status: 'active', 'payment.status': { $in: ['paid', 'not_required'] }, deletedAt: null,
+                participants }, {
+                $set: { confirmationSentAt: new Date(), confirmationPending: false },
+            });
+            // Supporting files run only after every primary intent is safe.
+            // One checkpoint winner owns these supplementary sends.
+            if (checkpoint.matchedCount) void this.announce(booking, 'confirmed', { ...extra, resend: true, supplementaryOnly: true });
+            return { queued: true, recipients: recipients.length };
+        } catch (error) {
+            logger.warn('Booking confirmations await durable enqueue', { bookingRef: booking?.bookingRef, error: error.message });
+            return { queued: false, error: error.message };
+        }
+    }
+
+    /** New paid/free bookings retain this flag in the same write that confirms
+     * their seats. The worker resumes unscheduled recipients after a restart;
+     * old bookings without the flag are intentionally excluded. */
+    async queuePendingConfirmations() {
+        const bookings = await EventBooking.find({ confirmationPending: true, confirmationSentAt: null,
+            status: 'active', 'payment.status': { $in: ['paid', 'not_required'] }, deletedAt: null })
+            .sort({ createdAt: 1 }).limit(25).lean();
+        for (const booking of bookings) await this.queueBookingConfirmation(booking);
+        return bookings.length;
+    }
+
     /**
      * Tell the booker, on every channel they can be reached on — email,
      * WhatsApp and (for a member) the bell.
@@ -1917,7 +2004,8 @@ class EventBookingService {
      *   cancelled  the organiser cancelled it
      *   reminder   the event is coming up (see `sendDueReminders`)
      *
-     * NEVER AWAITED AND CANNOT THROW. By the time this runs the seats are held
+     * Confirmation callers await durable enqueue, never provider delivery.
+     * Other announcements remain best-effort here. By now the seats are held
      * and, on a paid booking, the money has moved. A mail host that is down
      * must not turn a completed payment into an error the booker sees — they
      * would pay a second time for seats they already hold.
@@ -1925,30 +2013,12 @@ class EventBookingService {
     announce(booking, kind = null, extra = {}) {
         if (!booking) return;
         const resolvedKind = kind || (booking.status === 'waitlist' ? 'waitlist' : 'confirmed');
+        if (resolvedKind === 'confirmed' && booking._id && !extra.resend) return this.queueBookingConfirmation(booking, extra);
 
         return (async() => {
             const email = (booking.bookedBy && booking.bookedBy.email) || '';
             const phone = (booking.bookedBy && booking.bookedBy.phone) || '';
-            if (!email && !phone) return;
-
-            /*
-             * A CONFIRMATION GOES OUT ONCE PER BOOKING. Every path that settles
-             * a paid booking (webhook, return page, reconcile, mock, the
-             * organiser's "confirm") ends here; the payment claim already makes
-             * one of them win, and this claim makes it impossible for a second
-             * call — a retried webhook, a future caller — to send it twice.
-             * A booking with no `_id` (a test double) is not guarded.
-             */
-            if (resolvedKind === 'confirmed' && booking._id && !extra.resend) {
-                const claim = await EventBooking.updateOne(
-                    { _id: booking._id, confirmationSentAt: null },
-                    { $set: { confirmationSentAt: new Date() } }
-                ).catch(() => null);
-                if (claim && claim.matchedCount === 0 && claim.modifiedCount === 0) {
-                    logger.info('Booking confirmation already sent; not sending again', { bookingRef: booking.bookingRef });
-                    return;
-                }
-            }
+            if (!email && !phone && !participantRecipients(booking).length) return;
 
             const ctx = await this.messageContext(booking, resolvedKind, extra);
             const eventName = {
@@ -1961,7 +2031,7 @@ class EventBookingService {
             }[resolvedKind] || 'EVENT_BOOKING_CONFIRMED';
 
             const notificationService = require('../notifications/notification.service');
-            await notificationService.dispatchLifecycleEvent(eventName, {
+            if (!extra.supplementaryOnly) await notificationService.dispatchLifecycleEvent(eventName, {
                 // A guest has no member id, so there is no bell to write to —
                 // the in-app channel is skipped on its own when it is absent.
                 id: booking.userId || '',
@@ -1978,8 +2048,8 @@ class EventBookingService {
              * booked for them, THEIR seat and the event details — never the
              * booker's payment. Not on a waitlist (nothing is held for them).
              *
-             * One message per person: participant 1 defaults to the booker, and
-             * the same number or address listed twice is sent once. A
+             * One send per address on each channel: sharing a phone does not
+             * suppress a separate email (or vice versa). A
              * participant with neither an email nor a mobile has nowhere to go.
              */
             /*
@@ -2056,13 +2126,7 @@ class EventBookingService {
             await sendDocuments(phone, (booking.bookedBy && booking.bookedBy.name) || '');
 
             if (!['confirmed', 'reminder', 'cancelled', 'updated', 'event_cancelled'].includes(resolvedKind)) return;
-            const seen = new Set([phoneKey(phone), str(email).toLowerCase()].filter(Boolean));
-            const people = (booking.participants || []).filter((p) => {
-                const keys = [phoneKey(p && p.phone), str(p && p.email).toLowerCase()].filter(Boolean);
-                if (!keys.length || keys.some((k) => seen.has(k))) return false;
-                keys.forEach((k) => seen.add(k));
-                return true;
-            });
+            const people = participantRecipients(booking);
             const participantEvent = {
                 confirmed: 'EVENT_PARTICIPANT_CONFIRMED',
                 reminder: 'EVENT_PARTICIPANT_REMINDER',
@@ -2070,30 +2134,13 @@ class EventBookingService {
                 event_cancelled: 'EVENT_CANCELLED',
                 cancelled: 'EVENT_PARTICIPANT_CANCELLED'
             }[resolvedKind];
-            for (const person of people) {
-                await notificationService.dispatchLifecycleEvent(participantEvent, {
-                    id: '',
-                    name: str(person.name),
-                    email: str(person.email),
-                    phone: str(person.phone)
-                }, {
-                    ...ctx,
-                    // THEIR entry pass only — never the booker's list of everybody's.
-                    ...(() => {
-                        const own = (ctx.passes || []).find((p) => p.index === (booking.participants || []).indexOf(person));
-                        return { ticketUrl: own ? own.url : '', registrationNo: own ? own.registrationNo : '', passes: [] };
-                    })(),
-                    // The message is about THEIR seat, booked by somebody else.
-                    participantName: str(person.name),
-                    participantEmail: str(person.email),
-                    participantPhone: str(person.phone),
-                    bookerName: (booking.bookedBy && booking.bookedBy.name) || '',
-                    bookerEmail: str(person.email)
-                }).catch((error) => logger.warn('Participant message not sent', {
+            for (const { person, index, recipient } of people) {
+                if (!extra.supplementaryOnly) await notificationService.dispatchLifecycleEvent(participantEvent, recipient,
+                    participantMessageContext(ctx, person, index)).catch((error) => logger.warn('Participant message not sent', {
                     bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
                 }));
-                await sendDocuments(str(person.phone), str(person.name));
-                await sendChannel(str(person.phone), str(person.name));
+                await sendDocuments(recipient.phone, str(person.name));
+                await sendChannel(recipient.phone, str(person.name));
             }
         })().catch((error) => {
             logger.warn('Event booking message not sent', {
@@ -2172,6 +2219,13 @@ class EventBookingService {
             ? booking.status === 'cancelled' || (removed && booking.status === 'active' && paid)
             : match[2] === 'WAITLISTED' ? booking.status === 'waitlist' : booking.status === 'active' && paid;
         if (!allowed) return 'The queued message no longer matches the booking status.';
+        if (['CONFIRMED', 'REMINDER'].includes(match[2])) {
+            const event = await Event.findById(booking.eventId).lean();
+            if (!event || event.archivedAt || (event.status && event.status !== 'published')) {
+                return 'The event is no longer published; its queued attendance message is obsolete.';
+            }
+            if (isPastEvent(event)) return 'The event has ended; its queued attendance message is obsolete.';
+        }
 
         const email = str(recipient.email).toLowerCase();
         const phone = phoneKey(recipient.whatsappNumber || recipient.whatsapp || recipient.phoneNumber || recipient.phone);
