@@ -10,7 +10,35 @@ const escape = value => clean(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const exact = value => new RegExp('^\\s*' + escape(value) + '\\s*$', 'i');
 const split = value => clean(value).split(/[,/;&]+/).map(clean).filter(Boolean);
 const choices = values => [...new Map(values.filter(Boolean).map(v => [fold(v), clean(v)])).values()].sort((a, b) => a.localeCompare(b));
-const regionRows = event => [{ state: event.state, district: event.district }, ...(event.targets || [])];
+const regionRows = event => [{ state: event?.state, district: event?.district }, ...(event?.targets || []).filter(Boolean)];
+
+function regionOptions(events, tree) {
+    const states = new Map();
+    const districts = new Map();
+    const add = (stateValue, districtValue) => {
+        const state = clean(stateValue);
+        const district = clean(districtValue);
+        const stateKey = fold(state);
+        if (state && !states.has(stateKey)) states.set(stateKey, state);
+        const pairKey = JSON.stringify([stateKey, fold(district)]);
+        if (district && !districts.has(pairKey)) {
+            districts.set(pairKey, { state: states.get(stateKey) || '', name: district });
+        }
+    };
+    // Use the same complete location directory as the event editor, including
+    // custom admin regions and regions with no block administrators.
+    for (const state of tree || []) {
+        add(state?.name);
+        for (const district of state?.districts || []) add(state?.name, district?.name);
+    }
+    // Retain saved targets from older/deleted events even if they no longer
+    // exist in the directory. Prefer the directory's spelling for duplicates.
+    for (const row of events.flatMap(regionRows)) add(row.state, row.district);
+    return {
+        states: [...states.values()].sort((a, b) => a.localeCompare(b)),
+        districts: [...districts.values()].sort((a, b) => a.state.localeCompare(b.state) || a.name.localeCompare(b.name)),
+    };
+}
 
 function normalizeFilters(input = {}) {
     const out = {};
@@ -82,17 +110,18 @@ function bookingMatch(input = {}) {
     return query;
 }
 
-async function filterOptions(events) {
-    const answers = await require('./eventbooking.model').aggregate([
-        { $unwind: '$responses' },
-        { $group: { _id: { key: '$responses.key', label: '$responses.label' },
-            values: { $addToSet: { $cond: [{ $regexMatch: { input: { $ifNull: ['$responses.label', ''] }, regex: /^(city|town|city\s*[/&]\s*town|city name|your city|state|state name|your state)$/i } }, '$responses.value', ''] } } } },
+async function filterOptions(events = []) {
+    const [answers, tree] = await Promise.all([
+        require('./eventbooking.model').aggregate([
+            { $unwind: '$responses' },
+            { $group: { _id: { key: '$responses.key', label: '$responses.label' },
+                values: { $addToSet: { $cond: [{ $regexMatch: { input: { $ifNull: ['$responses.label', ''] }, regex: /^(city|town|city\s*[/&]\s*town|city name|your city|state|state name|your state)$/i } }, '$responses.value', ''] } } } },
+        ]),
+        require('../regions/region.service').getLocationTree(),
     ]);
-    const regions = events.flatMap(regionRows);
     return {
         categories: choices(events.map(e => e.category)), languages: choices(events.flatMap(e => split(e.language))),
-        states: choices(regions.map(r => r.state)),
-        districts: regions.filter(r => r.district).map(r => ({ state: r.state || '', name: r.district })),
+        ...regionOptions(events, tree),
         cities: choices(answers.filter(a => responseLabels.city.test(a._id.label)).flatMap(a => a.values)),
         attendeeStates: choices(answers.filter(a => responseLabels.attendeeState.test(a._id.label)).flatMap(a => a.values)),
         questions: [...new Map(answers.filter(a => a._id.key).map(a => [a._id.key, { key: a._id.key, label: a._id.label || a._id.key }])).values()],

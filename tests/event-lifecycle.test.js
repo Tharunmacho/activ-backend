@@ -3,6 +3,7 @@ process.env.NODE_ENV = 'test';
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 mongoose.set('bufferCommands', false);
+require('../src/modules/admin/admin.repository').findActive = async () => [];
 const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause, bookingHistoryCategory } = require('../src/modules/events/eventLifecycle');
 const at = Date.parse('2026-10-12T10:00:00+05:30');
 const event = { _id: new mongoose.Types.ObjectId(), title: 'Retained conference', status: 'published', channel: 'public', audience: 'all', startAt: new Date('2026-10-10T09:00:00+05:30'), endAt: new Date('2026-10-10T17:00:00+05:30'), registrationEnabled: true };

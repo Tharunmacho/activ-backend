@@ -3,6 +3,7 @@ process.env.NODE_ENV = 'test';
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 mongoose.set('bufferCommands', false);
+require('../src/modules/admin/admin.repository').findActive = async () => [];
 const Event = require('../src/modules/events/event.model');
 const Booking = require('../src/modules/events/eventbooking.model');
 const Registration = require('../src/modules/events/eventregistration.model');

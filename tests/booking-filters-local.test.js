@@ -9,11 +9,57 @@ let mongo;
 (async () => {
     mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1' } });
     assert.match(mongo.getUri(), /^mongodb:\/\/127\.0\.0\.1:/);
+    process.env.MONGODB_URI = mongo.getUri();
     await mongoose.connect(mongo.getUri(), { autoIndex: false });
+    // Exercise the real location directory without opening the separate admin
+    // connection or reading any configured server.
+    const adminRepository = require('../src/modules/admin/admin.repository');
+    adminRepository.findActive = async () => [
+        { role: 'state_admin', state: 'Community State', email: 'state@example.test' },
+        { role: 'district_admin', state: 'Community State', district: 'Community District', email: 'district@example.test' },
+        { role: 'state_admin', state: 'State without districts', email: 'state-only@example.test' },
+    ];
     const Event = require('../src/modules/events/event.model');
     const Booking = require('../src/modules/events/eventbooking.model');
     const service = require('../src/modules/events/eventbooking.service');
     const filters = require('../src/modules/events/bookingFilters');
+    const geography = require('../src/modules/regions/geography');
+    const regions = require('../src/modules/regions/region.service');
+    const emptyOptions = await filters.filterOptions([]);
+    for (const state of geography.listStates()) {
+        assert(emptyOptions.states.includes(state), `empty event list offers ${state}`);
+        for (const district of geography.listDistricts(state)) {
+            assert(emptyOptions.districts.some(row => row.state === state && row.name === district), `empty event list offers ${state}/${district}`);
+        }
+    }
+    assert(emptyOptions.states.includes('State without districts'), 'state-only admin region is selectable');
+    assert(emptyOptions.districts.some(row => row.state === 'Community State' && row.name === 'Community District'), 'district without block admins is selectable');
+    const nationwideOptions = await filters.filterOptions([{ title: 'National programme', targets: [], state: '', district: '' }]);
+    assert.deepEqual(nationwideOptions.states, emptyOptions.states, 'untargeted events do not erase location choices');
+    assert.deepEqual(nationwideOptions.districts, emptyOptions.districts);
+    const retainedRegions = [
+        { state: ' tamil nadu ', district: ' chennai ', targets: [{ state: 'Tamil Nadu', district: 'Chennai' }] },
+        { bookingHistoryOnly: true, state: 'Retired Region', district: 'Historic District',
+            targets: [{ state: 'Retired Region', district: 'Historic District' }, { state: 'Another Retired Region', district: 'Historic District' }] },
+    ];
+    const retainedBefore = JSON.stringify(retainedRegions);
+    const mergedOptions = await filters.filterOptions(retainedRegions);
+    assert.equal(mergedOptions.states.filter(state => state.toLowerCase() === 'tamil nadu').length, 1);
+    assert.equal(mergedOptions.districts.filter(row => row.state === 'Tamil Nadu' && row.name === 'Chennai').length, 1, 'directory spelling wins and duplicate targets are merged');
+    assert(mergedOptions.states.includes('Retired Region'), 'historical regions remain selectable');
+    assert.deepEqual(mergedOptions.districts.filter(row => row.name === 'Historic District'), [
+        { state: 'Another Retired Region', name: 'Historic District' },
+        { state: 'Retired Region', name: 'Historic District' },
+    ], 'district identity includes its parent state');
+    assert.equal(JSON.stringify(retainedRegions), retainedBefore, 'building choices never changes saved region values');
+    assert(!JSON.stringify(mergedOptions).includes('@example.test'), 'filter options expose names only');
+    const originalTree = regions.getLocationTree;
+    try {
+        regions.getLocationTree = async () => { throw new Error('Region directory unavailable'); };
+        await assert.rejects(filters.filterOptions([]), /Region directory unavailable/, 'directory failures are not disguised as empty options');
+    } finally {
+        regions.getLocationTree = originalTree;
+    }
     const tomorrow = new Date(Date.now() + 86400000 * 2);
     const before = new Date(Date.now() - 86400000 * 2);
     const makeEvent = extra => Event.create({ title: 'Workshop', startAt: tomorrow, endAt: tomorrow,
@@ -70,5 +116,5 @@ let mongo;
     }
     assert.equal(JSON.stringify(await Booking.collection.find({}).sort({ _id: 1 }).toArray()), unchanged, 'filters and reports preserve every booking byte for byte');
     assert.equal(await Event.collection.countDocuments({ _id: missingId }), 0, 'deleted event is never recreated');
-    console.log('PASS booking filters: strict history, region pairs, language, dates/IST, saved answers, search, pagination, matching Excel, unchanged retained records.');
+    console.log('PASS booking filters: complete national/custom/historic region choices, deduplication, directory failures, strict history, region pairs, language, dates/IST, saved answers, search, pagination, matching Excel, unchanged retained records.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await mongoose.disconnect(); await mongo?.stop(); });
