@@ -1,10 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const nodemailer = require('nodemailer');
-const config = require('../../config');
 const logger = require('../../config/logger');
-const { accountFor } = require('./emailAccounts');
+const { accountFor, accountPrefix } = require('./emailAccounts');
 const { smtpRecipientResult } = require('../../core/utils/smtpRecipientResult');
+const { createSmtpTransportCache } = require('../../core/utils/smtpTransportCache');
 
 /** The logo, attached inline to every message whose HTML refers to it. */
 const LOGO_CID = 'activ-logo';
@@ -14,12 +13,8 @@ const EMBEDDED_LOGO = fs.existsSync(LOGO_PATH);
 /**
  * Lifecycle email, addressed from the applicant's own regional office.
  *
- * ONE TRANSPORT DEFINITION, READ FROM `config.email`. This module used to read
- * `process.env` directly and asked for `EMAIL_PASS`, while `core/utils/mailer.js`
- * asked for `EMAIL_PASSWORD`. Pasting the credential into one of them left the
- * other permanently in mock mode, announcing it at `info` and otherwise looking
- * exactly like success. Both now read the same object, which accepts both
- * spellings, so there is no way to configure half the mail.
+ * Both mailers resolve their SMTP account through `emailAccounts`. Events and
+ * membership can use separate mailboxes or the shared SMTP configuration.
  *
  * ------------------------------------------------------------------ addressing
  *
@@ -48,58 +43,28 @@ const EMBEDDED_LOGO = fs.existsSync(LOGO_PATH);
  */
 class EmailService {
     constructor() {
-        this.transporter = null;
-        this.initialised = false;
+        this.transportForAccount = createSmtpTransportCache();
     }
 
     /** Whether real mail can be sent at all. */
-    isConfigured() {
-        return config.email.isConfigured;
+    isConfigured(category = 'events') {
+        return accountFor(category).isConfigured;
     }
 
     /**
-     * Built once, lazily.
-     *
-     * `initialised` guards the FAILURE path as much as the success one: without
-     * it a host that cannot be reached is re-created on every single send, and
-     * the warning is logged once per notification rather than once per boot.
+     * Reuse a transport only while its account settings still match. Credential
+     * rotation affects the next send, without resending or interrupting one
+     * already underway.
      */
     getTransporter(category = 'events') {
-        if (category !== 'events') {
-            const account = accountFor(category);
-            if (!account.isConfigured) return null;
-            if (!this.memberTransporter) this.memberTransporter = nodemailer.createTransport({
-                host: account.host, port: account.port, secure: account.secure,
-                auth: { user: account.user, pass: account.password },
-            });
-            return this.memberTransporter;
-        }
-        if (this.initialised) return this.transporter;
-        this.initialised = true;
-
-        if (!this.isConfigured()) {
-            logger.warn(
-                'Email is not configured (EMAIL_HOST / EMAIL_USER / EMAIL_PASS); '
-                + 'notification emails will be logged instead of sent'
-            );
-            return null;
-        }
-
         try {
-            this.transporter = nodemailer.createTransport({
-                host: config.email.host,
-                port: config.email.port,
-                secure: config.email.secure,
-                auth: { user: config.email.user, pass: config.email.password }
-            });
+            return this.transportForAccount(category, accountFor(category));
         } catch (error) {
             logger.error('Failed to create the notification SMTP transport', {
                 error: error && error.message
             });
-            this.transporter = null;
+            return null;
         }
-
-        return this.transporter;
     }
 
     /**
@@ -109,12 +74,15 @@ class EmailService {
      * handshake and authentication, so a wrong app password fails here with the
      * provider's own error rather than on the first approval of the day.
      */
-    async verifyConnection() {
-        if (!this.isConfigured()) {
-            return { ok: false, configured: false, error: 'EMAIL_HOST / EMAIL_USER / EMAIL_PASS not set' };
+    async verifyConnection(category = 'events') {
+        const account = accountFor(category);
+        if (!account.isConfigured) {
+            const prefix = accountPrefix(category);
+            return { ok: false, configured: false,
+                error: account.configurationError || `${prefix}_HOST / ${prefix}_USER / ${prefix}_PASS not set` };
         }
 
-        const transporter = this.getTransporter();
+        const transporter = this.getTransporter(category);
         if (!transporter) return { ok: false, configured: true, error: 'Transport could not be created' };
 
         try {

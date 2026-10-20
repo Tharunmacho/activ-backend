@@ -198,6 +198,15 @@ async function main() {
     assert.equal((await Promise.all(workers.map(worker => worker.sendDueReminders()))).reduce((sum, count) => sum + count, 0), 1);
     assert.equal(sent.length, 1, 'Atomic legacy claim prevents duplicate reminders across workers');
 
+    reset(); bookings = [booking(), booking()]; registrations = [registration()];
+    const slow = makeService();
+    pauseModern = async () => { now = +events[0].startAt; };
+    assert.equal(await slow.sendDueReminders(), 1, 'A slow sweep stops as soon as the event starts');
+    assert.equal(claims.length, 1, 'No additional modern or legacy reminders are claimed after start');
+    reset(); events[0].endAt = new Date(now - 1); bookings = [booking()]; registrations = [registration()];
+    assert.equal(await makeService().sendDueReminders(), 0, 'An inconsistent future start cannot revive an already finished event');
+    assert.equal(claims.length, 0);
+
     reset(); registrations = [registration()];
     const timed = makeService(), timers = [];
     const originalInterval = global.setInterval, originalTimeout = global.setTimeout;

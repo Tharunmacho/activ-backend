@@ -143,6 +143,31 @@ let mongo;
     assert(staleResult.skipped && /nominee changed/i.test(staleResult.reason));
     assert.equal(sends.length, beforeStale, 'current-booking validator blocks an obsolete queued nominee before providers');
 
+    // A reminder can expire between two channel sends, even within one worker.
+    const reminderStart = new Date(Date.now() + 3600000);
+    await Event.updateOne({ _id: eventId }, { $set: { startAt: reminderStart, reminderOffsetsHours: [24] } });
+    await Booking.collection.updateOne({ bookingRef: 'LOCAL-QUEUE' }, { $set: {
+        bookedBy: { name: recipient.name, email: recipient.email, phone: recipient.phone },
+        createdAt: new Date(Date.now() - 48 * 3600000),
+    } });
+    const expiring = await worker.enqueue('EVENT_BOOKING_REMINDER', recipient, {
+        bookingRef: 'LOCAL-QUEUE', data: { bookingRef: 'LOCAL-QUEUE', eventId: String(eventId),
+            reminderHours: 24, reminderEventStartAt: reminderStart.toISOString() },
+    });
+    const originalDelivery = service._deliverLifecycleEvent;
+    service._deliverLifecycleEvent = async (name, target, payload, context) => {
+        assert.equal(await context.beforeSend('email'), true);
+        await context.afterSend('email', { success: true });
+        await Event.updateOne({ _id: eventId }, { $set: { startAt: new Date(Date.now() - 1) } });
+        assert.equal(await context.beforeSend('whatsapp'), false, 'Do not send the next channel after the event starts');
+        return { channels: { email: { success: true } }, rows: {} };
+    };
+    try { await worker.processOne(expiring._id); } finally { service._deliverLifecycleEvent = originalDelivery; }
+    const expired = await Outbox.findById(expiring._id).lean();
+    assert.equal(expired.channels.email.status, 'done', expired.lastError);
+    assert.equal(expired.channels.whatsapp.status, 'skipped');
+    assert.match(expired.channels.whatsapp.lastError, /already started/);
+
     const preparation = await enqueue('preparation-outage');
     await Outbox.updateOne({ _id: preparation.outboxId }, { $set: { attempts: 8 } });
     const deliver = service._deliverLifecycleEvent;

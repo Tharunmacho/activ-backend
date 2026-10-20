@@ -138,6 +138,18 @@ async function processOne(id) {
             id: String(row._id), bellKey: `lifecycle:${row._id}:in_app`,
             async beforeSend(channel) {
                 if (!pending.includes(channel)) return false;
+                // A slow first provider must not let the remaining reminder
+                // channels start after the event has begun or been withdrawn.
+                if (/^EVENT_(?:BOOKING_|PARTICIPANT_)?REMINDER$/.test(row.event)) {
+                    const reason = await reasonToSkip(row);
+                    if (reason) {
+                        if (/could not be checked|could not be verified.*Retry|Retry after/i.test(reason)) throw new Error(reason);
+                        await Outbox.updateOne(owner, { $set: {
+                            [`channels.${channel}`]: { status: 'skipped', lastError: reason },
+                        } });
+                        return false;
+                    }
+                }
                 const changed = await Outbox.updateOne({ ...owner, [`channels.${channel}.status`]: 'pending' }, {
                     $set: { [`channels.${channel}.status`]: 'sending' },
                 });

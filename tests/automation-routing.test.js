@@ -1,4 +1,8 @@
 const assert = require('assert/strict');
+require('dotenv').config = () => ({ parsed: {} });
+// Shared-relay assertions must not depend on a developer's separate mailbox setup.
+Object.assign(process.env, { EMAIL_CONFIG_FILE: '', MEMBER_EMAIL_TRANSPORT: 'shared', EVENT_EMAIL_TRANSPORT: 'shared',
+    EMAIL_HOST: 'smtp.example.test', EMAIL_USER: 'relay@example.test', EMAIL_PASS: 'test-only-password' });
 const config = require('../src/config');
 const bot = require('../src/modules/notifications/botbeeWebhook.service');
 const membership = require('../src/modules/notifications/membershipBot');
@@ -35,13 +39,23 @@ async function main() {
     config.email.user = 'relay@example.test';
     config.email.password = 'test-only-password';
     const sent = [];
-    email.initialised = true;
-    email.transporter = { sendMail: async mail => { sent.push({ category:'events', from:mail.from }); return {messageId:'event-test', accepted:[mail.to], rejected:[]}; } };
-    email.memberTransporter = { sendMail: async mail => { sent.push({ category:'membership', from:mail.from }); return {messageId:'member-test', accepted:[mail.to], rejected:[]}; } };
+    const transports = {
+        events: { sendMail: async mail => { sent.push({ category:'events', from:mail.from }); return {messageId:'event-test', accepted:[mail.to], rejected:[]}; } },
+        membership: { sendMail: async mail => { sent.push({ category:'membership', from:mail.from }); return {messageId:'member-test', accepted:[mail.to], rejected:[]}; } },
+    };
+    email.getTransporter = category => transports[category];
     await email.sendEmail({to:'test@example.com', subject:'Event', text:'Test', category:'events'});
     await email.sendEmail({to:'test@example.com', subject:'Membership', text:'Test', category:'membership'});
     assert.deepEqual(sent.map(row => row.category), ['events','membership']);
     assert.match(sent[1].from, /<member@activ.org.in>/);
+    const verifiedCategories = [];
+    transports.events.verify = async () => { verifiedCategories.push('events'); return true; };
+    transports.membership.verify = async () => { verifiedCategories.push('membership'); throw new Error('Membership login rejected'); };
+    assert.equal((await email.verifyConnection('events')).ok, true);
+    const memberCheck = await email.verifyConnection('membership');
+    assert.equal(memberCheck.ok, false, 'Membership readiness must verify its own transport');
+    assert.match(memberCheck.error, /Membership login rejected/);
+    assert.deepEqual(verifiedCategories, ['events', 'membership']);
     if (originalPassword === undefined) delete process.env.MEMBER_EMAIL_PASS; else process.env.MEMBER_EMAIL_PASS = originalPassword;
 
     for (const [text, command] of [['Member','STATUS'],['my membership status','STATUS'],['renew my membership','RENEW'],

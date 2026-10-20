@@ -72,7 +72,9 @@ function notice(job, doc, user) {
         type: 'info', isRead: false,
         ...(kind === 'announcement' ? { updateDelivery: { ...(channels.email ? { email: {} } : {}), ...(channels.whatsapp ? { whatsapp: {} } : {}) } } : {}),
         data: { kind, sourceId: String(doc._id), broadcastKey: job.key, ...(kind === 'event' ? { eventId: String(doc._id) } : {}),
-            ...(kind === 'announcement' ? { announcementId: String(doc._id) } : {}), slug: doc.slug || '' },
+            // Notification writes use $setOnInsert, preserving the publication
+            // time even when a later worker resumes generating recipient rows.
+            ...(kind === 'announcement' ? { announcementId: String(doc._id), broadcastCreatedAt: job.createdAt } : {}), slug: doc.slug || '' },
         push: { status: channels.push ? 'pending' : 'skipped', attempts: 0, nextAttemptAt: new Date(),
             ...(!channels.push ? { lastError: require('../announcements/announcementChannels').disabledReason('push') } : {}) } };
 }

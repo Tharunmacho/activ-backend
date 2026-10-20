@@ -11,7 +11,7 @@ const stub = (file, exports) => {
 };
 const config = {
     jwt: { secret: 'offline-admin-delivery-jwt' },
-    email: { host: 'smtp.example.test', user: 'member@example.test', defaultFrom: 'ACTIV <member@example.test>', useRegionalFrom: false, supportAddress: 'member@activ.org.in' },
+    email: { host: 'smtp.example.test', user: 'member@example.test', password: 'fixture-smtp-secret', port: 587, secure: false, isConfigured: true, defaultFrom: 'ACTIV <member@example.test>', useRegionalFrom: false, supportAddress: 'member@activ.org.in' },
     metaCloud: {
         isConfigured: true, baseUrl: 'https://graph.example.test', apiVersion: 'v99.0', phoneNumberId: 'fixture-phone-id',
         accessToken: 'fixture-meta-access-secret', appSecret: 'fixture-meta-app-secret', webhookVerifyToken: 'fixture-meta-verify-secret'
@@ -22,6 +22,8 @@ const config = {
         templates: { status: 'configured_approved_membership_status' }
     }
 };
+Object.assign(process.env, { EMAIL_CONFIG_FILE: '', EMAIL_HOST: config.email.host, EMAIL_PORT: '587',
+    EMAIL_SECURE: 'false', EMAIL_USER: config.email.user, EMAIL_PASS: config.email.password });
 stub('config', config);
 stub('config/logger', { info() {}, warn() {}, error() {} });
 stub('config/publicUrl', {
@@ -31,11 +33,12 @@ stub('config/publicUrl', {
 stub('modules/members/memberdetails.model', { findById: () => ({ select: () => ({ lean: async () => ({ isActive: true }) }) }) });
 stub('modules/notifications/regionalContacts.service', {});
 const logs = [], sends = [], emails = [];
-let verificationCalls = 0;
+const verificationCalls = [];
+let membershipVerificationOk = true;
 stub('modules/notifications/notification.service', { log: async row => { logs.push(row); return row; } });
 stub('modules/notifications/email.service', {
     isConfigured: () => true,
-    verifyConnection: async () => { verificationCalls++; return { ok: true, configured: true }; },
+    verifyConnection: async category => { verificationCalls.push(category); return { ok: category !== 'membership' || membershipVerificationOk, configured: true }; },
     buildHtmlTemplate: payload => JSON.stringify(payload),
     sendEmail: async payload => { emails.push(payload); return { success: true, messageId: 'fixture-email-id' }; }
 });
@@ -53,6 +56,10 @@ for (const [name, file] of [['meta', 'metaCloud.service'], ['botbee', 'botbee.se
     });
 }
 const previousOwnNumber = process.env.WHATSAPP_OWN_NUMBER;
+const mailboxEnvKeys = ['EVENT_EMAIL', 'MEMBER_EMAIL'].flatMap(prefix =>
+    ['TRANSPORT', 'HOST', 'PORT', 'SECURE', 'USER', 'PASS'].map(field => `${prefix}_${field}`));
+const previousMailboxEnv = Object.fromEntries(mailboxEnvKeys.map(key => [key, process.env[key]]));
+for (const key of mailboxEnvKeys) delete process.env[key];
 process.env.WHATSAPP_OWN_NUMBER = '919999999999';
 const previousFetch = global.fetch;
 let unexpectedNetwork = 0;
@@ -80,7 +87,45 @@ const recipient = '919000000001';
     let response = await getStatus('?verifyEmail=1');
     assert.equal(response.status, 200);
     assert.equal(response.body.data.email.verification.ok, true);
-    assert.equal(verificationCalls, 1);
+    assert.deepEqual(verificationCalls, ['events', 'membership']);
+    assert.deepEqual(response.body.data.email.accounts.map(({ category, from, host, configured, transport }) => ({ category, from, host, configured, transport })), [
+        { category: 'events', from: 'events@activ.org.in', host: config.email.host, configured: true, transport: 'shared' },
+        { category: 'membership', from: 'member@activ.org.in', host: config.email.host, configured: true, transport: 'shared' },
+    ]);
+    assert(!JSON.stringify(response.body).includes(config.email.password));
+    process.env.EVENT_EMAIL_TRANSPORT = 'separate';
+    process.env.EVENT_EMAIL_HOST = 'events-smtp.example.test';
+    process.env.EVENT_EMAIL_USER = 'events-login@example.test';
+    process.env.EVENT_EMAIL_PASS = 'fixture-events-smtp-secret';
+    const eventStatus = (await getStatus()).body.data.email;
+    assert.equal(eventStatus.accounts[0].transport, 'separate');
+    assert.equal(eventStatus.accounts[0].host, 'events-smtp.example.test');
+    assert.equal(eventStatus.host, 'events-smtp.example.test', 'Legacy fields must not show the unused shared relay');
+    assert.equal(eventStatus.user, 'events-login@example.test');
+    assert.equal(eventStatus.from, 'events@activ.org.in');
+    assert(!JSON.stringify(eventStatus).includes(process.env.EVENT_EMAIL_PASS));
+    delete process.env.EVENT_EMAIL_PASS;
+    assert.equal((await getStatus()).body.data.email.configured, false);
+    for (const key of mailboxEnvKeys.filter(key => key.startsWith('EVENT_EMAIL_'))) delete process.env[key];
+    process.env.MEMBER_EMAIL_TRANSPORT = 'separate';
+    process.env.MEMBER_EMAIL_HOST = 'membership-smtp.example.test';
+    process.env.MEMBER_EMAIL_USER = 'separate-login@example.test';
+    process.env.MEMBER_EMAIL_PASS = 'fixture-separate-smtp-secret';
+    membershipVerificationOk = false;
+    const separateStatus = (await getStatus('?verifyEmail=1')).body.data.email;
+    assert.equal(separateStatus.accounts[1].host, 'membership-smtp.example.test');
+    assert.equal(separateStatus.accounts[1].transport, 'separate');
+    assert.equal(separateStatus.accounts[0].verification.ok, true);
+    assert.equal(separateStatus.accounts[1].verification.ok, false);
+    assert.equal(separateStatus.verification.ok, false, 'Successful events login must not hide a failed membership login');
+    assert(!JSON.stringify(separateStatus).includes(process.env.MEMBER_EMAIL_PASS));
+    delete process.env.MEMBER_EMAIL_PASS;
+    const incompleteStatus = (await getStatus()).body.data.email;
+    assert.equal(incompleteStatus.configured, false, 'Both senders must be configured for the aggregate ready badge');
+    assert.equal(incompleteStatus.accounts[0].configured, true);
+    assert.equal(incompleteStatus.accounts[1].configured, false);
+    for (const key of mailboxEnvKeys) delete process.env[key];
+    membershipVerificationOk = true;
     let wa = response.body.data.whatsapp;
     assert.equal(wa.configured, true, 'Meta alone is a configured WhatsApp provider');
     assert.equal(wa.provider, 'meta');
@@ -176,6 +221,10 @@ const recipient = '919000000001';
     console.log('Admin notification endpoints passed: real auth/roles, Meta priority and readiness, legacy fields, template-only tests, contacts, callback/retry log data, failures, BotBee fallback selection, mocks and no credential disclosure.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
     global.fetch = previousFetch;
+    for (const key of mailboxEnvKeys) {
+        if (previousMailboxEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = previousMailboxEnv[key];
+    }
     if (previousOwnNumber === undefined) delete process.env.WHATSAPP_OWN_NUMBER;
     else process.env.WHATSAPP_OWN_NUMBER = previousOwnNumber;
 });

@@ -159,17 +159,29 @@ router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(re
     const metaWebhookUrl = `${publicUrl.publicApiBase()}/notifications/meta/webhook`;
     const metaMessagePath = `/${meta.apiVersion}/${meta.phoneNumberId}/messages`;
 
+    const { accountFor, accountStatus } = require('./emailAccounts');
+    const accounts = ['events', 'membership'].map(accountStatus);
+    const eventAccount = accountFor('events');
     const emailStatus = {
-        configured: emailService.isConfigured(),
-        host: config.email.host || null,
-        user: config.email.user || null,
-        from: config.email.defaultFrom,
-        regionalFrom: config.email.useRegionalFrom,
-        supportAddress: config.email.supportAddress
+        configured: accounts.every(account => account.configured),
+        accounts,
+        host: eventAccount.host || null,
+        user: eventAccount.user || null,
+        from: eventAccount.defaultFrom,
+        regionalFrom: eventAccount.useRegionalFrom,
+        supportAddress: eventAccount.supportAddress
     };
 
     if (String(req.query.verifyEmail || '') === '1') {
-        emailStatus.verification = await emailService.verifyConnection();
+        await Promise.all(accounts.map(async account => {
+            account.verification = await emailService.verifyConnection(account.category);
+        }));
+        emailStatus.verification = {
+            ok: accounts.every(account => account.verification.ok),
+            configured: emailStatus.configured,
+            ...(!accounts.every(account => account.verification.ok)
+                ? { error: 'One or more email senders could not authenticate. Check the per-sender results.' } : {}),
+        };
     }
 
     res.json(ApiResponse.success({

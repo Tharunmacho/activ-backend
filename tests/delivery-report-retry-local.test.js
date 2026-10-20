@@ -99,6 +99,7 @@ let mongo;
 
     const protectedRows = await Promise.all([
         makeLog({ status: 'sent', deliveryStatus: 'accepted' }), makeLog({ deliveryStatus: 'read', readAt: new Date() }),
+        makeLog({ status: 'sent', deliveryStatus: 'failed' }),
         makeLog({ deliveryStatus: 'failed', deliveredAt: new Date() }),
         makeLog({ data: { emailHtml: '<p>Partial</p>', smtpRecipientStatus: 'partial', outcomeUnknown: true } }),
         makeLog({ data: { emailHtml: '<p>Unknown</p>', outcomeUnknown: true } }),
@@ -110,7 +111,7 @@ let mongo;
     ]);
     review = await preview(protectedRows.map(id));
     assert.equal(review.eligible, 0); assert.equal(review.skipped, protectedRows.length);
-    for (const row of protectedRows.slice(0, 6)) assert((await service.retryLog(row._id)).skipped);
+    for (const row of protectedRows.slice(0, 7)) assert((await service.retryLog(row._id)).skipped);
     assert((await service.retryLog(protectedRows.at(-1)._id)).skipped, 'the wrong stored recipient is never retried through another sender path');
     assert.match(review.reasons.find(item => item.reason.includes("ACTIV's own WhatsApp number"))?.reason || '', /create a new alert/);
     assert.equal(calls.length, 1, 'accepted/read/partial/unknown/disabled rows cannot send via old retry path either');

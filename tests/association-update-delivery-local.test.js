@@ -3,9 +3,11 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server-core');
+require('dotenv').config = () => ({ parsed: {} });
 Object.assign(process.env, { NODE_ENV: 'test', JWT_SECRET: 'local-update-delivery-test-only', PUSH_ENABLED: 'false',
     EMAIL_HOST: 'localhost', EMAIL_USER: 'test@example.test', EMAIL_PASS: 'local-test-not-a-credential',
-    MEMBER_EMAIL_TRANSPORT: 'shared', FRONTEND_URL: 'https://activ.org.in' });
+    MEMBER_EMAIL_TRANSPORT: 'shared', FRONTEND_URL: 'https://activ.org.in', MONGOMS_RUNTIME_DOWNLOAD: 'false',
+    ASSOCIATION_UPDATE_EMAIL_MAX_AGE_MINUTES: '60' });
 let mongo;
 (async () => {
     mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1', launchTimeout: 60000 } });
@@ -93,14 +95,20 @@ let mongo;
     assert(!ordinary.updateDelivery?.email && !ordinary.updateDelivery?.whatsapp, 'ordinary notices do not start update deliveries');
 
     // Isolated queued notice makes each late-state transition explicit.
-    const queued = async (title, audience = 'plans', planKeys = ['basic']) => {
+    const queued = async (title, audience = 'plans', planKeys = ['basic'], options = {}) => {
         const update = await Announcement.create({ title, body: 'Please review this update. Thank you.', status: 'published', audience, planKeys,
             deliveryChannels: { email: true, whatsapp: true, push: true },
             state: 'Tamil Nadu', district: 'Chennai', block: 'Test Block' });
         const job = await Job.findOne({ sourceId: update._id }).lean();
         await Job.updateOne({ _id: job._id }, { $set: { status: 'done' } });
-        const row = await Notification.create(broadcast.notice(job, update.toObject(), members.basic));
-        return { update, row: row.toObject() };
+        if (options.publicationAt) {
+            job.createdAt = options.publicationAt;
+            await Job.collection.updateOne({ _id: job._id }, { $set: { createdAt: job.createdAt } });
+        }
+        const notice = broadcast.notice(job, update.toObject(), members.basic);
+        if (options.legacy) delete notice.data.broadcastCreatedAt;
+        const row = await Notification.create(notice);
+        return { update, job, row: row.toObject() };
     };
     let item = await queued('Concurrent pending workers');
     await Promise.all([delivery.processBatch(), delivery.processBatch()]);
@@ -123,10 +131,79 @@ let mongo;
     assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'whatsapp').length, 1, 'approval releases the original job');
     assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1, 'approval does not repeat email');
 
-    item = await queued('Queue age expired');
+    item = await queued('Queue age expired', 'plans', ['basic'], { publicationAt: new Date(Date.now() - 8 * 86400000) });
     await Notification.collection.updateOne({ _id: item.row._id }, { $set: { createdAt: new Date(Date.now() - 8 * 86400000) } });
     await delivery.processBatch();
     assert(!calls.some(call => call.title === item.update.title), 'old queue rows expire even if the update stays published');
+
+    for (const legacy of [false, true]) {
+        item = await queued(legacy ? 'Legacy overnight broadcast' : 'Overnight broadcast snapshot', 'plans', ['basic'],
+            { publicationAt: new Date(Date.now() - 12 * 3600000), legacy });
+        assert(Date.now() - item.row.createdAt.getTime() < 60000, 'backfilled recipient row is new');
+        if (!legacy) assert.equal(+item.row.data.broadcastCreatedAt, +item.job.createdAt, 'notice keeps the original publication time');
+        await delivery.processBatch();
+        assert(!calls.some(call => call.title === item.update.title && call.channel === 'email'), 'overnight email never enters SMTP');
+        assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'whatsapp').length, 1, 'WhatsApp keeps its existing seven-day window');
+        const expired = await Notification.findById(item.row._id).lean();
+        assert.equal(expired.updateDelivery.email.status, 'skipped');
+        assert.match(expired.updateDelivery.email.lastError, /expired.*60-minute.*original publication/i, 'explicit expiry remains visible on the delivery');
+    }
+
+    item = await queued('Fresh publication', 'plans', ['basic'], { publicationAt: new Date(Date.now() - 5 * 60000) });
+    await delivery.processBatch();
+    const freshLog = await Log.findOne({ 'data.notificationId': String(item.row._id), channel: 'email' }).lean();
+    assert.equal(freshLog.deliveryStatus, 'accepted');
+    assert.equal(+freshLog.data.broadcastCreatedAt, +item.job.createdAt, 'audit records the original publication used for freshness');
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'data.broadcastCreatedAt': new Date(Date.now() - 12 * 3600000) } });
+    await delivery.processBatch();
+    assert((await delivery.retryLog(freshLog)).skipped, 'accepted email is never replayed after expiry');
+    assert((await delivery.retryLog({ ...freshLog, status: 'failed' })).skipped, 'confirmed acceptance prevails over an inconsistent failed status');
+    assert.equal((await Notification.findById(item.row._id)).updateDelivery.email.status, 'sent', 'expiry does not rewrite historic acceptance');
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1);
+
+    item = await queued('Retry after publication expiry', 'plans', ['basic'], { publicationAt: new Date(Date.now() - 59 * 60000) });
+    failures.set(`email:${item.update.title}`, 'SMTP temporarily unavailable');
+    await delivery.processBatch();
+    const expiredRetryLog = await Log.findOne({ 'data.notificationId': String(item.row._id), channel: 'email' }).lean();
+    assert.equal((await Notification.findById(item.row._id)).updateDelivery.email.status, 'pending');
+    failures.delete(`email:${item.update.title}`);
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.email.nextAttemptAt': new Date(0) } });
+    const realNow = Date.now;
+    Date.now = () => +item.job.createdAt + 60 * 60000;
+    try { await delivery.processBatch(); } finally { Date.now = realNow; }
+    assert.equal(calls.filter(call => call.title === item.update.title && call.channel === 'email').length, 1, 'expired retry does not contact SMTP again');
+    assert.equal((await Notification.findById(item.row._id)).updateDelivery.email.status, 'skipped');
+    const expiredRetryAudit = await Log.findById(expiredRetryLog._id).lean();
+    assert.equal(expiredRetryAudit.data.autoRetryDisabled, true);
+    assert.match(expiredRetryAudit.data.skipReason, /expired/i);
+
+    item = await queued('Expiry during preparation', 'plans', ['basic'], { publicationAt: new Date(Date.now() - 59 * 60000) });
+    // Let current() pass, then simulate a slow final source read crossing the
+    // deadline. The final guard must run after this await, before the stub SMTP.
+    const originalFindById = Announcement.findById;
+    let sourceReads = 0;
+    Announcement.findById = function(id, ...args) {
+        const query = originalFindById.call(this, id, ...args);
+        if (String(id) === String(item.update._id)) {
+            const originalLean = query.lean;
+            query.lean = async function(...leanArgs) {
+                const result = await originalLean.apply(this, leanArgs);
+                sourceReads++;
+                if (sourceReads >= 2) Date.now = () => +item.job.createdAt + 60 * 60000;
+                return result;
+            };
+        }
+        return query;
+    };
+    await Notification.updateOne({ _id: item.row._id }, { $set: { 'updateDelivery.whatsapp.status': 'skipped' } });
+    try { await delivery.processBatch(); } finally { Announcement.findById = originalFindById; Date.now = realNow; }
+    assert.equal(sourceReads, 2, 'both current and final source checks ran');
+    assert(!calls.some(call => call.title === item.update.title), 'expiry during preparation skips SMTP');
+    const lateAudit = await Log.findOne({ 'data.notificationId': String(item.row._id), channel: 'email' }).lean();
+    assert.equal(lateAudit.status, 'failed');
+    assert.equal(lateAudit.data.autoRetryDisabled, true);
+    assert.match(lateAudit.data.skipReason, /expired/i);
+    assert.equal((await Notification.findById(item.row._id)).updateDelivery.email.status, 'skipped');
 
     item = await queued('Opt out before send');
     await prefs.update(members.basic._id, { email: false, whatsapp: false });
@@ -285,7 +362,7 @@ let mongo;
     assert(!rendered.html.includes('<script>')); assert(!rendered.html.includes('onerror=')); assert(!rendered.html.includes('javascript:'));
     assert(rendered.html.includes('Dear member &amp; friends')); assert(rendered.html.includes('/member/settings'));
     assert(rendered.text.includes('Read circular: https://example.test/circular.pdf')); assert(rendered.whatsappText.includes('Thank you'));
-    console.log('PASS: all audiences/plans/regions on email+WhatsApp; consent and number change; expiry, upgrade, revision, withdrawal and deletion; channel retries, webhook concurrency, unknown outcomes; API auth/validation and safe email formatting. No external delivery.');
+    console.log('PASS: all audiences/plans/regions on email+WhatsApp; consent and number change; original publication email freshness, overnight/backfilled legacy rows, retry/preparation expiry and accepted no-replay; expiry, upgrade, revision, withdrawal and deletion; channel retries, webhook concurrency, unknown outcomes; API auth/validation and safe email formatting. No external delivery.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     await mongoose.disconnect(); if (mongo) await mongo.stop(); process.exit(process.exitCode || 0);
 });

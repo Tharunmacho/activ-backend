@@ -1,4 +1,5 @@
 const { isPastEvent, bookingHistoryCategory } = require('./eventLifecycle');
+const { reminderOffsets, reminderReason } = require('./eventReminder');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const EventBooking = require('./eventbooking.model');
@@ -1928,6 +1929,8 @@ class EventBookingService {
                 })
                 : '',
             data: { bookingRef: b.bookingRef, eventId, seats,
+                ...(kind === 'reminder' ? { reminderHours: extra.reminderHours,
+                    reminderEventStartAt: extra.reminderEventStartAt } : {}),
                 ...(extra.changeId ? { changeId: extra.changeId, changeSnapshotKey: extra.changeSnapshotKey,
                     cancelledScope: extra.cancelledScope, bookingStatus: b.status } : {}) },
             ...extra
@@ -2016,6 +2019,15 @@ class EventBookingService {
         if (resolvedKind === 'confirmed' && booking._id && !extra.resend) return this.queueBookingConfirmation(booking, extra);
 
         return (async() => {
+            if (resolvedKind === 'reminder') {
+                const event = await Event.findById(booking.eventId).lean();
+                const reason = reminderReason(event, extra, booking.createdAt);
+                if (booking.deletedAt || booking.status !== 'active'
+                    || !['paid', 'not_required'].includes(booking.payment?.status)) return { skipped: true };
+                if (reason) return { skipped: true, reason };
+                extra = { ...extra, eventSnapshot: event,
+                    startsInLabel: startsIn(new Date(event.startAt).getTime() - Date.now()) };
+            }
             const email = (booking.bookedBy && booking.bookedBy.email) || '';
             const phone = (booking.bookedBy && booking.bookedBy.phone) || '';
             if (!email && !phone && !participantRecipients(booking).length) return;
@@ -2031,6 +2043,8 @@ class EventBookingService {
             }[resolvedKind] || 'EVENT_BOOKING_CONFIRMED';
 
             const notificationService = require('../notifications/notification.service');
+            const reminderStillCurrent = async () => resolvedKind !== 'reminder'
+                || !reminderReason(await Event.findById(booking.eventId).lean(), ctx.data, booking.createdAt);
             if (!extra.supplementaryOnly) await notificationService.dispatchLifecycleEvent(eventName, {
                 // A guest has no member id, so there is no bell to write to —
                 // the in-app channel is skipped on its own when it is absent.
@@ -2067,6 +2081,7 @@ class EventBookingService {
                 if (!toPhone || !documents.length || !template || String(template).toLowerCase() === 'none') return;
                 const documentService = require('./eventDocument');
                 for (const doc of documents) {
+                    if (!await reminderStillCurrent()) return;
                     const docParams = [
                         str(toName) || 'Member',
                         doc.name,
@@ -2098,7 +2113,7 @@ class EventBookingService {
                         recipientName: str(toName),
                         resendOf: extra.resendOf,
                         // Everything a replay needs to send the same file again.
-                        data: { bookingRef: booking.bookingRef, document: doc.url, params: result.params, headerDocument }
+                        data: { ...ctx.data, bookingRef: booking.bookingRef, document: doc.url, params: result.params, headerDocument }
                     }).catch(() => {});
                 }
             };
@@ -2110,6 +2125,7 @@ class EventBookingService {
                 if (!toPhone || !ctx.whatsappChannelUrl || !['confirmed', 'reminder'].includes(resolvedKind)) return;
                 const template = require('../../config').botbee.templates.eventChannel;
                 if (!template || template === 'none') return;
+                if (!await reminderStillCurrent()) return;
                 const result = await require('./eventChannel').sendChannel(toPhone, toName, ctx);
                 const { outcome: sent, params } = result;
                 await notificationService.log({
@@ -2119,7 +2135,7 @@ class EventBookingService {
                     providerMessageId: sent.messageId, lastError: sent.error, provider: sent.provider,
                     deliveryStatus: sent.mock ? undefined : sent.success ? 'accepted' : 'failed',
                     bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
-                    recipientName: str(toName), data: { params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
+                    recipientName: str(toName), data: { ...ctx.data, params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
                 }).catch(() => {});
             };
             await sendChannel(phone, (booking.bookedBy && booking.bookedBy.name) || '');
@@ -2135,6 +2151,7 @@ class EventBookingService {
                 cancelled: 'EVENT_PARTICIPANT_CANCELLED'
             }[resolvedKind];
             for (const { person, index, recipient } of people) {
+                if (!await reminderStillCurrent()) return;
                 if (!extra.supplementaryOnly) await notificationService.dispatchLifecycleEvent(participantEvent, recipient,
                     participantMessageContext(ctx, person, index)).catch((error) => logger.warn('Participant message not sent', {
                     bookingRef: booking.bookingRef, kind: resolvedKind, error: error && error.message
@@ -2225,6 +2242,10 @@ class EventBookingService {
                 return 'The event is no longer published; its queued attendance message is obsolete.';
             }
             if (isPastEvent(event)) return 'The event has ended; its queued attendance message is obsolete.';
+            if (match[2] === 'REMINDER') {
+                const reason = reminderReason(event, data, booking.createdAt);
+                if (reason) return reason;
+            }
         }
 
         const email = str(recipient.email).toLowerCase();
@@ -2316,11 +2337,31 @@ class EventBookingService {
             return { skipped: true, reason: `Not re-sent: booking ${booking.bookingRef} is now ${booking.status}${paid ? '' : ' and unpaid'}` };
         }
 
+        let reminderExtra = {};
+        if (['confirmed', 'waitlist'].includes(kind)) {
+            const currentEvent = await Event.findById(booking.eventId).lean();
+            if (!currentEvent || currentEvent.archivedAt || currentEvent.bookingHistoryOnly
+                || (currentEvent.status && currentEvent.status !== 'published')) {
+                return { skipped: true, reason: 'The event is no longer published; its attendance message cannot be re-sent.' };
+            }
+            if (isPastEvent(currentEvent)) {
+                return { skipped: true, reason: 'The event has ended; its attendance message cannot be re-sent.' };
+            }
+        }
+        if (kind === 'reminder') {
+            const currentEvent = await Event.findById(booking.eventId).lean();
+            const data = row.data?.lifecycleData || row.data || {};
+            const reason = reminderReason(currentEvent, data, booking.createdAt);
+            if (booking.deletedAt || reason) return { skipped: true, reason: reason || 'The booking was deleted.' };
+            reminderExtra = { reminderHours: data.reminderHours, reminderEventStartAt: data.reminderEventStartAt,
+                eventSnapshot: currentEvent, startsInLabel: startsIn(new Date(currentEvent.startAt).getTime() - Date.now()) };
+        }
+
         const channel = row.channel === 'email' ? 'email' : 'whatsapp';
         const notificationService = require('../notifications/notification.service');
 
         if (/^EVENT_CHANNEL_/.test(event)) {
-            const ctx = await this.messageContext(booking, kind);
+            const ctx = await this.messageContext(booking, kind, reminderExtra);
             const template = require('../../config').botbee.templates.eventChannel;
             if (!ctx.whatsappChannelUrl || !template || template === 'none') return { skipped: true, reason: 'Event channel is not configured' };
             const result = await require('./eventChannel').sendChannel(row.recipient, row.recipientName, ctx);
@@ -2331,7 +2372,7 @@ class EventBookingService {
                 mock: !!outcome.mock, providerMessageId: outcome.messageId, lastError: outcome.error, provider: outcome.provider,
                 deliveryStatus: outcome.mock ? undefined : outcome.success ? 'accepted' : 'failed',
                 bookingRef: ctx.bookingRef, eventId: String(booking.eventId || ''), eventTitle: ctx.eventTitle,
-                recipientName: row.recipientName, resendOf: row._id, data: { params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
+                recipientName: row.recipientName, resendOf: row._id, data: { ...ctx.data, params, bookingRef: ctx.bookingRef, requestedTemplate: result.requestedTemplate },
             });
             return { row: fresh, outcome };
         }
@@ -2339,7 +2380,7 @@ class EventBookingService {
         /* A DOCUMENT: resolve its current URL rather than replaying a failed URL. */
         if (/^EVENT_DOCUMENT_/.test(event)) {
             const data = row.data || {};
-            const ctx = await this.messageContext(booking, kind);
+            const ctx = await this.messageContext(booking, kind, reminderExtra);
             const documentService = require('./eventDocument');
             const headerDocument = documentService.documentForResend(row, ctx.attachments || []);
             const template = require('../../config').botbee.templates.eventDocument || row.templateId;
@@ -2368,7 +2409,7 @@ class EventBookingService {
         const ctx = await this.messageContext(booking, kind, removedNomination ? {
             participantRemoved: true,
             reason: 'The booker changed the nomination. Your seat is no longer reserved.'
-        } : {});
+        } : reminderExtra);
 
         /* The booker, or the participant the row went to. */
         const recipient = str(row.recipient).toLowerCase();
@@ -2422,32 +2463,28 @@ class EventBookingService {
 
     async runDueReminderSweep() {
         const now = Date.now();
-        const rawDefault = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined
-            ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
-        const fallback = rawDefault.split(',').map(Number).filter((h) => Number.isFinite(h) && h > 0);
-
         const horizon = new Date(now + 8 * 24 * 60 * 60 * 1000);
         const events = await Event.find({ archivedAt: null, status: 'published', startAt: { $gt: new Date(now), $lte: horizon } })
-            .select('_id startAt reminderOffsetsHours')
+            .select('_id startAt endAt days status archivedAt bookingHistoryOnly reminderOffsetsHours')
             .lean()
             .catch(() => []);
 
         let sent = 0;
         for (const event of events || []) {
             const start = new Date(event.startAt).getTime();
-            const own = Array.isArray(event.reminderOffsetsHours) ? event.reminderOffsetsHours : [];
-            const offsets = (own.length ? own : fallback)
-                .map(Number)
-                .filter((h) => Number.isFinite(h) && h > 0 && h <= 24 * 7);
+            if (!Number.isFinite(start) || event.bookingHistoryOnly || isPastEvent(event)) continue;
+            const offsets = reminderOffsets(event);
 
             for (const hours of offsets) {
                 const moment = start - hours * 60 * 60 * 1000;
                 if (now < moment) continue;
 
                 for (let guard = 0; guard < 5000; guard += 1) {
+                    if (start <= Date.now()) break;
                     const booking = await EventBooking.findOneAndUpdate(
                         {
                             eventId: event._id,
+                            deletedAt: null,
                             status: 'active',
                             'payment.status': { $in: ['paid', 'not_required'] },
                             createdAt: { $lt: new Date(moment) },
@@ -2458,8 +2495,11 @@ class EventBookingService {
                     ).catch(() => null);
                     if (!booking) break;
 
-                    await this.announce(booking, 'reminder', { startsInLabel: startsIn(start - now) });
-                    sent += 1;
+                    const result = await this.announce(booking, 'reminder', {
+                        reminderHours: hours, reminderEventStartAt: new Date(start).toISOString(),
+                        startsInLabel: startsIn(start - Date.now()),
+                    });
+                    if (!result?.skipped && !result?.failed) sent += 1;
                 }
 
                 // Legacy member registrations are still a reachable API. Only
@@ -2469,6 +2509,7 @@ class EventBookingService {
                 const legacy = require('./eventChanges.service');
                 const reminderKey = legacy.registrationReminderKey(start, hours);
                 for (let guard = 0; guard < 5000; guard += 1) {
+                    if (start <= Date.now()) break;
                     const registration = await EventRegistration.findOneAndUpdate({
                         eventId: event._id, status: 'registered',
                         'payment.status': { $in: ['paid', 'not_required'] },

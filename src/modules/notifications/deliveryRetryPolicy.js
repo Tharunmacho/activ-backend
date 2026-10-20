@@ -10,10 +10,17 @@ const uncertain = value => /outcome.*(?:unknown|unconfirmed)|timed?\s*out|timeou
 
 function basicLogReason(row) {
     if (!row || !['email', 'whatsapp'].includes(row.channel)) return 'This delivery has no external failed message to retry.';
-    if (row.resentAs || row.mock || !failed(row) || row.readAt || row.deliveredAt) return 'This delivery is already accepted, delivered, read, replaced, or has no confirmed failure.';
+    // Real provider-failure callbacks set both fields to failed. Conflicting
+    // acceptance evidence must be reviewed rather than authorize another send.
+    if (row.resentAs || row.mock || ['accepted', 'sent', 'delivered', 'read'].includes(row.status)
+        || !failed(row) || row.readAt || row.deliveredAt) return 'This delivery is already accepted, delivered, read, replaced, or has no confirmed failure.';
     if (row.retryClaim?.token) return 'A retry is running or its outcome needs review.';
     if (row.data?.outcomeUnknown || ['partial', 'unknown', 'accepted'].includes(row.data?.smtpRecipientStatus)) return 'Provider acceptance is uncertain or partial; review provider history before sending again.';
     if (row.data?.autoRetryDisabled) return row.data.skipReason || 'Retries are disabled for this delivery.';
+    // Older failed logs predate explicit outcomeUnknown/SMTP acceptance flags.
+    // Automatic retries use this guard too: credential recovery cannot prove
+    // that a timed-out or disconnected provider did not accept the old send.
+    if (uncertain(row.failureReason || row.lastError)) return 'Provider acceptance could not be confirmed; review provider history before sending again.';
     if (['PASSWORD_RESET', 'ADMIN_WELCOME'].includes(row.event)) return 'This message contains an expired or one-time credential. Create a fresh credential through the account workflow.';
     // This refusal names the stored destination, which a retry deliberately
     // preserves. Editing a profile cannot safely retarget an old log entry.
@@ -27,7 +34,6 @@ async function logReason(row) {
     const basic = basicLogReason(row);
     if (basic) return basic;
     if (past(row.createdAt, 30 * 86400000)) return 'This delivery is older than the 30-day retry window.';
-    if (uncertain(row.failureReason || row.lastError)) return 'Provider acceptance could not be confirmed; review provider history before sending again.';
     if (row.event === 'ASSOCIATION_UPDATE') {
         if (!idValid(row.data?.notificationId)) return 'The original update delivery could not be verified.';
         const notice = await Notification.findById(row.data.notificationId).lean();
@@ -73,6 +79,10 @@ async function logReason(row) {
             || (row.user && String(row.user) !== String(booking.userId))) return 'The original event or booking owner no longer matches.';
         const event = await require('../events/event.model').findById(booking.eventId).lean();
         if (!require('./contentBroadcast').published('event', event)) return 'The event is expired, archived, unpublished, or unavailable.';
+        if (/REMINDER$/.test(row.event)) {
+            const reminderReason = require('../events/eventReminder').reminderReason(event, context, booking.createdAt);
+            if (reminderReason) return reminderReason;
+        }
         const kind = /CANCELLED$/.test(row.event) ? 'CANCELLED' : /WAITLISTED$/.test(row.event) ? 'WAITLISTED' : 'CONFIRMED';
         const removed = row.event === 'EVENT_PARTICIPANT_CANCELLED' && context.nominationChange?.kind === 'removed';
         const recipients = /^EVENT_BOOKING_/.test(row.event) ? [booking.bookedBy]

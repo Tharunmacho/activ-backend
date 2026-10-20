@@ -818,7 +818,7 @@ class AuthService {
         const normalizedEmail = String(email || '').toLowerCase().trim();
         const generic = {
             channel: 'email',
-            message: 'If that email is registered, a reset link is on its way.'
+            message: 'Your reset request has been received. If that email is registered, check the account recovery inbox for a reset link.'
         };
 
         if (!normalizedEmail) return generic;

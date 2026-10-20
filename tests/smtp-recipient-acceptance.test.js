@@ -1,8 +1,10 @@
 // SMTP, audit persistence and queue calls are stubbed. No server or provider is contacted.
 const assert = require('node:assert/strict');
+require('dotenv').config = () => ({ parsed: {} });
 Object.assign(process.env, { NODE_ENV: 'test', PUSH_ENABLED: 'false', NOTIFICATION_WORKER_ENABLED: 'false',
     EMAIL_HOST: 'smtp.example.test', EMAIL_USER: 'relay@example.test', EMAIL_PASS: 'fixture-only',
-    MEMBER_EMAIL_TRANSPORT: 'shared', EMAIL_ARCHIVE_COPY: 'archive@example.test' });
+    EMAIL_CONFIG_FILE: '', MEMBER_EMAIL_TRANSPORT: 'shared', EVENT_EMAIL_TRANSPORT: 'shared',
+    EMAIL_ARCHIVE_COPY: 'archive@example.test' });
 const loggerPath = require.resolve('../src/config/logger');
 require.cache[loggerPath] = { id: loggerPath, filename: loggerPath, loaded: true,
     exports: { info() {}, warn() {}, error() {}, debug() {} } };

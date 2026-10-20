@@ -16,12 +16,14 @@ const logger = require('../../config/logger');
  *           show as a red banner.
  *
  *   RETRY   every 10 minutes (`sweep`) a failure whose cause can heal — a
- *           rejected login, a timeout, a dropped connection, a rate limit — is
+ *           rejected login or an explicit temporary provider refusal — is
  *           sent again through `notificationService.retryLog`, the same path
  *           as the Resend button. Up to 3 automatic tries per message, backing
  *           off, within 24 hours of the original. A PERMANENT failure (number
  *           not on WhatsApp, address refused, template missing) is never
  *           retried: trying again cannot change the answer.
+ *           Timeouts, broken connections and other uncertain acceptance
+ *           outcomes are held for review, including older logs without flags.
  *           Provider spam restrictions also stop automatic and bulk retries
  *           until the sender is reviewed; an individual resend stays manual.
  *
@@ -29,7 +31,7 @@ const logger = require('../../config/logger');
  *           failed" button, for a backlog older than the automatic window.
  *
  * Email rows are not retried while the mail server's login is failing — that
- * would only spend their tries. They go the moment it recovers.
+ * would only spend their tries. Eligible confirmed failures resume on recovery.
  */
 
 const SWEEP_MINUTES = Math.max(2, parseInt(process.env.NOTIFICATION_RETRY_INTERVAL_MINUTES, 10) || 10);
@@ -79,35 +81,46 @@ const isHealable = (row = {}) => {
 /* ------------------------------------------------------------------ health */
 
 const health = {
-    email: { ok: null, configured: null, checkedAt: null, error: '' },
+    email: { ok: null, configured: null, checkedAt: null, error: '', accounts: ['events', 'membership'].map(category =>
+        ({ category, ok: null, configured: null, checkedAt: null, error: '' })) },
 };
 
 const checkEmail = async() => {
     const emailService = require('./email.service');
-    let result;
-    try {
-        result = await emailService.verifyConnection();
-    } catch (err) {
-        result = { ok: false, configured: true, error: err && err.message };
-    }
-    const wasOk = health.email.ok;
+    const previous = health.email.accounts;
+    const accounts = await Promise.all(['events', 'membership'].map(async category => {
+        let result;
+        try {
+            result = await emailService.verifyConnection(category);
+        } catch (err) {
+            result = { ok: false, configured: true, error: err && err.message };
+        }
+        const account = {
+            category, ok: !!result.ok, configured: result.configured !== false,
+            checkedAt: new Date(), error: result.ok ? '' : String(result.error || 'Unknown error'),
+        };
+        const wasOk = previous.find(item => item.category === category)?.ok;
+        if (!account.ok && wasOk !== false) {
+            logger.error(`${category === 'events' ? 'Events' : 'Membership'} email is unavailable. Check this sender's SMTP settings.`,
+                { category, error: account.error });
+        } else if (account.ok && wasOk === false) {
+            logger.info(`${category === 'events' ? 'Events' : 'Membership'} email recovered; eligible failed messages can be retried.`);
+        }
+        return account;
+    }));
     health.email = {
-        ok: !!result.ok,
-        configured: result.configured !== false,
+        ok: accounts.every(account => account.ok),
+        configured: accounts.every(account => account.configured),
         checkedAt: new Date(),
-        error: result.ok ? '' : String(result.error || 'Unknown error'),
+        error: accounts.filter(account => !account.ok).map(account =>
+            `${account.category === 'events' ? 'Events' : 'Membership'}: ${account.error}`).join('; '),
+        accounts,
     };
-    if (!result.ok && wasOk !== false) {
-        logger.error('EMAIL IS NOT SENDING: the mail server refused the connection or login. '
-            + 'Every email will fail until EMAIL_HOST / EMAIL_USER / EMAIL_PASS are corrected.', { error: health.email.error });
-    } else if (result.ok && wasOk === false) {
-        logger.info('Email delivery recovered — failed emails will be retried automatically.');
-    }
-    return health.email;
+    return getHealth().email;
 };
 
 const getHealth = () => ({
-    email: { ...health.email },
+    email: { ...health.email, accounts: health.email.accounts.map(account => ({ ...account })) },
     autoRetry: { enabled: autoRetryEnabled(), everyMinutes: SWEEP_MINUTES, maxTries: MAX_AUTO_RETRIES, windowHours: AUTO_WINDOW_HOURS },
 });
 
@@ -168,13 +181,16 @@ async function* candidates(NotificationLog, { sinceHours }) {
 const runRetryFailed = async({ sinceHours = AUTO_WINDOW_HOURS, auto = false, limit = 50 } = {}) => {
     const NotificationLog = require('./notificationLog.model');
     const notificationService = require('./notification.service');
+    const { categoryForEvent } = require('./emailAccounts');
     const summary = { checked: 0, retried: 0, sent: 0, stillFailed: 0, skipped: 0, permanent: 0, waitingForEmail: 0 };
     const attemptLimit = Math.min(MAX_PROVIDER_ATTEMPTS_PER_RUN, Math.max(1, Math.trunc(Number(limit)) || 50));
 
     for await (const row of candidates(NotificationLog, { sinceHours })) {
         summary.checked += 1;
         if (!isHealable(row)) { summary.permanent += 1; continue; }
-        if (row.channel === 'email' && health.email.ok === false) { summary.waitingForEmail += 1; continue; }
+        if (row.channel === 'email' && health.email.accounts.find(account => account.category === categoryForEvent(row.event))?.ok === false) {
+            summary.waitingForEmail += 1; continue;
+        }
         // Deferred reply parts have not contacted the provider yet. Waiting for
         // their accepted prefix must not spend their finite retry budget.
         if (row.event === 'BOT_REPLY' && await require('./retryEligibility').reasonToSkip(row)) {

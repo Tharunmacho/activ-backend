@@ -10,6 +10,7 @@ const messages = require('./associationUpdateMessage');
 const email = require('./email.service');
 const whatsapp = require('./whatsappTemplate');
 const selection = require('../announcements/announcementChannels');
+const { emailFreshness } = require('./associationUpdateFreshness');
 const channels = ['email', 'whatsapp'];
 const AGE_LIMIT = 7 * 86400000;
 const LEASE_MS = 5 * 60000;
@@ -19,7 +20,9 @@ const errorText = value => String(value || '').slice(0, 500);
 // opt-out or withdrawn post must take effect before the next provider call.
 async function current(row, channel) {
     if (!channels.includes(channel) || row.data?.kind !== 'announcement' || !row.data?.broadcastKey) return { reason: 'This is not a queued association update.' };
-    if (!row.createdAt || +new Date(row.createdAt) < Date.now() - AGE_LIMIT) return { reason: 'This update delivery has expired.' };
+    if (channel === 'whatsapp' && (!row.createdAt || +new Date(row.createdAt) < Date.now() - AGE_LIMIT)) return { reason: 'This update delivery has expired.' };
+    const freshness = channel === 'email' ? await emailFreshness(row) : {};
+    if (freshness.reason) return freshness;
     const [member, update] = await Promise.all([
         Member.findById(row.user).lean(), Announcement.findById(row.data.sourceId).lean(),
     ]);
@@ -40,10 +43,10 @@ async function current(row, channel) {
     if (channel === 'email' ? !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient) : !/^\d{8,15}$/.test(recipient)) return { reason: 'No usable recipient address is available.' };
     const enriched = await require('../announcements/announcementRecipients').loadRecipient(member);
     if (!enriched._id || enriched.isActive === false || enriched.deletedAt || !broadcast.visibleTo('announcement', update, enriched)) return { reason: 'The update no longer applies to this member.' };
-    return { member: { ...member, ...enriched }, update, recipient };
+    return { member: { ...member, ...enriched }, update, recipient, broadcastCreatedAt: freshness.broadcastCreatedAt };
 }
 
-async function sendPrepared(channel, member, update, recipient) {
+async function sendPrepared(channel, member, update, recipient, row) {
     if (!channels.includes(channel)) throw new Error('Unsupported association update channel.');
     const latest = update?._id ? await Announcement.findById(update._id).lean() : update;
     const reason = !selection.enabled(latest, channel) ? selection.disabledReason(channel)
@@ -53,6 +56,11 @@ async function sendPrepared(channel, member, update, recipient) {
     const rendered = messages.render(update, member);
     if (channel === 'email') {
         if (!require('./emailAccounts').accountFor('membership').isConfigured) return { success: false, error: 'Membership email sender is not configured.' };
+        // Recheck after all preparation/DB work, immediately before SMTP. The
+        // original deadline applies to delayed first attempts and retries alike.
+        const freshness = await emailFreshness(row || { data: { broadcastKey: broadcast.sourceKey('announcement', update) } });
+        if (freshness.reason) return { success: false, skipped: true, error: freshness.reason };
+        if (!broadcast.published('announcement', latest)) return { success: false, skipped: true, error: 'The update is no longer published or has expired.' };
         return email.sendEmail({ category: 'membership', to: recipient, subject: rendered.subject, html: rendered.html, text: rendered.text });
     }
     if (!whatsapp.isConfigured()) return { success: false, error: 'WhatsApp sender is not configured.' };
@@ -96,14 +104,16 @@ async function run(row, channel, worker, resendOf) {
             recipientName: member.fullName, status: 'queued', subject: rendered.subject,
             provider: channel === 'email' ? 'smtp' : whatsapp.providerName(),
             templateId: channel === 'whatsapp' ? rendered.template : undefined, resendOf,
-            data: { notificationId: String(row._id), sourceId: String(update._id), broadcastKey: row.data.broadcastKey },
+            data: { notificationId: String(row._id), sourceId: String(update._id), broadcastKey: row.data.broadcastKey,
+                ...(channel === 'email' ? { broadcastCreatedAt: resolved.broadcastCreatedAt } : {}) },
         });
         // Persist the audit link before touching a provider. An expired lease
         // can then recover an accepted result without sending it twice.
         const linked = await Notification.updateOne({ _id: row._id, [`${path}.worker`]: worker }, { $set: { [`${path}.logId`]: log._id } });
         if (!linked.matchedCount) return { skipped: true, reason: 'Another worker owns this delivery.' };
         contacted = true;
-        const outcome = await sendPrepared(channel, member, update, recipient);
+        const outcome = await sendPrepared(channel, member, update, recipient, channel === 'email'
+            ? { ...row, data: { ...row.data, broadcastCreatedAt: resolved.broadcastCreatedAt } } : row);
         if (outcome.skipped) {
             await Log.updateOne({ _id: log._id }, { $set: { status: 'failed', lastError: outcome.error,
                 'data.autoRetryDisabled': true, 'data.skipReason': outcome.error } });
@@ -199,6 +209,7 @@ async function processBatch() {
 async function retryLog(log) {
     if (!log || !channels.includes(log.channel) || log.event !== 'ASSOCIATION_UPDATE') return null;
     if (log.data?.outcomeUnknown) return { row: log, skipped: true, reason: 'Provider outcome is unknown; review it before sending a new update.' };
+    if (['accepted', 'sent', 'delivered', 'read'].includes(log.deliveryStatus)) return { row: log, skipped: true, reason: 'The provider already accepted this update; it cannot be retried.' };
     if (!require('mongoose').isValidObjectId(log.data?.notificationId)) return { row: log, skipped: true, reason: 'The original update delivery could not be verified.' };
     if (log.deliveryStatus !== 'failed' && log.status !== 'failed') return { row: log, skipped: true, reason: 'Only a confirmed failed delivery can be retried.' };
     const claimed = await claim(log.channel, log.data?.notificationId, log._id);

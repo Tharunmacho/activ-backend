@@ -1,6 +1,9 @@
 // Real rendering + dispatcher + email envelope; only provider I/O and logs
 // are replaced. No database, email or WhatsApp message is sent by this test.
 const assert = require('node:assert/strict');
+require('dotenv').config = () => ({ parsed: {} });
+Object.assign(process.env, { EMAIL_CONFIG_FILE: '', MEMBER_EMAIL_TRANSPORT: 'shared', EVENT_EMAIL_TRANSPORT: 'shared',
+    EMAIL_HOST: 'smtp.example.test', EMAIL_USER: 'test', EMAIL_PASS: 'test' });
 const config = require('../src/config');
 const templates = require('../src/modules/notifications/notificationTemplates');
 const email = require('../src/modules/notifications/email.service');

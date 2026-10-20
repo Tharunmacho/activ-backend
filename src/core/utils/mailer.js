@@ -1,7 +1,6 @@
-const nodemailer = require('nodemailer');
-const config = require('../../config');
 const logger = require('../../config/logger');
 const { accountFor } = require('../../modules/notifications/emailAccounts');
+const { createSmtpTransportCache } = require('./smtpTransportCache');
 
 /**
  * Outbound mail, used to hand a newly onboarded admin their credentials.
@@ -17,11 +16,10 @@ const { accountFor } = require('../../modules/notifications/emailAccounts');
  *    must not silently look like mail was delivered either.
  */
 
-let transporter = null;
-let initialised = false;
+const transportForAccount = createSmtpTransportCache();
 
 /**
- * `config.email.isConfigured` — the SAME check the notification mailer uses.
+ * The same current account check the notification mailer uses.
  *
  * This asked only for a host and a user, so a `.env` with `EMAIL_HOST` and
  * `EMAIL_USER` filled in but the password left on its placeholder reported
@@ -33,30 +31,12 @@ let initialised = false;
 const isConfigured = () => accountFor('membership').isConfigured;
 
 const getTransporter = () => {
-    if (initialised) return transporter;
-    initialised = true;
-
-    if (!isConfigured()) {
-        logger.warn('SMTP is not configured (EMAIL_HOST / EMAIL_USER / EMAIL_PASS); welcome emails will be skipped');
-        return null;
-    }
-
     try {
-        const account = accountFor('membership');
-        transporter = nodemailer.createTransport({
-            host: account.host,
-            port: account.port,
-            // 465 is implicit TLS; everything else negotiates STARTTLS. Decided
-            // in `config.email` now, so both transports agree.
-            secure: account.secure,
-            auth: { user: account.user, pass: account.password }
-        });
+        return transportForAccount('membership', accountFor('membership'));
     } catch (err) {
         logger.error('Failed to create the SMTP transport', { error: err && err.message });
-        transporter = null;
+        return null;
     }
-
-    return transporter;
 };
 
 /**
