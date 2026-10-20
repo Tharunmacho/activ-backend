@@ -35,20 +35,31 @@ class MembershipProgressionService {
                 'planNotificationState.initializedAt': old.initializedAt }
                 : { planNotificationState: null })
         };
+        if (change.notify) {
+            const validUntil = require('../members/membershipDates').lastValidDay(require('../members/membershipState').periodEnd(member));
+            const progressionFrom = { planId: old.planId, minYears: Number(old.minYears),
+                initializedAt: old.initializedAt ? new Date(old.initializedAt).toISOString() : '' };
+            const progressionKey = require('node:crypto').createHash('sha256')
+                .update(JSON.stringify({ memberId: String(member._id), from: progressionFrom,
+                    to: { planId: change.next.planId, minYears: change.next.minYears } })).digest('hex');
+            const queued = await require('./notification.service').dispatchInBackground('MEMBERSHIP_PLAN_ADVANCED',
+                membershipContext.recipientFromMember(member), {
+                    membershipNumber: membershipContext.membershipNumberOf(member),
+                    previousPlanName: old.planName, planName: progress.effective.name,
+                    planFeatures: progress.effective.features || [], feeLabel: membershipContext.rupees(progress.effective.price),
+                    validUntilLabel: membershipContext.dateLabel(validUntil),
+                    data: { planId: progress.effective.key, previousPlanId: old.planId, feeAppliesAtRenewal: true,
+                        progressionKey, progressionFrom }
+                });
+            if (!queued?.queued) return false;
+        }
+        // Enqueue first. A failed checkpoint is safe to retry using the same
+        // transition key, including when contacts or display text have changed.
         const saved = await Member.updateOne(claim, { $set: { planNotificationState: {
             ...change.next, initializedAt: old?.initializedAt || now,
             ...(change.notify ? { notifiedAt: now } : old?.notifiedAt ? { notifiedAt: old.notifiedAt } : {})
         } } });
         if (!saved.modifiedCount || !change.notify) return false;
-        const validUntil = require('../members/membershipDates').lastValidDay(require('../members/membershipState').periodEnd(member));
-        await require('./notification.service').dispatchLifecycleEvent('MEMBERSHIP_PLAN_ADVANCED',
-            membershipContext.recipientFromMember(member), {
-                membershipNumber: membershipContext.membershipNumberOf(member),
-                previousPlanName: old.planName, planName: progress.effective.name,
-                planFeatures: progress.effective.features || [], feeLabel: membershipContext.rupees(progress.effective.price),
-                validUntilLabel: membershipContext.dateLabel(validUntil),
-                data: { planId: progress.effective.key, previousPlanId: old.planId, feeAppliesAtRenewal: true }
-            });
         return true;
     }
 

@@ -13,6 +13,7 @@ const intermediate = { key: 'intermediate', name: 'Intermediate', minYears: 5, p
 const progress = (effective, promoted = false) => ({ kind: 'business', effective, held: beginner, promoted });
 let stored = { ...member };
 const sent = [];
+const queuedKeys = new Set();
 Member.updateOne = async (filter, patch) => {
     const old = stored.planNotificationState;
     const matches = filter.planNotificationState === null ? !old
@@ -24,8 +25,10 @@ Member.updateOne = async (filter, patch) => {
     Object.assign(stored, patch.$set);
     return { modifiedCount: 1 };
 };
-notifications.dispatchLifecycleEvent = async (event, recipient, payload) => {
-    sent.push({ event, recipient, payload }); return { channels: { email: { success: true } } };
+notifications.dispatchInBackground = async (event, recipient, payload) => {
+    const key = require('../src/modules/notifications/lifecycleOutbox').keyFor(event, recipient, payload);
+    if (!queuedKeys.has(key)) { queuedKeys.add(key); sent.push({ event, recipient, payload }); }
+    return { queued: true };
 };
 async function main() {
     assert.equal(await service.observe(member, progress(beginner), now), false);

@@ -1996,6 +1996,43 @@ class EventBookingService {
         return bookings.length;
     }
 
+    /** Every primary reminder recipient must exist in the durable outbox before
+     * the sweep consumes its window. Stable keys recover partial enqueue and
+     * a lost source checkpoint without repeating accepted recipients. */
+    async queueBookingReminder(booking, extra = {}) {
+        try {
+            const event = await Event.findById(booking.eventId).lean();
+            const reason = reminderReason(event, extra, booking.createdAt);
+            if (reason || booking.deletedAt || booking.status !== 'active'
+                || !['paid', 'not_required'].includes(booking.payment?.status)) return { skipped: true, reason };
+            const ctx = await this.messageContext(booking, 'reminder', { ...extra, eventSnapshot: event,
+                startsInLabel: startsIn(new Date(event.startAt).getTime() - Date.now()) });
+            const booker = booking.bookedBy || {};
+            const recipients = [];
+            if (booker.email || booker.phone || booking.userId) recipients.push({
+                event: 'EVENT_BOOKING_REMINDER', index: -1,
+                recipient: { id: booking.userId || '', name: str(booker.name), email: str(booker.email).toLowerCase(), phone: str(booker.phone) },
+                payload: ctx,
+            });
+            for (const { person, index, recipient } of participantRecipients(booking)) recipients.push({
+                event: 'EVENT_PARTICIPANT_REMINDER', index, recipient, payload: participantMessageContext(ctx, person, index),
+            });
+            if (!recipients.length) return { skipped: true, reason: 'No reachable reminder recipient.' };
+            const notifications = require('../notifications/notification.service');
+            for (const notice of recipients) {
+                const result = await notifications.dispatchInBackground(notice.event, notice.recipient, {
+                    ...notice.payload, data: { ...notice.payload.data, reminderKey: extra.reminderKey,
+                        reminderBookingId: String(booking._id), reminderParticipantIndex: notice.index },
+                });
+                if (!result?.queued) return { queued: false, error: result?.error || 'Reminder intent could not be saved.' };
+            }
+            return { queued: true };
+        } catch (error) {
+            logger.warn('Booking reminder awaits durable enqueue', { bookingRef: booking?.bookingRef, error: error.message });
+            return { queued: false, error: error.message };
+        }
+    }
+
     /**
      * Tell the booker, on every channel they can be reached on — email,
      * WhatsApp and (for a member) the bell.
@@ -2180,9 +2217,9 @@ class EventBookingService {
      * off). Offsets are computed against the event's CURRENT start, so moving
      * the event moves its reminders with it.
      *
-     * ONE REMINDER PER OFFSET PER BOOKING, even with several server instances:
-     * the offset is claimed with `$addToSet` on a filter that requires it to be
-     * absent, so a second instance matches nothing.
+     * ONE PRIMARY REMINDER PER START/OFFSET/RECIPIENT: durable outbox keys
+     * arbitrate concurrent workers. The booking checkpoint is written only
+     * after all recipients exist; partial enqueues retry the same keys.
      *
      * A booking made AFTER an offset's moment does not get that reminder — a
      * seat taken an hour before the start has just had its confirmation, and
@@ -2479,27 +2516,33 @@ class EventBookingService {
                 const moment = start - hours * 60 * 60 * 1000;
                 if (now < moment) continue;
 
-                for (let guard = 0; guard < 5000; guard += 1) {
+                const reminderKey = require('./eventChanges.service').registrationReminderKey(start, hours);
+                const bookingFilter = {
+                    eventId: event._id, deletedAt: null, status: 'active',
+                    'payment.status': { $in: ['paid', 'not_required'] },
+                    createdAt: { $lt: new Date(moment) },
+                    reminderWindowsQueued: { $ne: reminderKey },
+                    // Old offset-only history remains suppressed. New window
+                    // records can safely distinguish a rescheduled start.
+                    $or: [{ remindersSent: { $ne: hours } }, {
+                        reminderWindowsQueued: new RegExp(`:${String(hours).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+                    }],
+                };
+                for await (const booking of EventBooking.find(bookingFilter).sort({ _id: 1 }).lean().cursor()) {
                     if (start <= Date.now()) break;
-                    const booking = await EventBooking.findOneAndUpdate(
-                        {
-                            eventId: event._id,
-                            deletedAt: null,
-                            status: 'active',
-                            'payment.status': { $in: ['paid', 'not_required'] },
-                            createdAt: { $lt: new Date(moment) },
-                            remindersSent: { $ne: hours }
-                        },
-                        { $addToSet: { remindersSent: hours } },
-                        { new: true }
-                    ).catch(() => null);
-                    if (!booking) break;
-
-                    const result = await this.announce(booking, 'reminder', {
-                        reminderHours: hours, reminderEventStartAt: new Date(start).toISOString(),
+                    const extra = {
+                        reminderKey, reminderHours: hours, reminderEventStartAt: new Date(start).toISOString(),
                         startsInLabel: startsIn(start - Date.now()),
-                    });
-                    if (!result?.skipped && !result?.failed) sent += 1;
+                    };
+                    const result = await this.queueBookingReminder(booking, extra);
+                    if (!result?.queued) continue;
+                    const checkpoint = await EventBooking.updateOne({ ...bookingFilter, _id: booking._id,
+                        bookedBy: booking.bookedBy, participants: booking.participants || [] },
+                    { $addToSet: { reminderWindowsQueued: reminderKey, remindersSent: hours } });
+                    if (checkpoint.modifiedCount) {
+                        sent += 1;
+                        await this.announce(booking, 'reminder', { ...extra, supplementaryOnly: true });
+                    }
                 }
 
                 // Legacy member registrations are still a reachable API. Only
@@ -2507,26 +2550,23 @@ class EventBookingService {
                 // boundary must not move on restart or legitimate retries vanish.
                 if (moment < LEGACY_REMINDERS_FROM) continue;
                 const legacy = require('./eventChanges.service');
-                const reminderKey = legacy.registrationReminderKey(start, hours);
-                for (let guard = 0; guard < 5000; guard += 1) {
+                const registrationFilter = {
+                    eventId: event._id, status: 'registered',
+                    'payment.status': { $in: ['paid', 'not_required'] },
+                    registeredAt: { $lt: new Date(moment) }, remindersSent: { $ne: reminderKey },
+                };
+                for await (const registration of EventRegistration.find(registrationFilter).sort({ _id: 1 }).lean().cursor()) {
                     if (start <= Date.now()) break;
-                    const registration = await EventRegistration.findOneAndUpdate({
-                        eventId: event._id, status: 'registered',
-                        'payment.status': { $in: ['paid', 'not_required'] },
-                        registeredAt: { $lt: new Date(moment) },
-                        remindersSent: { $ne: reminderKey },
-                    }, { $addToSet: { remindersSent: reminderKey } }, { new: true }).lean();
-                    if (!registration) break;
                     const result = await legacy.announceRegistration(registration, event._id, 'reminder', {
-                        claimed: true, reminderKey, reminderHours: hours,
+                        reminderKey, reminderHours: hours,
                         reminderEventStartAt: new Date(start).toISOString(), startsInLabel: startsIn(start - now),
                     });
-                    if (!result?.skipped && !result?.failed) sent += 1;
+                    if (result?.checkpointed) sent += 1;
                 }
             }
         }
 
-        if (sent) logger.info('Event booking reminders sent', { count: sent });
+        if (sent) logger.info('Event booking reminders durably queued', { count: sent });
         return sent;
     }
 

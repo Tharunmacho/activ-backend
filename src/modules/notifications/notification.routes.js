@@ -166,7 +166,8 @@ router.get('/delivery-status', requireRole('super_admin'), asyncHandler(async(re
         configured: accounts.every(account => account.configured),
         accounts,
         host: eventAccount.host || null,
-        user: eventAccount.user || null,
+        // Retain the legacy field without exposing an SMTP login name.
+        user: null,
         from: eventAccount.defaultFrom,
         regionalFrom: eventAccount.useRegionalFrom,
         supportAddress: eventAccount.supportAddress
@@ -287,7 +288,12 @@ router.post('/test-send', requireRole('super_admin'), asyncHandler(async(req, re
     if (!target) throw ApiError.badRequest('A recipient (email address or phone number) is required');
 
     if (channel === 'email') {
+        const category = req.body.category === undefined ? 'membership' : req.body.category;
+        if (!['events', 'membership'].includes(category)) {
+            throw ApiError.badRequest('Email category must be events or membership');
+        }
         const html = emailService.buildHtmlTemplate({
+            category,
             title: 'ACTIV test message',
             recipientName: 'Super Admin',
             preheader: 'Delivery test from the ACTIV platform.',
@@ -297,7 +303,7 @@ router.post('/test-send', requireRole('super_admin'), asyncHandler(async(req, re
         });
 
         const result = await emailService.sendEmail({
-            to: target, subject: 'ACTIV test message', html
+            to: target, subject: 'ACTIV test message', html, category
         });
 
         await notificationService.log({
@@ -312,11 +318,13 @@ router.post('/test-send', requireRole('super_admin'), asyncHandler(async(req, re
             mock: !!result.mock,
             providerMessageId: result.messageId,
             lastError: result.error,
-            data: require('../../core/utils/smtpRecipientResult').smtpLogData(result)
+            provider: 'smtp',
+            deliveryStatus: result.mock ? undefined : (result.success ? 'accepted' : 'failed'),
+            data: { emailCategory: category, ...require('../../core/utils/smtpRecipientResult').smtpLogData(result) }
         });
 
         return res.json(ApiResponse.success(result, result.success
-            ? (result.mock ? 'Email is not configured — nothing was sent' : 'Test email sent')
+            ? (result.mock ? 'Email is not configured — nothing was sent' : 'Test email accepted by SMTP. Check the recipient inbox and spam folder.')
             : `Failed: ${result.error}`));
     }
 

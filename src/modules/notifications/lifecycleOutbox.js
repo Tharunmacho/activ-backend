@@ -26,8 +26,17 @@ function keyFor(event, recipient, payload) {
     const reminderKey = payload?.data?.renewalReminderKey;
     const confirmation = /^EVENT_(BOOKING|PARTICIPANT)_CONFIRMED$/.test(event)
         && !payload?.data?.nominationChange && payload?.data?.bookingConfirmation;
+    const reminderRecordId = /^EVENT_(?:(?:BOOKING|PARTICIPANT)_)?REMINDER$/.test(event)
+        && payload?.data?.reminderKey && (payload.data.reminderBookingId || payload.data.registrationId);
+    const reminderRecipient = { id: memberId || '', email: String(recipient?.email || '').trim().toLowerCase(),
+        phone: String(recipient?.whatsappNumber || recipient?.whatsapp || recipient?.phoneNumber || recipient?.phone || '').replace(/\D/g, '') };
     const identity = event === 'MEMBERSHIP_RENEWAL_DUE' && memberId && reminderKey
         ? { event, memberId, reminderKey: String(reminderKey) }
+        : event === 'MEMBERSHIP_PLAN_ADVANCED' && memberId && payload?.data?.progressionKey
+            ? { event, memberId, progressionKey: payload.data.progressionKey }
+        : reminderRecordId ? { event, recordId: reminderRecordId, reminderKey: payload.data.reminderKey,
+            registrationStateKey: payload.data.registrationStateKey || '',
+            participantIndex: payload.data.reminderParticipantIndex ?? -1, recipient: reminderRecipient }
         : confirmation?.bookingId ? { event, recipient, confirmation } : { event, recipient, payload };
     return 'lifecycle:' + crypto.createHash('sha256')
         .update(JSON.stringify(canonical(plain(identity)))).digest('hex');

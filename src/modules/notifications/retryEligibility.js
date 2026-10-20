@@ -151,6 +151,16 @@ const reasonToSkip = async (row = {}, { throwOnReadError = false } = {}) => {
             const context = { ...data, ...lifecycle };
             if (row.event === 'MEMBERSHIP_PLAN_ADVANCED') {
                 if (!context.planId || renewalFor(member).state !== 'active') return 'This membership plan update is no longer current.';
+                const prior = context.progressionFrom;
+                const state = member.planNotificationState;
+                if (context.progressionKey && prior && String(state?.planId || '') === String(prior.planId)
+                    && Number(state?.minYears) === Number(prior.minYears)
+                    && iso(state?.initializedAt) === String(prior.initializedAt || '')) {
+                    // The durable intent won the race with its source
+                    // checkpoint. Defer it rather than permanently skipping
+                    // a notice whose checkpoint can recover on the next sweep.
+                    return 'The membership plan checkpoint could not be verified. Retry after the progression sweep completes.';
+                }
                 return String(member.planNotificationState?.planId || '') === String(context.planId)
                     ? '' : 'The member has moved to a different membership plan.';
             }

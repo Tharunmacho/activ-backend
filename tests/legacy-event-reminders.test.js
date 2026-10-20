@@ -27,7 +27,7 @@ const event = { _id: id(), title: 'Current workshop', status: 'published', mode:
     onlinePlatform: 'Zoom', onlineUrl: 'https://example.test/current-join',
     startAt: new Date(rollout + 26 * hour), endAt: new Date(rollout + 27 * hour),
     reminderOffsetsHours: [24], venue: '', days: [] };
-let events = [], bookings = [], registrations = [], members = [], sent = [], claims = [], eventScans = 0;
+let events = [], bookings = [], registrations = [], members = [], sent = [], claims = [], eventScans = 0, queueKeys = new Set();
 let inFlight = 0, maxInFlight = 0, pauseModern;
 const field = (row, key) => key.split('.').reduce((value, part) => value?.[part], row);
 const scalar = value => value instanceof Date ? +value : value;
@@ -35,6 +35,8 @@ const matches = (row, filter) => !!row && Object.entries(filter).every(([key, ex
     if (key === '$or') return expected.some(clause => matches(row, clause));
     const actual = field(row, key);
     if (expected == null) return actual == null;
+    if (expected instanceof RegExp) return (Array.isArray(actual) ? actual : [actual]).some(value => expected.test(String(value || '')));
+    if (Array.isArray(expected)) return JSON.stringify(actual) === JSON.stringify(expected);
     if (expected && typeof expected === 'object' && !(expected instanceof Date)) {
         if ('$in' in expected) return expected.$in.includes(actual);
         if ('$ne' in expected) return Array.isArray(actual) ? !actual.includes(expected.$ne) : actual !== expected.$ne;
@@ -47,7 +49,9 @@ const matches = (row, filter) => !!row && Object.entries(filter).every(([key, ex
 });
 const query = value => ({
     select() { return this; },
-    lean: async () => clone(value),
+    sort() { return this; },
+    lean() { return this; },
+    async *cursor() { for (const row of clone(value)) yield row; },
     catch: handler => Promise.resolve(clone(value)).catch(handler),
     then: (resolve, reject) => Promise.resolve(clone(value)).then(resolve, reject),
 });
@@ -66,6 +70,9 @@ const update = (kind, list, filter, patch) => {
     return row;
 };
 Booking.findOneAndUpdate = (filter, patch) => query(update('booking', bookings, filter, patch));
+Booking.find = filter => query(bookings.filter(row => matches(row, filter)));
+Booking.updateOne = async (filter, patch) => ({ modifiedCount: update('booking', bookings, filter, patch) ? 1 : 0 });
+Registration.find = filter => query(registrations.filter(row => matches(row, filter)));
 Registration.findOneAndUpdate = (filter, patch) => query(update('registration', registrations, filter, patch));
 Registration.updateOne = async (filter, patch) => ({ modifiedCount: update('registration', registrations, filter, patch) ? 1 : 0 });
 const deliver = async notice => {
@@ -78,19 +85,32 @@ const deliver = async notice => {
     } finally { inFlight--; }
 };
 notifications.dispatchLifecycleEvent = async (type, recipient, payload) => deliver({ kind: 'registration', type, recipient, payload });
+notifications.dispatchInBackground = async (type, recipient, payload) => {
+    const key = require('../src/modules/notifications/lifecycleOutbox').keyFor(type, recipient, payload);
+    if (!queueKeys.has(key)) {
+        queueKeys.add(key);
+        await deliver({ kind: 'registration', type, recipient, payload });
+    }
+    return { queued: true };
+};
 const makeService = () => {
     const service = loadService();
-    service.announce = async (row, kind, extra) => deliver({ kind: 'booking', row, notice: kind, extra });
+    service.queueBookingReminder = async (row, extra) => {
+        await deliver({ kind: 'booking', row, notice: 'reminder', extra });
+        return { queued: true };
+    };
+    service.announce = async () => undefined;
     return service;
 };
 const registration = (extra = {}) => ({ _id: id(), eventId: event._id, userId: owner._id,
     memberName: 'Legacy attendee', email: 'attendee@example.test', phone: '9000000001', status: 'registered',
     registeredAt: new Date(rollout + hour), payment: { status: 'paid', paidAt: new Date(rollout + hour) }, ...extra });
 const booking = (extra = {}) => ({ _id: id(), eventId: event._id, bookingRef: id(), status: 'active',
-    createdAt: new Date(rollout + hour), payment: { status: 'paid' }, ...extra });
+    createdAt: new Date(rollout + hour), payment: { status: 'paid' }, participants: [], ...extra });
 const reset = () => {
     now = rollout + 2 * hour; events = [clone(event)]; bookings = []; registrations = []; members = [clone(owner)];
     sent = []; claims = []; eventScans = 0; inFlight = 0; maxInFlight = 0; pauseModern = null;
+    queueKeys = new Set();
     process.env.EVENT_REMINDER_DEFAULT_HOURS = '24';
     process.env.EVENT_LEGACY_REMINDERS_FROM = '2030-01-01T00:00:00.000Z';
 };

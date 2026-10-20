@@ -173,13 +173,7 @@ async function announceRegistration(row, eventOrId, requestedKind, extra = {}) {
                 || !(new Date(row.registeredAt).getTime() < moment)
                 || (extra.reminderEventStartAt && dateKey(extra.reminderEventStartAt) !== dateKey(event.startAt))
                 || (extra.reminderKey && extra.reminderKey !== key)) return { skipped: true };
-            if (!extra.claimed) {
-                const claim = await require('./eventregistration.model').updateOne({
-                    _id: row._id, status: 'registered', 'payment.status': { $in: ['paid', 'not_required'] },
-                    registeredAt: row.registeredAt, remindersSent: { $ne: key },
-                }, { $addToSet: { remindersSent: key } });
-                if (!claim?.modifiedCount) return { skipped: true };
-            }
+            if ((row.remindersSent || []).includes(key)) return { skipped: true };
             extra = { ...extra, reminderKey: key, reminderHours: hours, reminderEventStartAt: dateKey(event.startAt) };
         } else if (!extra.claimed) {
             const key = digest([String(row._id), kind, dateKey(row.registeredAt),
@@ -194,10 +188,24 @@ async function announceRegistration(row, eventOrId, requestedKind, extra = {}) {
             ...(!extra.claimed ? { changeScope: 'registration' } : {}),
             ...(kind === 'cancelled' ? { cancelledScope: 'registration' } : {}) });
         if (kind === 'reminder') {
+            // The outbox may run before the source checkpoint. Current
+            // registration/window validation remains authoritative; the
+            // checkpoint is a sweep optimization, never proof of delivery.
+            context.data.reminderDurablyQueued = true;
             const reason = await reasonToSkipRegistrationNotice({ event: eventName, user: row.userId,
                 channel: row.email ? 'email' : 'whatsapp', recipient: row.email || row.phone,
                 data: { lifecycleData: context.data } });
             if (reason) return { skipped: true, reason };
+            const result = await require('../notifications/notification.service').dispatchInBackground(eventName, {
+                id: row.userId, name: row.memberName, email: row.email, phone: row.phone,
+            }, context);
+            if (!result?.queued) return { failed: true, error: result?.error || 'Reminder intent could not be saved.' };
+            const checkpoint = await require('./eventregistration.model').updateOne({
+                _id: row._id, status: 'registered', 'payment.status': { $in: ['paid', 'not_required'] },
+                registeredAt: row.registeredAt, email: row.email, phone: row.phone,
+                remindersSent: { $ne: extra.reminderKey },
+            }, { $addToSet: { remindersSent: extra.reminderKey } });
+            return { ...result, checkpointed: !!checkpoint.modifiedCount };
         }
         return require('../notifications/notification.service').dispatchLifecycleEvent(eventName, {
             id: row.userId, name: row.memberName, email: row.email, phone: row.phone,
@@ -264,7 +272,7 @@ async function reasonToSkipRegistrationNotice(row = {}) {
                 || !(new Date(registration.registeredAt).getTime() < moment)) {
                 return 'This event reminder window is no longer due.';
             }
-            if (data.reminderKey !== key || !(registration.remindersSent || []).includes(key)) {
+            if (data.reminderKey !== key || (!data.reminderDurablyQueued && !(registration.remindersSent || []).includes(key))) {
                 return 'The original event reminder could not be verified.';
             }
         } else if (!data.changeId || !(registration.eventChangesSent || []).includes(data.changeId)) {

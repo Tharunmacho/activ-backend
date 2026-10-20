@@ -31,7 +31,11 @@ async function check(category) {
 Promise.all(['events', 'membership'].map(check)).then(accounts => {
     console.log(JSON.stringify({
         checkedAt: new Date().toISOString(), accounts, messagesSent: 0,
-        source: 'Local backend environment; deployed settings are not inspected.',
+        source: 'Current process settings. Run inside the deployed backend container to check its environment; running locally checks only local settings.',
+        configurationSource: String(process.env.EMAIL_CONFIG_FILE || '').trim()
+            ? 'EMAIL_CONFIG_FILE (overrides SMTP environment values)'
+            : 'Process environment (.env supplies unset values)',
+        lifecycleWorkerEnabled: process.env.NOTIFICATION_WORKER_ENABLED !== 'false',
         limitation: 'SMTP authentication does not prove inbox delivery. Check provider delivery/bounce events separately.',
     }, null, 2));
     if (accounts.some(account => !account.authenticated)) process.exitCode = 1;

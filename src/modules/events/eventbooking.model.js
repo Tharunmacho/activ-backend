@@ -293,12 +293,13 @@ const eventBookingSchema = new mongoose.Schema({
     expiresAt: { type: Date, default: null },
 
     /**
-     * Which reminders have gone out, as the hours-before offsets they were
-     * sent for (`Event.reminderOffsetsHours`). `sendDueReminders` claims an
-     * offset by adding it here, so a reminder is sent once per booking even
-     * with several server instances running the timer.
+     * Offset markers retained for older readers. A marker with no matching
+     * reminderWindowsQueued entry is historical and must never be replayed.
      */
     remindersSent: { type: [Number], default: [] },
+    // New reminders checkpoint only after every recipient is durably queued.
+    // Start + offset identifies the window, so a reschedule has its own key.
+    reminderWindowsQueued: { type: [String], default: [] },
 
     // Saved event revisions already announced to this booking, including withdrawal.
     eventChangesSent: { type: [String], default: [] },
