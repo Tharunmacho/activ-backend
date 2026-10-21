@@ -3322,6 +3322,7 @@ module.exports.isMockMode = isMockMode;
 module.exports.sign = sign;
 module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
 module.exports.describeSchedule = describeSchedule;
+module.exports.attendanceOf = attendanceOf;
 module.exports.bookingAsRegistration = bookingAsRegistration;
 module.exports.ownerClause = ownerClause;
 module.exports.passesFor = passesFor;

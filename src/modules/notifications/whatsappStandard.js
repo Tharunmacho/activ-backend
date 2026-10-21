@@ -2,6 +2,7 @@
 // always one fact on one line; approved older contracts remain in the fallback.
 const flex = require('./whatsappFlex');
 const config = require('../../config');
+const { attendanceLink } = require('./eventAttendance');
 const appUrl = path => `${String(config.frontendUrl || 'https://activ.org.in').replace(/\/+$/, '')}${path}`;
 const line = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 const name = ctx => (ctx.forParticipant ? ctx.participantName : '') || ctx.name || ctx.bookerName || ctx.firstName || 'Member';
@@ -23,18 +24,19 @@ const bookingLink = () => field('Booking details', bookingUrl, 'https://activ.or
 const definitions = [];
 const specs = new Map();
 
-function define(key, title, lead, fields, { image = false, close = 'Keep this message with your ACTIV records.' } = {}) {
-    const all = [field('name', name, 'Tharun', { max: 60 }), ...fields];
+function define(key, title, lead, fields, { image = false, version = 'v1', close = 'Keep this message with your ACTIV records.' } = {}) {
+    const all = [field('name', name, 'Tharun', { max: 60 }), ...fields.flatMap(item => item.labelRead
+        ? [field(`${item.label} label`, item.labelRead, item.labelSample, { protected: true, heading: true }), item] : [item])];
     let body = `Dear *{{1}}*,\n\n*${title}*\n${lead}\n\n`;
     all.slice(1).forEach((item, index) => {
-        body += `*${item.label}:*${item.separate ? '\n' : ' '}{{${index + 2}}}\n\n`;
+        if (!item.heading) body += `*${item.labelRead ? `{{${index + 1}}}` : item.label}:*${item.separate ? '\n' : ' '}{{${index + 2}}}\n\n`;
     });
     body += close;
     const names = image ? ['image', 'plain'] : ['plain'];
-    const spec = { key, body, fields: all, names };
-    specs.set(key, spec);
+    const spec = { key, version, body, fields: all, names };
+    specs.set(`${key}_${version}`, spec);
     for (const variant of names) definitions.push({
-        name: `activ_${key}_standard_${variant}_v1`, category: 'Utility', meta: true, standard: true,
+        name: `activ_${key}_standard_${variant}_${version}`, category: 'Utility', meta: true, standard: true,
         ...(variant === 'image' ? { header: 'IMAGE' } : {}), footer: require('./organizationBrand').FOOTER,
         bodyWithVariables: body, params: all.map(item => item.label), samples: all.map(item => item.sample),
     });
@@ -112,15 +114,46 @@ define('event_cancelled', 'Event registration update', 'A cancellation affects y
     queries('events@activ.org.in'),
 ], { close: 'This notice does not confirm a refund. Contact the events team for payment questions.' });
 
+// Never change an approved v1 body's parameter contract. v2 includes the
+// attendance instruction and optional video on their own labelled lines.
+const attendanceField = () => field('Attendance link', ctx => attendanceLink(ctx).url || eventUrl(ctx),
+    'https://zoom.us/meeting/register/example', { protected: true, separate: true,
+        labelRead: ctx => attendanceLink(ctx).label, labelSample: 'Online registration link' });
+const videoField = () => field('Event video', ctx => ctx.videoUrl, 'https://youtu.be/example', { protected: true, separate: true });
+for (const kind of ['confirmed', 'reminder']) for (const channel of [false, true]) for (const video of [false, true]) {
+    const key = `evt_${kind}${channel ? '_whatsapp' : ''}`;
+    const original = specs.get(`${key}_v1`);
+    const fields = original.fields.slice(1).flatMap(item => item.label === 'Event attendance'
+        ? [attendanceField(), ...(video ? [videoField()] : [])] : [item]);
+    define(`${key}${video ? '_video' : ''}`, kind === 'confirmed' ? 'Event booking confirmed' : 'Event reminder',
+        kind === 'confirmed' ? 'Your event registration is confirmed.' : 'Your booked event is coming up.', fields,
+        { image: true, version: 'v2', close: 'Open your event or booking page for the latest information and documents.' });
+}
+for (const channel of [false, true]) for (const video of [false, true]) {
+    define(`event_updated${channel ? '_whatsapp' : ''}${video ? '_video' : ''}`, 'Event details updated',
+        'Please check the current information before attending.', [
+            ...eventFields(), bookingRef(),
+            field('What changed', ctx => ctx.changeSummary || 'The organiser updated the event details.', 'The start time has changed.', { max: 180 }),
+            attendanceField(), ...(video ? [videoField()] : []),
+            field('Latest event details', bookingUrl, 'https://activ.org.in/events/workshop', { protected: true, separate: true }),
+            ...(channel ? [field('WhatsApp updates for this event', ctx => ctx.whatsappChannelUrl,
+                'https://chat.whatsapp.com/ExampleInvite', { protected: true, separate: true })] : []),
+            queries('events@activ.org.in'),
+        ], { version: 'v2' });
+}
+
 const EVENT_KINDS = { EVENT_BOOKING_CONFIRMED: 'confirmed', EVENT_PARTICIPANT_CONFIRMED: 'confirmed', EVENT_REGISTERED: 'confirmed',
         EVENT_BOOKING_REMINDER: 'reminder', EVENT_PARTICIPANT_REMINDER: 'reminder', EVENT_REMINDER: 'reminder',
         EVENT_BOOKING_CANCELLED: 'cancelled', EVENT_PARTICIPANT_CANCELLED: 'cancelled', EVENT_BOOKING_WAITLISTED: 'waitlist' };
 function keyFor(event, ctx) {
     const kind = EVENT_KINDS[event];
-    if (kind) return `evt_${kind}${['confirmed', 'reminder'].includes(kind) && ctx.whatsappChannelUrl ? '_whatsapp' : ''}`;
+    if (['confirmed', 'reminder'].includes(kind) || event === 'EVENT_UPDATED') {
+        return `${kind ? `evt_${kind}` : 'event_updated'}${ctx.whatsappChannelUrl ? '_whatsapp' : ''}${ctx.videoUrl ? '_video' : ''}_v2`;
+    }
+    if (kind) return `evt_${kind}_v1`;
     return { PAYMENT_FAILED: 'payment_failed', EVENT_PAYMENT_FAILED: 'payment_failed', COMPANY_PAYMENT_CONFIRMED: 'company_payment',
         MEMBERSHIP_PLAN_ADVANCED: 'membership_plan', MEMBERSHIP_STATUS_CHANGED: 'membership_status',
-        EVENT_UPDATED: 'event_updated', EVENT_CANCELLED: 'event_cancelled' }[event];
+        EVENT_CANCELLED: 'event_cancelled' }[event] + '_v1';
 }
 function prepare(event, input = {}) {
     const ctx = { ...input, supportEmail: /^EVENT_/.test(event) ? 'events@activ.org.in' : 'member@activ.org.in',
@@ -146,8 +179,33 @@ function prepend(event, ctx, current, defaultPoster, variants) {
     const result = prepare(event, ctx);
     if (!result || result.rendered.length > 1024) return current;
     const { spec, params } = result;
+    // The approved record-notice contract keeps exact attendance/video/group
+    // links during review of v2. It is used only after a definite refusal, under
+    // the dispatcher's existing fallback rules (never after a timeout).
+    if (spec.version === 'v2' && (ctx.videoUrl || ctx.isOnline || event === 'EVENT_UPDATED')) {
+        const attendance = attendanceLink(ctx);
+        const participant = /^EVENT_PARTICIPANT_/.test(event) || ctx.forParticipant;
+        const summary = [
+            line(ctx.eventTitle).slice(0, 90),
+            [ctx.dateLabel, ctx.timeLabel].filter(Boolean).map(line).join(', '),
+            ctx.isOnline ? `Online${ctx.onlinePlatform ? ` on ${line(ctx.onlinePlatform)}` : ''}` : line(ctx.venueLabel || ctx.venue).slice(0, 90),
+            `Booking ID: ${line(reference(ctx))}`,
+            ...(event === 'EVENT_UPDATED' ? [line(ctx.changeSummary).slice(0, 120)] : [
+                participant ? '1 seat, booked for you' : `${line(ctx.seatsLabel) || '1 seat'}; ${line(flex.feeOf(ctx))}`,
+            ]),
+            attendance.url ? `${attendance.label}: ${line(attendance.url)}` : '',
+            ctx.videoUrl ? `Event video: ${line(ctx.videoUrl)}` : '',
+            ctx.whatsappChannelUrl ? `WhatsApp updates: ${line(ctx.whatsappChannelUrl)}` : '',
+        ].filter(Boolean).join(' | ');
+        const title = event === 'EVENT_UPDATED' ? 'Event details updated' : EVENT_KINDS[event] === 'reminder' ? 'Event reminder' : 'Event booking confirmed';
+        const values = [line(name({ ...ctx, forParticipant: participant })).slice(0, 40), title, summary,
+            line(bookingUrl({ ...ctx, forParticipant: participant })), 'events@activ.org.in'];
+        if (values.every(Boolean) && flex.renderBody(require('./workflowTemplates').RECORD_UPDATE_BODY, values).length <= 1024) {
+            current = { template: 'activ_record_update_v1', params: values, fallback: current, text: current.text, skipped: current.skipped };
+        }
+    }
     return spec.names.filter(variant => !variants || variants.includes(variant)).reduceRight((fallback, variant) => ({
-        template: `activ_${spec.key}_standard_${variant}_v1`, params,
+        template: `activ_${spec.key}_standard_${variant}_${spec.version}`, params,
         ...(variant === 'image' ? { headerImage: ctx.posterUrl || defaultPoster } : {}), fallback,
         text: current.text, skipped: current.skipped,
     }), current);

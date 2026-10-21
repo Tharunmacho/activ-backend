@@ -461,6 +461,7 @@ class AuthService {
             _id: memberDetails._id,
             email: memberDetails.email,
             role: userRole,
+            authProvider: provider,
             block: memberDetails.block,
             district: memberDetails.district,
             state: memberDetails.state
@@ -962,6 +963,38 @@ class AuthService {
         throw ApiError.badRequest(invalid);
     }
 
+    async setFirstPassword(session, newPassword, confirmPassword) {
+        if (!['google', 'facebook', 'linkedin'].includes(session?.authProvider)
+            || !Number.isFinite(session?.iat) || Date.now() / 1000 - session.iat > 3600) {
+            throw ApiError.unauthorized('Sign in again with your linked social account, then set your ACTIV password.');
+        }
+        if (typeof newPassword !== 'string' || newPassword.length < 8 || Buffer.byteLength(newPassword, 'utf8') > 72) {
+            throw ApiError.badRequest('Use at least 8 characters and no more than 72 bytes for your password.');
+        }
+        if (newPassword !== confirmPassword) throw ApiError.badRequest('New password and confirm password do not match.');
+        const member = await MemberDetails.findById(session.userId).select('email isActive role').lean();
+        if (!member || member.isActive === false || /admin/i.test(String(member.role || ''))
+            || member.email !== session.email) throw ApiError.forbidden('This member account is unavailable.');
+        const auth = await MemberAuth.findOne({ email: member.email, isActive: { $ne: false } }).select('+password').lean();
+        if (!auth || auth.passwordLoginEnabled !== false || auth.password) {
+            throw ApiError.conflict('This account already has a password. Use Change password or Forgot password.');
+        }
+        if (!await require('./oauthIdentity.model').exists({ authId: auth._id, provider: session.authProvider })) {
+            throw ApiError.forbidden('Sign in with a linked social account to set your first password.');
+        }
+        const password = await bcrypt.hash(newPassword, 10);
+        // Only one concurrent first-password save can win. Never replace a
+        // password installed by a reset, another tab or an existing account.
+        const saved = await MemberAuth.findOneAndUpdate({ _id: auth._id, email: member.email,
+            isActive: { $ne: false }, passwordLoginEnabled: false,
+            $or: [{ password: { $exists: false } }, { password: null }, { password: '' }],
+        }, { $set: { password, passwordLoginEnabled: true },
+            $unset: { resetPasswordToken: '', resetPasswordExpires: '' } }, { new: true });
+        if (!saved) throw ApiError.conflict('Your account changed. Sign in again before updating your password.');
+        await cacheClient.del(CACHE_KEYS.USER(String(member._id)));
+        return accountCapabilities.forMemberEmail(member.email);
+    }
+
     async changePassword(userId, oldPassword, newPassword) {
         if (typeof newPassword !== 'string' || newPassword.length < 6) throw ApiError.badRequest('Password must be at least 6 characters long');
         // Tokens carry the profile ID; the credential document has its own ID.
@@ -1022,7 +1055,8 @@ class AuthService {
             role: memberAuth.role || 'member',
             block: memberAuth.block,
             district: memberAuth.district,
-            state: memberAuth.state
+            state: memberAuth.state,
+            ...(memberAuth.authProvider ? { authProvider: memberAuth.authProvider } : {})
         };
 
         const accessToken = jwt.sign(payload, config.jwt.secret, {

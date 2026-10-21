@@ -18,6 +18,11 @@ const attendanceDetails = (event = {}) => ({
     venue: [clean(event.venue || event.location), clean(event.venueAddress), clean(event.venueMapUrl)],
     format: [event.mode === 'online' ? 'online' : 'offline', clean(event.onlinePlatform)],
     joiningLink: clean(event.onlineUrl),
+    video: clean(event.videoUrl),
+    whatsapp: clean(event.whatsappChannelUrl),
+    documents: (Array.isArray(event.attachments) ? event.attachments : []).filter(item => item?.url)
+        .map(item => [clean(item.name), clean(item.url)]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    attendeeNote: clean(event.registrationNote),
 });
 
 function describeChange(before, after, { now = Date.now() } = {}) {
@@ -34,7 +39,9 @@ function describeChange(before, after, { now = Date.now() } = {}) {
     if (before.status !== 'published' || after.status !== 'published' || isPastEvent(after, now)) return null;
     const oldDetails = attendanceDetails(before);
     const newDetails = attendanceDetails(after);
-    const labels = { schedule: 'date or time', venue: 'venue or directions', format: 'attendance format', joiningLink: 'online joining link' };
+    const labels = { schedule: 'date or time', venue: 'venue or directions', format: 'attendance format',
+        joiningLink: 'online registration or joining link', video: 'event video', whatsapp: 'WhatsApp updates link',
+        documents: 'supporting documents', attendeeNote: 'attendee instructions' };
     const changes = Object.keys(labels).filter(key => JSON.stringify(oldDetails[key]) !== JSON.stringify(newDetails[key]));
     if (!changes.length) return null;
     return { kind: 'updated', changeSummary: `The organiser updated the ${changes.map(key => labels[key]).join(', ')}. Please check the latest details before attending.` };
@@ -116,20 +123,31 @@ function announceChange(before, after) {
 }
 
 function registrationContext(row, event, extra = {}) {
-    const when = event.startAt ? new Date(event.startAt) : null;
-    const whenLabel = when && Number.isFinite(when.getTime())
-        ? when.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit' })
-        : 'Date to be confirmed';
+    const { describeSchedule, attendanceOf } = require('./eventbooking.service');
+    const schedule = describeSchedule(event.startAt, event.endAt);
+    const { isOnline, platform } = attendanceOf(event);
+    const venue = isOnline ? (platform ? `Online (${platform})` : 'Online')
+        : [clean(event.venue || event.location), clean(event.venueAddress)].filter(Boolean).join(', ');
     const paid = ['paid', 'not_required'].includes(row.payment?.status);
+    const canAttend = row.status === 'registered' && paid && !extra.cancelledScope;
+    const { documentUrl } = require('./eventDocument');
     const { appUrl } = require('../notifications/notificationTemplates');
     const eventUrl = appUrl(`/events/${encodeURIComponent(event.slug || String(event._id || row.eventId))}`);
     return {
-        ...extra, eventTitle: event.title || 'ACTIV event', whenLabel,
-        dateLabel: whenLabel, venue: event.mode === 'online' ? 'Online' : clean(event.venue || event.location),
-        venueLabel: event.mode === 'online' ? 'Online' : clean(event.venue || event.location),
-        isOnline: event.mode === 'online', onlinePlatform: clean(event.onlinePlatform),
+        ...extra, eventTitle: event.title || 'ACTIV event', ...schedule,
+        venue, venueLabel: venue, isOnline, onlinePlatform: platform,
+        mapUrl: isOnline ? '' : clean(event.venueMapUrl),
+        posterUrl: documentUrl(event.bannerUrl),
+        videoUrl: canAttend ? clean(event.videoUrl) : '',
+        whatsappChannelUrl: canAttend ? clean(event.whatsappChannelUrl) : '',
+        attachments: canAttend && Array.isArray(event.attachments) ? event.attachments.filter(item => item?.url)
+            .map(item => ({ name: clean(item.name) || 'Document', url: documentUrl(item.url), type: clean(item.type), size: Number(item.size) || 0 })) : [],
+        attendeeNote: canAttend ? clean(event.registrationNote) : '',
         // A waitlist is not a ticket: it must never receive a paid joining URL.
-        registerUrl: row.status === 'registered' && paid ? clean(event.onlineUrl) : '',
+        registerUrl: canAttend && isOnline ? clean(event.onlineUrl) : '',
+        settledVia: row.payment?.status === 'not_required' ? 'free' : '',
+        amountLabel: paid && Number(row.payment?.amount) > 0 ? `Rs ${Number(row.payment.amount).toLocaleString('en-IN')}` : '',
+        paymentLabel: row.payment?.status === 'paid' ? 'Paid' : row.payment?.status === 'not_required' ? 'Not required' : 'Not paid',
         bookingRef: clean(row.payment?.reference) || String(row._id),
         bookingStatus: row.status === 'registered' && !paid ? 'pending' : row.status,
         seats: 1, seatsLabel: '1 seat', eventUrl, viewUrl: eventUrl,

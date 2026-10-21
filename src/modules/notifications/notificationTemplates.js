@@ -69,6 +69,7 @@ const esc = (value) => String(value === null || value === undefined ? '' : value
  * members-only link sent every one of them to the login screen.
  */
 const eventLink = (ctx = {}) => {
+    if (ctx.eventUrl) return ctx.eventUrl;
     const data = ctx.data || {};
     const id = data.eventId || ctx.eventId || '';
     if (!id) return appUrl('/events');
@@ -121,12 +122,12 @@ const emailFiles = (ctx = {}) => splitFiles(ctx).attached
 const documentsHtml = (ctx = {}) => {
     const { attached, tooBig } = splitFiles(ctx);
     if (!attached.length && !tooBig.length && !ctx.videoUrl && !ctx.whatsappChannelUrl) return '';
-    const names = (list) => list.map((a) => `<strong style="color:#0f172a;">${esc(a.name)}</strong>`).join(', ');
+    const names = (list) => list.map((a) => `<a href="${esc(a.url)}" target="_blank" style="color:#0f172a;font-weight:700;">${esc(a.name)}</a>`).join(', ');
     return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
                    style="background-color:#ffffff; border:1px solid #dbe4fb; border-radius:14px; border-collapse:separate; margin-bottom:16px;">
         <tr><td style="padding:18px 20px; font-size:14px; line-height:1.6; color:#334155;">
           ${attached.length ? `<div>📎 <strong>Attached to this email:</strong> ${names(attached)}.</div>` : ''}
-          ${tooBig.length ? `<div style="padding-top:6px;">📱 ${names(tooBig)} ${tooBig.length > 1 ? 'are' : 'is'} sent to you on WhatsApp.</div>` : ''}
+          ${tooBig.length ? `<div style="padding-top:6px;"><strong>Additional documents:</strong> ${names(tooBig)}. Open the links to download.</div>` : ''}
           ${ctx.videoUrl ? `<div style="padding-top:${attached.length || tooBig.length ? 14 : 0}px;">
             <a href="${esc(ctx.videoUrl)}" target="_blank"
                style="display:inline-block; background-color:#dc2626; color:#ffffff; text-decoration:none; font-weight:700;
@@ -757,7 +758,8 @@ const TEMPLATES = {
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
-            actionButton: { label: 'View event details', url: eventLink(ctx) }
+            actionButton: { label: 'View event details', url: eventLink(ctx) },
+            afterHtml: beforeYouComeHtml(ctx)
         },
         whatsapp: {
             /*
@@ -800,7 +802,8 @@ const TEMPLATES = {
                 { label: 'When', value: ctx.whenLabel },
                 { label: 'Where', value: ctx.venue }
             ],
-            actionButton: { label: 'View event details', url: eventLink(ctx) }
+            actionButton: { label: 'View event details', url: eventLink(ctx) },
+            afterHtml: beforeYouComeHtml(ctx)
         },
         whatsapp: {
             template: TPL.event,
@@ -1681,9 +1684,13 @@ const passesHtml = (passes = []) => `<table role="presentation" width="100%" cel
         <tr><td style="padding:0 0 10px 0; font-size:0; line-height:0;">&nbsp;</td></tr>
       </table>`;
 
-const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER'];
+const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EVENT_PARTICIPANT_CONFIRMED', 'EVENT_PARTICIPANT_REMINDER',
+    'EVENT_REGISTERED', 'EVENT_REMINDER', 'EVENT_UPDATED'];
 const render = (eventName, ctx = {}) => {
     ctx = { ...ctx, planName: require('../members/membershipLabels').displayPlanName(ctx.planName, ctx.planId, ctx.membershipTier) };
+    if (eventName === 'EVENT_UPDATED' && ['waitlist', 'pending', 'cancelled'].includes(ctx.bookingStatus)) {
+        ctx = { ...ctx, registerUrl: '', joinUrl: '', videoUrl: '', whatsappChannelUrl: '', attachments: [] };
+    }
     const support = /^EVENT_/.test(eventName) ? require('./eventContact') : require('./membershipContact');
     if (/^EVENT_/.test(eventName)) {
         ctx.contactEmail = support.email;
@@ -1693,6 +1700,16 @@ const render = (eventName, ctx = {}) => {
     const builder = TEMPLATES[eventName];
     if (typeof builder !== 'function') return null;
     const out = builder(ctx);
+    if (['EVENT_REGISTERED', 'EVENT_REMINDER', 'EVENT_UPDATED'].includes(eventName)) {
+        const attendance = require('./eventAttendance').attendanceLink(ctx);
+        if (out.email) {
+            if (attendance.url && (ctx.registerUrl || ctx.joinUrl || ctx.mapUrl)) {
+                out.email.secondaryButton = { label: attendance.label, url: attendance.url };
+            }
+            if (eventName === 'EVENT_UPDATED') out.email.afterHtml = beforeYouComeHtml(ctx);
+        }
+        if (out.whatsapp?.text && attendance.url) out.whatsapp.text += `\n\n*${attendance.label}:*\n${attendance.url}`;
+    }
     if (out?.whatsapp) {
         const configured = /^EVENT_(BOOKING|PARTICIPANT)_/.test(eventName)
             ? flexNames(STANDARD.EVENT_KINDS[eventName], ctx) : null;
@@ -1722,11 +1739,17 @@ const render = (eventName, ctx = {}) => {
         out.email.afterHtml = passesHtml(ctx.passes) + (out.email.afterHtml || '');
     }
     if (out && WITH_DOCUMENTS.includes(eventName)) {
+        if (out.whatsapp?.text && ctx.videoUrl && !out.whatsapp.text.includes(ctx.videoUrl)) {
+            out.whatsapp.text += `\n\n*Event video:*\n${ctx.videoUrl}`;
+        }
         if (out.whatsapp && out.whatsapp.text && ctx.whatsappChannelUrl) {
             out.whatsapp.text += `\n\n*${require('../events/whatsappLink').whatsappLinkLabel(ctx.whatsappChannelUrl)} for this event:*\n${ctx.whatsappChannelUrl}`;
         }
         if (out.email) out.email.fileAttachments = emailFiles(ctx);
         const files = Array.isArray(ctx.attachments) ? ctx.attachments : [];
+        if (out.whatsapp?.text && ['EVENT_REGISTERED', 'EVENT_REMINDER', 'EVENT_UPDATED'].includes(eventName)) {
+            for (const file of files.filter(item => item?.url)) out.whatsapp.text += `\n\n*${file.name || 'Event document'}:*\n${file.url}`;
+        }
         if (out.whatsapp && out.whatsapp.text && files.length) {
             out.whatsapp.text = out.whatsapp.text.replace(/\n\n(See you|We look forward|See you there)/,
                 // Named, not linked: the files themselves follow as WhatsApp documents.

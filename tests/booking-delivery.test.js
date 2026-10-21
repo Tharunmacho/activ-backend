@@ -135,7 +135,7 @@ const testRealInfoOnly = () => {
     // actually delivers); the detailed template is the first step after them.
     const steps = chainOf(full.whatsapp);
     check('the standard confirmation leads with the approved readable contract retained as fallback',
-        steps[0].template === 'activ_evt_confirmed_standard_image_v1'
+        steps[0].template === 'activ_evt_confirmed_standard_image_v2'
             && steps.some(step => step.template === 'activ_evt_confirmed_readable_v1'), steps.map((s) => s.template).join(' > '));
     const first = steps.find((s) => !/^activ_evt_/.test(s.template)) || {};
     check('with a full contact + two notes the detailed template is first after them', /event_booking_v4$/.test(first.template), first.template);

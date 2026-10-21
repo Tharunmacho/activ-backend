@@ -20,11 +20,12 @@ const events = ['EVENT_BOOKING_CONFIRMED','EVENT_PARTICIPANT_CONFIRMED','EVENT_R
     'EVENT_PARTICIPANT_REMINDER','EVENT_REMINDER','EVENT_BOOKING_CANCELLED','EVENT_PARTICIPANT_CANCELLED','EVENT_BOOKING_WAITLISTED',
     'PAYMENT_FAILED','EVENT_PAYMENT_FAILED','COMPANY_PAYMENT_CONFIRMED','MEMBERSHIP_PLAN_ADVANCED','MEMBERSHIP_STATUS_CHANGED','EVENT_UPDATED','EVENT_CANCELLED'];
 async function main() {
-    assert.equal(standard.WHATSAPP_TEMPLATES.length, 18);
+    assert.equal(standard.WHATSAPP_TEMPLATES.filter(item => item.name.endsWith('_v1')).length, 18, 'Approved contracts are preserved');
+    assert.equal(standard.WHATSAPP_TEMPLATES.filter(item => item.name.endsWith('_v2')).length, 20);
     for (const definition of standard.WHATSAPP_TEMPLATES) assert.deepEqual(flex.lintTemplate(definition), [], definition.name);
-    for (const event of events) for (const online of [false, true]) for (const channel of ['', 'https://whatsapp.com/channel/FIXTURE']) {
+    for (const event of events) for (const online of [false, true]) for (const channel of ['', 'https://whatsapp.com/channel/FIXTURE']) for (const video of ['', 'https://youtu.be/FIXTURE?v=1&feature=share']) {
         const ctx = { ...context, isOnline: online, onlinePlatform: 'Zoom', participantName: 'Fixture attendee',
-            whatsappChannelUrl: channel, ...(online ? { registerUrl: 'https://zoom.us/meeting/register/FIXTURE' } : {}) };
+            whatsappChannelUrl: channel, videoUrl: video, ...(online ? { registerUrl: 'https://zoom.us/meeting/register/FIXTURE' } : { mapUrl: 'https://maps.google.com/?q=Fixture+hall' }) };
         const rendered = standard.prepare(event, ctx);
         assert.ok(rendered, event);
         assert.ok(rendered.rendered.length <= 1024, event);
@@ -34,6 +35,13 @@ async function main() {
         const actual = registry.render(event, ctx).whatsapp;
         assert.ok(/_standard_/.test(actual.template), event);
         assert.ok(actual.fallback, 'Existing approved fallback is retained');
+        if (['confirmed', 'reminder'].includes(standard.EVENT_KINDS[event]) || event === 'EVENT_UPDATED') {
+            assert.ok(actual.template.endsWith('_v2'));
+            assert.ok(!rendered.rendered.includes('*Event attendance:*'));
+            assert.ok(rendered.rendered.includes(online ? '*Online registration link:*\n' : '*Venue directions:*\n'));
+            assert.ok(rendered.params.includes(online ? ctx.registerUrl : ctx.mapUrl), 'Attendance URL stays exact');
+            if (video) assert.ok(rendered.rendered.includes(`*Event video:*\n${video}\n\n`), 'Video is not dropped by the first accepted template');
+        }
         if (event.startsWith('EVENT_PARTICIPANT_')) {
             assert.ok(!actual.params.includes('Rs 500'), 'Participant does not receive the booker payment');
             assert.ok(!actual.params.includes(context.viewUrl), 'Participant does not receive the booker management URL');
@@ -105,6 +113,6 @@ async function main() {
     assert.equal(calls.length, 1);
     failure = ''; calls.length = 0;
     assert.equal((await sendDocument(recipient.phone, 'custom_document', params, header)).template, 'custom_document');
-    console.log('PASS standard WhatsApp layouts: 18 definitions, 16 workflows, online/offline/channel matrix, participant privacy, exact IDs/URLs, approved fallbacks and document captions.');
+    console.log('PASS standard WhatsApp layouts: 38 definitions, 16 workflows, online/offline/channel/video matrix, participant privacy, exact IDs/URLs, approved fallbacks and document captions.');
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

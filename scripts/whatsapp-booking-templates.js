@@ -40,6 +40,7 @@ const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7)
     .split(',').map((s) => s.trim()).filter(Boolean);
 const picked = (t) => !only.length || only.includes(t.name) || (only.includes('flex') && t.flex)
     || (only.includes('standard') && t.standard)
+    || (only.includes('event-context') && t.standard && t.name.endsWith('_v2'))
     || (only.includes('aligned') && /^activ_evt_(confirmed|online)_(whatsapp|video|whatsapp_video)_(image|plain)_v4$/.test(t.name))
     || (only.includes('pdf-links') && /^activ_evt_(confirmed|online)_.*document.*_(image|plain)_v4$/.test(t.name));
 const booking = templates.WHATSAPP_TEMPLATES.filter((t) => t.meta && picked(t));

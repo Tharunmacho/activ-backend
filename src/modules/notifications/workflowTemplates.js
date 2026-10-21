@@ -1,5 +1,6 @@
 // Notices for a changed saved record. Financial outcomes are supplied only by
 // verified provider paths; these renderers never infer that money moved.
+const RECORD_UPDATE_BODY = 'Dear {{1}},\n\n*Update to your ACTIV record*\n{{2}}\n\n*Details*\n{{3}}\n\nView your record: {{4}}\n\nFor questions about this update, contact {{5}}.\n\nThis notification relates to your existing ACTIV account or event registration.';
 module.exports = ({ appUrl, oneLine, esc, TPL }) => {
     const TEMPLATE = 'activ_record_update_v1';
     const clean = (value, max = 400) => oneLine(value, max);
@@ -91,7 +92,7 @@ module.exports = ({ appUrl, oneLine, esc, TPL }) => {
         },
         WHATSAPP_TEMPLATES: [{
             name: TEMPLATE, meta: true, category: 'Utility', footer: require('./organizationBrand').FOOTER,
-            bodyWithVariables: 'Dear {{1}},\n\n*Update to your ACTIV record*\n{{2}}\n\n*Details*\n{{3}}\n\nView your record: {{4}}\n\nFor questions about this update, contact {{5}}.\n\nThis notification relates to your existing ACTIV account or event registration.',
+            bodyWithVariables: RECORD_UPDATE_BODY,
             params: ['name', 'update title', 'update details', 'record link', 'queries email'],
             samples: ['Test member', 'Event details updated: Business workshop',
                 'The workshop now starts at 11 AM IST on 20 October 2026. Please review the updated schedule before attending.',
@@ -99,3 +100,4 @@ module.exports = ({ appUrl, oneLine, esc, TPL }) => {
         }]
     };
 };
+module.exports.RECORD_UPDATE_BODY = RECORD_UPDATE_BODY;

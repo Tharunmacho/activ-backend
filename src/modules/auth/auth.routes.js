@@ -131,6 +131,8 @@ router.post('/logout', verifyToken, authController.logout);
 
 router.get('/me', verifyToken, authController.getCurrentUser);
 
+router.post('/set-password', verifyToken, authLimiter, authController.setFirstPassword);
+
 router.post(
     '/change-password',
     verifyToken,

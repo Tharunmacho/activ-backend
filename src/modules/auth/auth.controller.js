@@ -93,6 +93,12 @@ const changePassword = asyncHandler(async(req, res) => {
     );
 });
 
+const setFirstPassword = asyncHandler(async(req, res) => {
+    const capabilities = await authService.setFirstPassword(req.user, req.body.newPassword, req.body.confirmPassword);
+    res.set('Cache-Control', 'no-store').json(ApiResponse.success(capabilities,
+        'Password set. You can now use email and password or your linked social account to sign in.'));
+});
+
 module.exports = {
     register,
     login,
@@ -100,6 +106,7 @@ module.exports = {
     logout,
     getCurrentUser,
     changePassword,
+    setFirstPassword,
     forgotPassword,
     verifyResetToken,
     resetPassword
