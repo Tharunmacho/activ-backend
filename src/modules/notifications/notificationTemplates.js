@@ -1757,6 +1757,18 @@ const render = (eventName, ctx = {}) => {
                     files.length > 1 ? 's' : ''}: ${files.map((a) => a.name).join(', ')}\n\n$1`);
         }
     }
+    if (out && out.inApp && ['EVENT_BOOKING_CONFIRMED', 'EVENT_REGISTERED'].includes(eventName)) {
+        // The bell entry is also what the phone shows as a push. Point the
+        // member at the messages they were ACTUALLY sent: only a channel that
+        // has an address and a rendered message is named, so WhatsApp-only and
+        // email-only registrations never claim the other.
+        const sent = [];
+        if (out.whatsapp && out.whatsapp.template && String(ctx.phone || '').trim()) sent.push('WhatsApp');
+        if (out.email && String(ctx.email || '').trim()) sent.push('email');
+        if (sent.length) {
+            out.inApp.message = `${String(out.inApp.message || '').trim()} You would have got the ${sent.join(' and ')} notification${sent.length > 1 ? 's' : ''}. Kindly check the same.`.trim();
+        }
+    }
     return out;
 };
 

@@ -68,11 +68,13 @@ async function validateRecipients(data, current = {}) {
 async function loadRecipient(recipient = {}) {
     const id = String(recipient._id || recipient.id || '');
     if (!idValid(id)) return recipient;
-    const [member, receipt, business, company] = await Promise.all([
-        require('../members/memberdetails.model').findById(id).select('fullName email phoneNumber membershipNumber membershipType membershipTier membershipStatus membershipExpiresAt membershipActivatedAt memberType registrationType paymentId state district block city country place isActive deletedAt role').lean(),
+    const [member, receipt, business, company, personal] = await Promise.all([
+        require('../members/memberdetails.model').findById(id).select('fullName email phoneNumber membershipNumber membershipType membershipTier membershipStatus membershipExpiresAt membershipActivatedAt memberType registrationType paymentId state district block city country place isActive deletedAt role gender').lean(),
         require('../payment/paymentorder.model').findOne({ memberId: id, orderType: 'membership', status: 'paid' }).sort({ paidAt: -1, createdAt: -1 }).select('amount currency planId planAudience upgradeKind').lean(),
         require('../members/businessinfo.model').findOne({ userId: id }).select('organizationName organisationName companyName businessName').lean(),
         require('../members/company.model').findOne({ userId: id, isActive: { $ne: false } }).sort({ createdAt: 1, _id: 1 }).select('businessName').lean(),
+        // Older registrations kept gender only in the personal-details document.
+        require('../members/personalinfo1.model').findOne({ userId: id }).select('gender').lean(),
     ]);
     if (!member) return { id };
     if (receipt?.planId && !receipt.planAudience && !receipt.upgradeKind) receipt.planAudience = (await require('../members/membershipplan.model').findOne({ key: receipt.planId }).select('audience').lean())?.audience || '';
@@ -81,7 +83,7 @@ async function loadRecipient(recipient = {}) {
     if (receipt && Number.isFinite(receipt.amount)) {
         try { lastPaidFee = new Intl.NumberFormat('en-IN', { style: 'currency', currency: receipt.currency || 'INR' }).format(receipt.amount); } catch (_) { /* Invalid stored currency is unavailable. */ }
     }
-    return { ...member, id, ...require('../common/memberAudience').memberAccess(profile, receipt),
+    return { ...member, gender: member.gender || personal?.gender || '', id, ...require('../common/memberAudience').memberAccess(profile, receipt),
         companyName: require('../members/certificateIdentity').certificateIdentity(business, company).companyName, lastPaidFee };
 }
 module.exports = { MEMBER_FILTER, matchesSelected, selectedClause, sanitizeRecipients, validateRecipients, loadRecipient, idValid };

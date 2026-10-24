@@ -1,5 +1,5 @@
 const { isPastEvent, bookingHistoryCategory } = require('./eventLifecycle');
-const { reminderOffsets, reminderReason } = require('./eventReminder');
+const { reminderOffsets, reminderReason, windowClosed } = require('./eventReminder');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const EventBooking = require('./eventbooking.model');
@@ -2213,7 +2213,7 @@ class EventBookingService {
      * sent it. This does, on a timer started by `server.js`.
      *
      * An event with no offsets of its own falls back to
-     * `EVENT_REMINDER_DEFAULT_HOURS` (24 unless set; `0` turns the fallback
+     * `EVENT_REMINDER_DEFAULT_HOURS` (48 and 24 hours before unless set; `0` turns the fallback
      * off). Offsets are computed against the event's CURRENT start, so moving
      * the event moves its reminders with it.
      *
@@ -2515,6 +2515,8 @@ class EventBookingService {
             for (const hours of offsets) {
                 const moment = start - hours * 60 * 60 * 1000;
                 if (now < moment) continue;
+                // Never late: a window whose closer reminder is already due has passed.
+                if (windowClosed(start, hours, offsets, Date.now())) continue;
 
                 const reminderKey = require('./eventChanges.service').registrationReminderKey(start, hours);
                 const bookingFilter = {

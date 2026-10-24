@@ -399,7 +399,7 @@ class DirectoryService {
         const [companies, products] = await Promise.all([
             Company.find({ _id: { $in: publishedCompanyIds } }).lean().catch(() => []),
             Product.find({ companyId: { $in: publishedCompanyIds }, isActive: true })
-                .select('name category price priceUnit imageUrl')
+                .select('name description category price priceUnit imageUrl')
                 .limit(24)
                 .lean()
                 .catch(() => [])
@@ -410,6 +410,7 @@ class DirectoryService {
             products: (products || []).map((product) => ({
                 id: String(product._id),
                 name: product.name || '',
+                description: product.description || '',
                 category: product.category || '',
                 price: Number(product.price || 0),
                 imageUrl: product.imageUrl || ''

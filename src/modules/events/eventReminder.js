@@ -1,9 +1,11 @@
 const { isPastEvent } = require('./eventLifecycle');
 
 const timestamp = value => value == null || value === '' ? NaN : new Date(value).getTime();
+// Two days and one day before the start, unless the organiser chose their own.
+const DEFAULT_REMINDER_HOURS = '48,24';
 const reminderOffsets = (event = {}) => {
     const own = Array.isArray(event.reminderOffsetsHours) ? event.reminderOffsetsHours : [];
-    const fallback = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
+    const fallback = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined ? DEFAULT_REMINDER_HOURS : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
     return [...new Set((own.length ? own : fallback.split(',')).map(Number)
         .filter(hours => Number.isFinite(hours) && hours > 0 && hours <= 168))];
 };
@@ -30,4 +32,19 @@ function reminderReason(event, data = {}, bookedAt, now = Date.now()) {
     return '';
 }
 
-module.exports = { reminderOffsets, reminderReason };
+/**
+ * Each offset owns a window: from its moment until the next-closer reminder's
+ * moment (or the start, for the closest one). An event published 30 hours out
+ * has already missed its "2 days before" window; sending it now would be a
+ * late 48h reminder immediately followed by the 24h one. A missed window is
+ * skipped, never sent late.
+ */
+function windowClosed(start, hours, offsets, now = Date.now()) {
+    const closer = (offsets || []).filter(h => h < hours);
+    const end = closer.length ? start - Math.max(...closer) * 3600000 : start;
+    // A short grace covers a restart or a retry; beyond it the moment was missed.
+    const grace = Math.max(0, Number(process.env.EVENT_REMINDER_GRACE_HOURS ?? 12)) * 3600000;
+    return now >= end || now > start - hours * 3600000 + grace;
+}
+
+module.exports = { reminderOffsets, reminderReason, windowClosed, DEFAULT_REMINDER_HOURS };

@@ -7,7 +7,7 @@ require('dotenv').config = () => ({ parsed: {} });
 Object.assign(process.env, { NODE_ENV: 'test', JWT_SECRET: 'local-update-delivery-test-only', PUSH_ENABLED: 'false',
     EMAIL_HOST: 'localhost', EMAIL_USER: 'test@example.test', EMAIL_PASS: 'local-test-not-a-credential',
     MEMBER_EMAIL_TRANSPORT: 'shared', FRONTEND_URL: 'https://activ.org.in', MONGOMS_RUNTIME_DOWNLOAD: 'false',
-    ASSOCIATION_UPDATE_EMAIL_MAX_AGE_MINUTES: '60' });
+    ASSOCIATION_UPDATE_EMAIL_MAX_AGE_MINUTES: '60', ASSOCIATION_UPDATE_WHATSAPP_REQUIRE_OPT_IN: 'true' });
 let mongo;
 (async () => {
     mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1', launchTimeout: 60000 } });

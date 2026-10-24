@@ -11,6 +11,9 @@
  *   node tests/whatsapp-templates.test.js
  */
 
+// The routing helper also resolves the sender's own number. Keep that lookup
+// deterministic so a pure template test never asks Meta for account metadata.
+process.env.WHATSAPP_OWN_NUMBER = '919999999999';
 const botbee = require('../src/modules/notifications/botbee.service');
 
 let passed = 0;

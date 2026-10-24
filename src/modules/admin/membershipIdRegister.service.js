@@ -50,7 +50,28 @@ async function list(query, actor) {
         Member.collection.find(filter, { projection }).sort({ membershipActivatedAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
         Member.collection.countDocuments(filter)
     ]);
-    return { rows: await Promise.all(members.map(shape)), total, page, limit };
+    const [rows, legend] = await Promise.all([Promise.all(members.map(shape)), categories()]);
+    return { rows, total, page, limit, ...legend };
+}
+/**
+ * The ID legend, read from the plan table — never typed into a screen.
+ *
+ * The code in an ID is stable (it comes from the plan KEY), but the name beside
+ * it is whatever the Super Admin calls the plan today, so renaming "Beginner"
+ * to "Neo" must change the legend with no deploy. Retired plans stay listed
+ * because members issued under them still carry that code.
+ */
+async function categories() {
+    const plans = await require('../members/membershipplan.service').listAll().catch(() => []);
+    const seen = new Map();
+    for (const plan of plans || []) {
+        const code = membershipIdCategory({}, { key: plan.key, audience: plan.audience, membershipType: plan.membershipType });
+        if (!seen.has(code)) seen.set(code, { code, name: plan.name || plan.key, active: plan.active !== false });
+        else if (plan.active !== false && !seen.get(code).active) seen.set(code, { code, name: plan.name || plan.key, active: true });
+    }
+    if (!seen.has('LIF')) seen.set('LIF', { code: 'LIF', name: 'Lifetime Membership', active: true });
+    const list = [...seen.values()];
+    return { categories: list.map(({ code, name }) => ({ code, name })), exampleCategory: (list.find(c => c.active) || list[0] || {}).code || 'MEM' };
 }
 async function detail(id, actor) {
     superOnly(actor);

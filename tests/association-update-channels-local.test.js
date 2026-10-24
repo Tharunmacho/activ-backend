@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server-core');
 Object.assign(process.env, { NODE_ENV: 'test', MONGOMS_RUNTIME_DOWNLOAD: 'false', NOTIFICATION_WORKER_ENABLED: 'false',
     JWT_SECRET: 'local-channel-selection-secret', PUSH_ENABLED: 'true', FIREBASE_SERVICE_ACCOUNT_JSON: '{"testOnly":true}',
-    EMAIL_HOST: 'localhost', EMAIL_USER: 'fixture@example.test', EMAIL_PASS: 'fixture-only', MEMBER_EMAIL_TRANSPORT: 'shared' });
+    EMAIL_HOST: 'localhost', EMAIL_USER: 'fixture@example.test', EMAIL_PASS: 'fixture-only', MEMBER_EMAIL_TRANSPORT: 'shared', ASSOCIATION_UPDATE_WHATSAPP_REQUIRE_OPT_IN: 'true' });
 let mongo, count = 0;
 const pass = text => { count++; console.log('PASS ' + text); };
 (async () => {

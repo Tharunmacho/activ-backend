@@ -67,7 +67,7 @@ const registrationReminderKey = (startAt, hours) => {
 };
 const currentReminderOffsets = event => {
     const own = Array.isArray(event.reminderOffsetsHours) ? event.reminderOffsetsHours : [];
-    const fallback = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined ? '24' : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
+    const fallback = process.env.EVENT_REMINDER_DEFAULT_HOURS === undefined ? require('./eventReminder').DEFAULT_REMINDER_HOURS : String(process.env.EVENT_REMINDER_DEFAULT_HOURS);
     return (own.length ? own : fallback.split(',')).map(Number).filter(hours => Number.isFinite(hours) && hours > 0 && hours <= 168);
 };
 

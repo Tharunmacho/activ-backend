@@ -5,7 +5,7 @@ const path = require('path');
 const sharp = require('sharp');
 const root = path.resolve(__dirname, '../../frontend');
 const input = path.join(root, 'assets/branding/activ-launcher-foreground.png');
-const background = '#c8d2db';
+const background = '#ffffff';
 const write = (name, content) => { fs.mkdirSync(path.dirname(name), { recursive: true }); fs.writeFileSync(name, content); };
 async function main() {
     const logo = await sharp(input).trim().toBuffer();
@@ -16,10 +16,11 @@ async function main() {
     const res = path.join(root, 'android/app/src/main/res');
     for (const [density, scale] of Object.entries({ mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 })) {
         // Legacy launchers: inset artwork also stays visible under a round mask.
-        const bytes = await square(48 * scale, 0.76);
+        const bytes = await square(48 * scale, 0.66);
         for (const name of ['ic_launcher', 'ic_launcher_round']) write(path.join(res, `mipmap-${density}/${name}.png`), bytes);
-        // Android adaptive foreground: the full mark fits inside the 66dp safe area.
-        const mark = await sharp(logo).resize(Math.round(62 * scale), Math.round(62 * scale), { fit: 'inside' }).toBuffer();
+        // Fit the complete square artwork INSIDE the 66dp safe circle, including
+        // the bottom corners of ACTIV: 46 * sqrt(2) < 66. A 62dp square clips.
+        const mark = await sharp(logo).resize(Math.round(46 * scale), Math.round(46 * scale), { fit: 'inside' }).toBuffer();
         const foreground = await sharp({ create: { width: 108 * scale, height: 108 * scale, channels: 4, background: '#00000000' } }).composite([{ input: mark, gravity: 'centre' }]).png().toBuffer();
         write(path.join(res, `drawable-${density}/ic_launcher_foreground.png`), foreground);
     }

@@ -4,6 +4,7 @@ const { personalizeUpdate, personalizeText } = require('../common/recipientPerso
 
 const line = (value, max) => email.htmlToText(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 const templateName = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_TEMPLATE || 'activ_association_update_v2';
+const templateCategory = () => String(process.env.ASSOCIATION_UPDATE_WHATSAPP_CATEGORY || 'MARKETING').toUpperCase() === 'UTILITY' ? 'UTILITY' : 'MARKETING';
 const templateLanguage = () => process.env.ASSOCIATION_UPDATE_WHATSAPP_LANGUAGE || 'en_US';
 const templateBody = 'Dear *{{1}}*,\n\n*ACTIV association news and updates*\n\n*{{2}}*\n{{3}}\n\nSign in to read the full update and view any poster or document:\n{{4}}\n\nYou can manage WhatsApp association updates in your ACTIV notification settings.';
 
@@ -44,7 +45,7 @@ function render(update, member) {
 }
 
 function templateDefinition() {
-    return { name: templateName(), language: templateLanguage(), category: 'MARKETING', components: [
+    return { name: templateName(), language: templateLanguage(), category: templateCategory(), components: [
         { type: 'BODY', text: templateBody, example: { body_text: [['Tharun', 'Member learning programme',
             'Dear member, please join our upcoming learning programme. Open this update for the schedule and registration details.',
             'https://activ.org.in/member/updates/507f1f77bcf86cd799439011']] } },

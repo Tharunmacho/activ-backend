@@ -2,9 +2,13 @@ const TOKEN = /(?<!\{)\{\s*([a-z][a-z0-9_]{0,39})\s*\}(?!\})/gi;
 const clean = value => String(value ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
 const formatDate = value => value && Number.isFinite(new Date(value).getTime())
     ? new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(new Date(value)) : '';
+// A salutation is taken from the gender the member recorded — never guessed
+// from their name. No gender on record (or "Others") leaves it blank so the
+// editor's general / per-member value, or the preview warning, takes over.
+const salutation = gender => ({ male: 'Mr', female: 'Ms' }[clean(gender).toLowerCase()] || '');
 const BUILTINS = [
     ['name', 'Member name', 'Profile name; otherwise ACTIVian.'],
-    ['title', 'Title (Mr / Ms / Dr)', 'Enter a shared value or a value for each member. Never inferred.'],
+    ['title', 'Title (Mr / Ms / Dr)', "Mr or Ms from the gender on the member's profile. Enter a value to override it, or to cover members with no gender recorded."],
     ['company_name', 'Company name', 'Membership application company, then the earliest active company.'],
     ['date', 'Publication date', 'The date this update is published, in India time.'],
     ['renewal_date', 'Membership expiry / renewal date', 'Recorded expiry date; blank for lifetime or missing expiry.'],
@@ -21,7 +25,7 @@ const BUILTINS = [
 const builtinKeys = new Set(BUILTINS.map(row => row.key));
 function variableValues(update = {}, recipient = {}) {
     const values = Object.assign(Object.create(null), {
-        name: clean(recipient.fullName).replace(/\s+/g, ' ').slice(0, 160), title: '',
+        name: clean(recipient.fullName).replace(/\s+/g, ' ').slice(0, 160), title: salutation(recipient.gender),
         company_name: clean(recipient.companyName), date: formatDate(update.publishedAt || update.createdAt),
         renewal_date: recipient.membershipType === 'lifetime' || recipient.isLifetime ? '' : formatDate(recipient.membershipExpiresAt),
         fee: '', renewal_fee: '', last_paid_fee: clean(recipient.lastPaidFee),

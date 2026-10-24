@@ -129,6 +129,14 @@ async function main() {
     await request('/event-bookings/event/' + restricted._id, { token: '', status: 404 });
     await request('/event-bookings/event/' + targeted._id, { token: members.paid.token, status: 404 });
 
+    const firstFreeBooking = await Booking.findOne({ eventId: free._id, userId: members.unpaid.id }).lean();
+    const freeBookingCount = await Booking.countDocuments({ eventId: free._id });
+    const repeated = await request('/event-bookings/event/' + free._id,
+        { token: members.unpaid.token, method: 'POST', body: person(1), status: 201 });
+    assert.equal(repeated.duplicate, true, 'an immediate identical retry returns the existing booking');
+    assert.equal(repeated.bookingRef, firstFreeBooking.bookingRef);
+    assert.equal(await Booking.countDocuments({ eventId: free._id }), freeBookingCount, 'retry never reserves another seat');
+    await Booking.collection.updateOne({ _id: firstFreeBooking._id }, { $set: { createdAt: new Date(Date.now() - 31000) } });
     await request('/event-bookings/event/' + free._id, { token: members.unpaid.token, method: 'POST', body: person(1), status: 409 });
     await Event.updateOne({ _id: free._id }, { $set: { capacity: 2 } });
     const waiting = await request('/event-bookings/event/' + free._id, { token: '', method: 'POST', status: 201, body: person(5) });
