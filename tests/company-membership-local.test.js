@@ -1,0 +1,134 @@
+// Real isolated Mongo documents exercise payment claims, number allocation and
+// HTTP ownership checks. No production data or outgoing notifications.
+process.env.NODE_ENV = 'test';
+process.env.PAYMENT_MODE = 'mock';
+process.env.PAYMENT_SIGNING_SECRET = 'company-membership-fixture-only';
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const mongoose = require('mongoose');
+const express = require('express');
+const request = require('supertest');
+const { MongoMemoryServer } = require('mongodb-memory-server-core');
+let mongo;
+(async () => {
+    mongo = await MongoMemoryServer.create({ binary: { downloadDir: path.resolve(__dirname, '../node_modules/.cache/mongodb-memory-server') }, instance: { ip: '127.0.0.1' } });
+    assert.match(mongo.getUri(), /^mongodb:\/\/127\.0\.0\.1:/);
+    await mongoose.connect(mongo.getUri(), { autoIndex: false });
+    const Member = require('../src/modules/members/memberdetails.model');
+    const Company = require('../src/modules/members/company.model');
+    const Order = require('../src/modules/payment/paymentorder.model');
+    const Business = require('../src/modules/members/businessinfo.model');
+    const Product = require('../src/models/Product');
+    const publishing = require('../src/modules/members/companyPublishing');
+    const companyMembership = require('../src/modules/members/companyMembership');
+    const directory = require('../src/modules/members/directory.service');
+    const notifications = [];
+    require('../src/modules/notifications/notification.service').dispatchInBackground = (...args) => notifications.push(args);
+    const now = new Date();
+    const future = new Date(now.getTime() + 180 * 86400000);
+    const makeMember = extra => Member.create({ fullName: 'Company Member', email: new mongoose.Types.ObjectId() + '@example.test', phoneNumber: '9000000000',
+        state: 'Tamil Nadu', district: 'Chennai', block: 'Kodambakkam', memberType: 'business',
+        membershipStatus: 'active', membershipType: 'annual', membershipActivatedAt: now, membershipExpiresAt: future,
+        paymentAmount: 5000, paymentId: 'PERSONAL-PAYMENT', ...extra });
+    const life = await makeMember({ membershipTier: 'platinum', membershipType: 'lifetime', membershipNumber: 'ACTIV-LIF-20261026-001', paymentAmount: 200000 });
+    const ordinary = await makeMember({ membershipNumber: 'ACTIV-BEG-20261026-001' });
+    const foreign = await makeMember({ membershipNumber: 'ACTIV-BEG-20261026-900' });
+    const makeCompany = (owner, businessName, offset, extra = {}) => Company.create({ userId: owner._id, businessName, businessType: 'Manufacturing',
+        mobileNumber: '9000000000', location: 'Chennai', status: 'active', isActive: true, createdAt: new Date(now.getTime() + offset), ...extra });
+    const lifeA = await makeCompany(life, 'Lifetime Alpha', 0);
+    const lifeB = await makeCompany(life, 'Lifetime Beta', 1000, { msmeUdyamNumber: 'UDYAM-BETA', gstNumber: 'GST-BETA' });
+    const first = await makeCompany(ordinary, 'Included company', 0);
+    const extra = await makeCompany(ordinary, 'Private company token', 1000, { isActive: false });
+    const unpaid = await makeCompany(ordinary, 'Another private company', 2000, { isActive: false });
+    const outsider = await makeCompany(foreign, 'Foreign company', 0);
+    // The old application name must not override the selected company.
+    await Business.collection.insertOne({ userId: life._id, organizationName: 'Original application company', businessActivities: 'Original sector' });
+    let actor = life;
+    const app = express();
+    app.use((req, res, next) => { req.user = { userId: String(actor._id) }; next(); });
+    const extras = require('../src/modules/members/memberExtras.controller');
+    const businessController = require('../src/modules/members/business.controller');
+    app.get('/certificate/:kind', extras.getCertificate);
+    app.get('/companies', extras.listCompanies);
+    app.get('/public/:id', businessController.getPublicCompany);
+    app.use((err, req, res, next) => res.status(err.statusCode || 500).json({ message: err.message }));
+    const cert = async company => (await request(app).get(`/certificate/membership?companyId=${company._id}`).expect(200)).body.data;
+    const a = await cert(lifeA), b = await cert(lifeB);
+    assert.equal(a.member.companyName, 'Lifetime Alpha');
+    assert.equal(b.member.companyName, 'Lifetime Beta');
+    assert.equal(a.member.membershipNumber, life.membershipNumber);
+    assert.equal(b.member.membershipNumber, life.membershipNumber);
+    assert.equal(a.reference, b.reference, 'same lifetime membership certificate reference');
+    assert.equal(b.member.udyamNumber, 'UDYAM-BETA');
+    assert.equal(b.validUntil, null);
+    assert.equal(b.companyMembership, false);
+    assert.equal((await publishing.ownerContext(life._id)).published.size, 2);
+    await request(app).get(`/certificate/membership?companyId=${outsider._id}`).expect(404);
+    await request(app).get('/certificate/membership?companyId=invalid').expect(404);
+    const tax = (await request(app).get(`/certificate/tax-exemption?companyId=${lifeB._id}`).expect(200)).body.data;
+    assert.equal(tax.companyId, '');
+    assert.equal(tax.member.companyName, 'Original application company');
+    assert.equal(tax.member.membershipNumber, life.membershipNumber);
+    actor = ordinary;
+    assert.equal((await cert(first)).member.membershipNumber, ordinary.membershipNumber);
+    await request(app).get(`/certificate/membership?companyId=${extra._id}`).expect(403);
+    assert.equal((await request(app).get('/companies').expect(200)).body.data.companies.length, 3, 'owner sees private drafts');
+    await Company.updateOne({ _id: first._id }, { $set: { isActive: false } });
+    await assert.rejects(publishing.assertCanPublish(ordinary._id, extra._id), /one company/, 'unpublishing does not transfer included membership');
+    await Company.updateOne({ _id: first._id }, { $set: { isActive: true } });
+    actor = foreign;
+    await request(app).get(`/public/${extra._id}`).expect(404);
+    actor = ordinary;
+    await request(app).get(`/public/${extra._id}`).expect(200);
+    const paymentService = require('../src/modules/payment/payment.service');
+    const order = await Order.create({ orderId: 'company-payment-fixture', memberId: ordinary._id, companyId: extra._id, orderType: 'company_listing',
+        email: ordinary.email, amount: 5000, currency: 'INR', planId: 'basic', planName: 'Starter', membershipType: 'annual', provider: 'instamojo',
+        status: 'created', expiresAt: future });
+    await assert.rejects(companyMembership.ensureCompanyNumber(order), /verified company payment/);
+    await paymentService.settleMembershipOrder(order, 'MOJO-COMPANY-TEST');
+    const paid = await Order.findById(order._id).lean();
+    assert.equal(paid.status, 'paid');
+    const paidCompany = await Company.findById(extra._id).lean();
+    assert.match(paidCompany.membershipNumber, /^ACTIV-BEG-\d{8}-\d{3,9}$/);
+    assert.notEqual(paidCompany.membershipNumber, ordinary.membershipNumber);
+    const secondCert = await cert(extra);
+    assert.equal(secondCert.member.companyName, extra.businessName);
+    assert.equal(secondCert.member.membershipNumber, paidCompany.membershipNumber);
+    assert.equal(secondCert.companyMembership, true);
+    assert.equal((await publishing.ownerContext(ordinary._id)).published.size, 2);
+    assert.equal(notifications.length, 1);
+    await paymentService.settleMembershipOrder(order, 'MOJO-COMPANY-TEST');
+    assert.equal(notifications.length, 1, 'payment replay never re-announces');
+    const sameNumbers = await Promise.all(Array.from({ length: 6 }, () => companyMembership.ensureCompanyNumber(paid)));
+    assert.ok(sameNumbers.every(c => c.membershipNumber === paidCompany.membershipNumber));
+    const renewed = await Order.create({ ...paid, _id: new mongoose.Types.ObjectId(), orderId: 'company-renew-fixture', status: 'created', paidAt: undefined });
+    await paymentService.settleMembershipOrder(renewed, 'MOJO-RENEW-TEST');
+    assert.equal((await Company.findById(extra._id)).membershipNumber, paidCompany.membershipNumber, 'renewal keeps company ID');
+    const unchanged = await Member.findById(ordinary._id).lean();
+    for (const field of ['membershipNumber', 'paymentAmount', 'paymentId']) assert.equal(unchanged[field], ordinary[field]);
+    actor = foreign;
+    await request(app).get(`/public/${extra._id}`).expect(200);
+    await request(app).get(`/public/${unpaid._id}`).expect(404);
+    const rows = [{ userId: ordinary._id, _id: first._id }, { userId: ordinary._id, _id: unpaid._id }];
+    assert.deepEqual(await directory.publishedOwnersOf(rows.slice(1)), [], 'private company names cannot match a public search');
+    assert.deepEqual(await directory.publishedOwnersOf(rows), [String(ordinary._id)]);
+    await Product.collection.insertOne({ userId: String(ordinary._id), companyId: unpaid._id, name: 'Privateproductneedle', category: 'Privateproductneedle', isActive: true });
+    assert.deepEqual(await directory.ownersSellingLike('Privateproductneedle'), [], 'private product names cannot match a public search');
+    await Company.updateOne({ _id: unpaid._id }, { $set: { isActive: true } });
+    assert.equal((await publishing.ownerContext(ordinary._id)).published.size, 2, 'a raw active flag cannot bypass payment');
+    // Concurrent first reads of an old verified paid listing converge on one ID.
+    const legacy = await makeCompany(ordinary, 'Legacy paid company', 3000);
+    const oldOrder = await Order.create({ ...paid, _id: new mongoose.Types.ObjectId(), orderId: 'legacy-paid-fixture', companyId: legacy._id });
+    const concurrent = await Promise.all(Array.from({ length: 5 }, () => companyMembership.ensureCompanyNumber(oldOrder)));
+    assert.equal(new Set(concurrent.map(c => c.membershipNumber)).size, 1);
+    assert.notEqual(concurrent[0].membershipNumber, paidCompany.membershipNumber);
+    await Order.updateMany({ companyId: extra._id }, { $set: { paidAt: new Date('2000-01-01') } });
+    const expiredOnly = publishing.publicationState(unchanged, [paidCompany], [{ ...paid, paidAt: new Date('2000-01-01') }]);
+    assert.equal(publishing.decorate(paidCompany, expiredOnly).publication.paymentRequired, true, 'expired separate ID cannot reuse the included slot');
+    actor = ordinary;
+    await request(app).get(`/certificate/membership?companyId=${extra._id}`).expect(403);
+    actor = foreign;
+    await request(app).get(`/public/${extra._id}`).expect(404);
+    console.log('PASS company membership: lifetime switching/shared ID, ordinary included company, private draft visibility, verified per-company IDs, concurrent allocation, payment replay/renewal, expiry, tax isolation and private search exclusion.');
+})().then(async () => { await mongoose.disconnect(); await mongo?.stop(); process.exit(0); })
+    .catch(async error => { console.error(error); await mongoose.disconnect(); await mongo?.stop(); process.exit(1); });

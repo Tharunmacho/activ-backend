@@ -8,6 +8,7 @@ const Order = require('../src/modules/payment/paymentorder.model');
 const notifications = [];
 require('../src/modules/notifications/notification.service').dispatchInBackground = (...args) => notifications.push(args);
 const publishing = require('../src/modules/members/companyPublishing');
+require('../src/modules/members/memberNumber').prepareMembershipNumber = async () => 'ACTIV-BEG-20261026-002';
 const uid = new mongoose.Types.ObjectId().toString();
 const member = { _id: uid, email: 'fixture@example.test', membershipStatus: 'active', membershipType: 'annual', membershipExpiresAt: new Date(Date.now() + 86400000 * 200), isActive: true, paymentId: 'original-payment', paymentAmount: 5000 };
 const first = { _id: new mongoose.Types.ObjectId().toString(), userId: uid, isActive: true, status: 'pending', createdAt: new Date('2026-01-01') };
@@ -49,6 +50,7 @@ async function main() {
     assert.equal(notifications[0][0], 'COMPANY_PAYMENT_CONFIRMED');
     assert.equal(notifications[0][2].data.companyId, second._id);
     assert.equal((await publishing.ownerContext(uid)).published.size, 2);
+    assert.equal(second.membershipNumber, 'ACTIV-BEG-20261026-002');
     assert.equal(member.paymentAmount, 5000); assert.equal(member.paymentId, 'original-payment');
     await assert.rejects(orderService.completePayment({ userId: uid }, { ...auth }), /already/);
     // Real gateway settlement shares the same immutable membership behavior.

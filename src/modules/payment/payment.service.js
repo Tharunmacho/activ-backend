@@ -557,7 +557,10 @@ class PaymentService {
         }, { $set: { settlementToken: token, settlementStartedAt: new Date() } }, { new: true });
         if (!claimed) {
             const fresh = await PaymentOrder.findById(order._id);
-            if (fresh && fresh.status === 'paid') return { success: true, message: 'Already processed' };
+            if (fresh && fresh.status === 'paid') {
+                if (fresh.orderType === 'company_listing') await require('../members/companyMembership').ensureCompanyNumber(fresh);
+                return { success: true, message: 'Already processed' };
+            }
             throw ApiError.badRequest('This payment is already being confirmed. Please retry shortly.');
         }
         try {
@@ -571,6 +574,7 @@ class PaymentService {
                     $unset: { settlementToken: '', settlementStartedAt: '' }
                 }, { new: true });
                 if (!settled) throw ApiError.badRequest('Payment confirmation is being retried');
+                await require('../members/companyMembership').ensureCompanyNumber(settled);
                 await this.announceCompanyPayment(settled, company);
                 return { success: true, message: 'Company publishing payment confirmed' };
             }

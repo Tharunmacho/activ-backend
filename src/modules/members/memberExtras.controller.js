@@ -486,12 +486,19 @@ const getCertificate = asyncHandler(async(req, res) => {
      * LIFETIME membership returns null there, and the client prints “Lifetime”
      * rather than an invented date far in the future.
      */
-    const type = String(member.membershipType || '').toLowerCase();
-    const activatedAt = member.membershipActivatedAt || member.approvedAt || member.createdAt || null;
+    // Company selection is an explicit, owner-scoped request. Tax documents
+    // always describe the donor's personal payment and ignore this selection.
+    const selected = kind === 'membership' && req.query.companyId
+        ? await require('./companyMembership').certificateCompany(member, req.query.companyId) : null;
+    const certificateNumber = selected?.membershipNumber || membershipNumberFor(member);
+    const type = String(selected?.membershipType || member.membershipType || '').toLowerCase();
+    const activatedAt = selected?.activatedAt || member.membershipActivatedAt || member.approvedAt || member.createdAt || null;
 
     let validUntil;
     if (kind === 'tax-exemption') {
         validUntil = endOfFinancialYear(activatedAt || issuedAtForYear());
+    } else if (selected?.separate) {
+        validUntil = selected.validUntil;
     } else {
         validUntil = require('./membershipDates').lastValidDay(require('./membershipState').periodEnd({ membershipType: type, membershipTier: member.membershipTier, membershipExpiresAt: member.membershipExpiresAt, membershipActivatedAt: activatedAt }));
     }
@@ -514,9 +521,9 @@ const getCertificate = asyncHandler(async(req, res) => {
             ? PaymentOrder.find({ memberId: id, status: 'paid', orderType: 'membership' })
                 .sort({ paidAt: 1 }).limit(12).lean().catch(() => [])
             : [],
-        Company.findOne({ userId: id, isActive: { $ne: false } }).sort({ createdAt: 1, _id: 1 }).select('businessName businessType').lean(),
+        selected ? selected.company : Company.findOne({ userId: id, isActive: { $ne: false } }).sort({ createdAt: 1, _id: 1 }).select('businessName businessType').lean(),
     ]);
-    const companyIdentity = require('./certificateIdentity').certificateIdentity(business, company);
+    const companyIdentity = require('./certificateIdentity').certificateIdentity(business, company, { selectedCompany: !!selected });
     const clean = (v) => String(v === null || v === undefined ? '' : v).trim();
     const MODE = { upi: 'UPI', card: 'Card', netbanking: 'Net banking', wallet: 'Wallet', neft: 'NEFT', cash: 'Cash', cheque: 'Cheque' };
     const modeOf = (m) => MODE[clean(m).toLowerCase()] || (clean(m) ? clean(m).replace(/\b\w/g, (c) => c.toUpperCase()) : 'Online');
@@ -525,9 +532,11 @@ const getCertificate = asyncHandler(async(req, res) => {
         kind,
         title: spec.title,
         body: spec.body,
+        companyId: selected ? String(selected.company._id) : '',
+        companyMembership: !!selected?.separate,
         member: {
             name: member.fullName || '',
-            membershipNumber: membershipNumberFor(member),
+            membershipNumber: certificateNumber,
             email: member.email || '',
             block: member.block || '',
             district: member.district || '',
@@ -541,8 +550,8 @@ const getCertificate = asyncHandler(async(req, res) => {
             /** The membership certificate's company block. */
             companyName: companyIdentity.companyName,
             businessSector: companyIdentity.businessSector,
-            udyamNumber: clean(financial && financial.udyamNumber).toUpperCase(),
-            gstNumber: clean(financial && financial.gstNumber).toUpperCase(),
+            udyamNumber: clean(selected ? company.msmeUdyamNumber : financial && financial.udyamNumber).toUpperCase(),
+            gstNumber: clean(selected ? company.gstNumber : financial && financial.gstNumber).toUpperCase(),
         },
         /** `annual` | `lifetime` | `''`. The client words it. */
         membershipType: type === 'annual' || type === 'lifetime' ? type : '',
@@ -612,7 +621,7 @@ const getCertificate = asyncHandler(async(req, res) => {
             kind === 'membership' ? 'MEM' : 'TAX',
             // `ACTIV-2026-001` -> `2026-001`, so the reference reads
             // ACTIV-MEM-2026-001-20260929 rather than ACTIV-MEM-ACTIV-….
-            String(membershipNumberFor(member) || '').replace(/^ACTIV-/i, ''),
+            String(certificateNumber || '').replace(/^ACTIV-/i, ''),
             issuedAt.toISOString().slice(0, 10).replace(/-/g, ''),
         ].join('-'),
         // Stamped at read time rather than stored: the certificate is generated

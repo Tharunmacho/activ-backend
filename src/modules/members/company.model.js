@@ -14,6 +14,10 @@ const companySchema = new mongoose.Schema({
         ref: 'MemberDetails',
         required: true
     },
+    // Paid additional companies keep their own identity across renewals. The
+    // included company and Lifetime companies use the member's existing ID.
+    membershipNumber: { type: String, trim: true, default: '' },
+    membershipActivatedAt: { type: Date },
     /**
      * Required — a company record with no name cannot be found, switched to or
      * listed, and every other screen in the business area is addressed to it by

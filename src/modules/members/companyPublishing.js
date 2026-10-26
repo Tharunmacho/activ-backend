@@ -4,6 +4,8 @@ const Member = require('./memberdetails.model');
 const Order = require('../payment/paymentorder.model');
 const ApiError = require('../../core/utils/ApiError');
 const { membershipState } = require('./membershipState');
+const { annualExpiry } = require('./membershipDates');
+const { membershipNumberFor } = require('./memberNumber');
 
 const activeMember = member => !!member && member.isActive !== false && membershipState(member).state === 'active';
 const unlimited = member => activeMember(member) && String(member.membershipTier).toLowerCase() === 'platinum';
@@ -13,9 +15,7 @@ function fundedCompanies(orders, now = new Date()) {
     return new Set(orders.filter(order => {
         if (order.status !== 'paid' || order.orderType !== 'company_listing' || !order.companyId || !order.paidAt) return false;
         if (order.membershipType === 'lifetime') return true;
-        const end = new Date(order.paidAt);
-        end.setFullYear(end.getFullYear() + 1);
-        return end > now;
+        return annualExpiry(order.paidAt) > now;
     }).map(order => id(order.companyId)));
 }
 
@@ -25,17 +25,23 @@ function publicationState(member, companies, orders, now = new Date()) {
     const funded = fundedCompanies(orders, now);
     const active = activeMember(member);
     const all = unlimited(member);
-    const requested = companies.filter(c => c.isActive !== false).sort((a, b) =>
+    const sorted = [...companies].sort((a, b) =>
         new Date(a.createdAt || 0) - new Date(b.createdAt || 0) || id(a._id).localeCompare(id(b._id)));
-    const included = requested.find(c => !funded.has(id(c._id)));
+    const separate = new Set([...companies.filter(c => c.membershipNumber).map(c => id(c._id)),
+        ...orders.filter(o => o.status === 'paid' && o.companyId).map(o => id(o.companyId))]);
+    // The included membership belongs to the first company. Hiding that company
+    // cannot transfer its paid identity to an unpaid additional company.
+    const included = sorted.find(c => !separate.has(id(c._id)));
+    const requested = sorted.filter(c => c.isActive !== false);
     const published = new Set(active ? requested.filter(c => all || funded.has(id(c._id)) || c === included).map(c => id(c._id)) : []);
-    return { funded, active, unlimited: all, includedId: included ? id(included._id) : '', published };
+    return { funded, separate, active, unlimited: all, includedId: included ? id(included._id) : '', published,
+        membershipNumber: member ? membershipNumberFor(member) : '' };
 }
 
 async function ownerContext(userId) {
     const [member, companies, orders] = await Promise.all([
-        Member.findById(userId).select('isActive membershipStatus membershipTier membershipType membershipExpiresAt membershipActivatedAt').lean(),
-        Company.find({ userId }).select('_id isActive createdAt').lean(),
+        Member.findById(userId).select('membershipNumber createdAt isActive membershipStatus membershipTier membershipType membershipExpiresAt membershipActivatedAt').lean(),
+        Company.find({ userId }).select('_id isActive createdAt membershipNumber').lean(),
         Order.find({ memberId: userId, orderType: 'company_listing', status: 'paid' }).select('companyId orderType status paidAt membershipType').lean()
     ]);
     return publicationState(member, companies, orders);
@@ -45,9 +51,13 @@ function decorate(company, state) {
     if (!company) return company;
     const raw = company.toObject ? company.toObject() : company;
     const published = state.published.has(id(raw._id));
-    const canPublish = state.active && (state.unlimited || state.funded.has(id(raw._id)) || !state.includedId || state.includedId === id(raw._id));
+    const canPublish = state.active && (state.unlimited || state.funded.has(id(raw._id))
+        || (!state.includedId && !state.separate.has(id(raw._id))) || state.includedId === id(raw._id));
+    const included = !!state.includedId && state.includedId === id(raw._id);
     return { ...raw, status: published ? 'active' : 'inactive', isActive: published,
         publication: { published, canPublish, memberActive: state.active, unlimited: state.unlimited,
+            included, certificateAvailable: state.active && (state.unlimited || included || state.funded.has(id(raw._id))),
+            membershipNumber: state.unlimited || included ? state.membershipNumber : String(raw.membershipNumber || ''),
             paymentRequired: state.active && !canPublish, publishedCount: state.published.size,
             label: published ? 'Published' : state.active ? 'Not published' : 'Membership required' } };
 }
@@ -61,14 +71,14 @@ async function assertCanPublish(userId, companyId) {
     const state = await ownerContext(userId);
     const result = decorate({ _id: companyId }, state);
     if (!state.active) throw ApiError.forbidden('An active paid membership is required to publish in ACTIV Network.');
-    if (!result.publication.canPublish) throw ApiError.badRequest('Your plan includes one company. Pay the membership fee for this additional company, or unpublish your existing company. Lifetime Membership includes multiple companies.');
+    if (!result.publication.canPublish) throw ApiError.badRequest('Your plan includes one company. Pay the membership fee for this additional company to make it visible to others. Lifetime Membership includes multiple companies under the same membership ID.');
 }
 
 async function publishedIds(ownerIds) {
     if (!ownerIds.length) return [];
     const [members, companies, orders] = await Promise.all([
         Member.find({ _id: { $in: ownerIds } }).select('isActive membershipStatus membershipTier membershipType membershipExpiresAt membershipActivatedAt').lean(),
-        Company.find({ userId: { $in: ownerIds } }).select('userId isActive createdAt').lean(),
+        Company.find({ userId: { $in: ownerIds } }).select('userId isActive createdAt membershipNumber').lean(),
         Order.find({ memberId: { $in: ownerIds }, orderType: 'company_listing', status: 'paid' }).select('memberId companyId orderType status paidAt membershipType').lean()
     ]);
     const grouped = new Map(members.map(m => [id(m._id), { member: m, companies: [], orders: [] }]));
@@ -91,7 +101,7 @@ async function quote(userId, companyId) {
     return { paymentRequired: true, companyId: id(company._id), companyName: company.businessName,
         planId: plan.id, planName: plan.name, amount: plan.amount, membershipType: plan.membershipType,
         term: plan.membershipType === 'lifetime' ? 'One-time payment' : 'One year from payment',
-        message: 'This payment publishes one additional company. Your personal membership and its renewal date stay the same.' };
+        message: 'This payment publishes this additional company with its own membership ID. Your personal membership ID and renewal date stay the same.' };
 }
 
-module.exports = { activeMember, unlimited, publicationState, decorate, decorateOwned, ownerContext, assertCanPublish, publishedIds, quote };
+module.exports = { activeMember, unlimited, fundedCompanies, publicationState, decorate, decorateOwned, ownerContext, assertCanPublish, publishedIds, quote };

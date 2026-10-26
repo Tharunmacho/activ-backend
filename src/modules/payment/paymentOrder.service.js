@@ -433,6 +433,7 @@ class PaymentOrderService {
 
         if (!claimed) throw ApiError.badRequest('This order has already been paid');
         if (claimed.orderType === 'company_listing') {
+            await require('../members/companyMembership').ensureCompanyNumber(claimed);
             const company = await require('../members/company.model').findOneAndUpdate(
                 { _id: claimed.companyId, userId: claimed.memberId }, { $set: { isActive: true, status: 'active' } }, { new: true });
             if (company) await require('./payment.service').announceCompanyPayment(claimed, company);

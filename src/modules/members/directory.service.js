@@ -226,7 +226,8 @@ class DirectoryService {
                 ? await this.ownersSellingLike(term)
                 : [];
 
-            const companyOwners = await Company.find(companyQuery).distinct('userId').catch(() => []);
+            const matchingCompanies = await Company.find(companyQuery).select('_id userId').lean();
+            const companyOwners = await this.publishedOwnersOf(matchingCompanies);
             const owners = sector
                 ? companyOwners
                 : [...(companyOwners || []), ...productOwners];
@@ -373,12 +374,21 @@ class DirectoryService {
 
         const pattern = new RegExp('(^|\\s)' + escaped, 'i');
 
-        const owners = await Product.find({
+        const products = await Product.find({
             isActive: true,
             $or: [{ name: pattern }, { category: pattern }]
-        }).distinct('userId').catch(() => []);
+        }).select('userId companyId').lean();
 
-        return (owners || []).filter((id) => /^[0-9a-fA-F]{24}$/.test(String(id)));
+        return this.publishedOwnersOf(products, 'companyId');
+    }
+
+    // A private company's name/products must not make its owner match a public
+    // search. Filtering only the returned cards still leaks search existence.
+    async publishedOwnersOf(rows, companyField = '_id') {
+        const owners = [...new Set((rows || []).map(row => String(row.userId || '')))]
+            .filter(value => /^[0-9a-fA-F]{24}$/.test(value));
+        const allowed = new Set((await require('./companyPublishing').publishedIds(owners)).map(String));
+        return [...new Set((rows || []).filter(row => allowed.has(String(row[companyField]))).map(row => String(row.userId)))];
     }
 
     /** One member's public directory card, with their catalogue attached. */
