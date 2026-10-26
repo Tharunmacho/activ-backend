@@ -15,8 +15,10 @@ const { makeVariantMiddleware } = require('./core/storage/imageVariants');
 
 const app = express();
 
-// Trust reverse proxy for X-Forwarded-For (Caddy/Nginx)
-app.set('trust proxy', 1);
+// Trust the immediate reverse proxy and only the known migration bridge hop.
+const isMigrationBridge = require('proxy-addr').compile(['178.16.137.247/32']);
+app.set('trust proxy', (address, hop) =>
+    hop === 0 || (hop === 1 && isMigrationBridge(address)));
 
 // Serve uploaded images statically from /uploads folder — then from the S3
 // bucket, then from the database, when the disk copy is gone, which on the
