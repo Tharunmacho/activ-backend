@@ -661,9 +661,9 @@ const settledSentence = (ctx = {}) => {
 /** A WhatsApp free-text block, one fact per line, blank facts skipped. */
 const waLines = (rows) => rows.filter(([, v]) => v).map(([icon, v]) => `${icon} ${v}`).join('\n');
 
-/** Where to be: "Online webinar on Zoom", or the venue and its address. */
+/** Where to be: the explicitly saved online platform, or the physical venue. */
 const whereLine = (ctx = {}) => (ctx.isOnline
-    ? (ctx.formatLabel || 'Online webinar')
+    ? (ctx.onlinePlatform ? `Online on ${ctx.onlinePlatform}` : 'Online')
     : (ctx.venueLabel || 'Venue to be announced'));
 
 
@@ -1688,6 +1688,15 @@ const WITH_DOCUMENTS = ['EVENT_BOOKING_CONFIRMED', 'EVENT_BOOKING_REMINDER', 'EV
     'EVENT_REGISTERED', 'EVENT_REMINDER', 'EVENT_UPDATED'];
 const render = (eventName, ctx = {}) => {
     ctx = { ...ctx, planName: require('../members/membershipLabels').displayPlanName(ctx.planName, ctx.planId, ctx.membershipTier) };
+    // Every channel and fallback uses only the optional explicit platform.
+    // Stale descriptive labels must not reintroduce a platform when it is blank.
+    if (/^EVENT_/.test(eventName) && ctx.isOnline) {
+        const platform = String(ctx.onlinePlatform || '').trim();
+        ctx = { ...ctx, onlinePlatform: platform,
+            venue: platform ? `Online (${platform})` : 'Online',
+            venueLabel: platform ? `Online (${platform})` : 'Online',
+            formatLabel: platform ? `Online on ${platform}` : 'Online' };
+    }
     if (eventName === 'EVENT_UPDATED' && ['waitlist', 'pending', 'cancelled'].includes(ctx.bookingStatus)) {
         ctx = { ...ctx, registerUrl: '', joinUrl: '', videoUrl: '', whatsappChannelUrl: '', attachments: [] };
     }

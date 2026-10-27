@@ -6,7 +6,7 @@ const eventShareContent = (event, url = '') => {
     const end = dateOf(event.endAt);
     const date = start?.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'long',year:'numeric'}) || '';
     const weekday = start?.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',weekday:'long'}) || '';
-    const venue = event.mode === 'online' ? `Online${event.onlinePlatform ? ` (${plain(event.onlinePlatform)})` : ''}` : plain(event.venue || event.location);
+    const venue = event.mode === 'online' ? 'Online' : plain(event.venue || event.location);
     const title = [plain(event.title) || 'ACTIV event',date && `on ${date}`,venue && `at ${venue}`].filter(Boolean).join(' ');
     const endDate = end?.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'long',year:'numeric'}) || '';
     const schedule = start ? `${weekday}, ${date} · ${clock(start)}${end && end > start ? ` – ${endDate !== date ? `${endDate}, ` : ''}${clock(end)}` : ''} IST` : 'Date to be confirmed';

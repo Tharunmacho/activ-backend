@@ -113,7 +113,7 @@ const fullWhen = (d) => `${d.toLocaleDateString('en-IN', { timeZone: TZ, weekday
 /** Where it happens, in the words the editor used. */
 const venueOf = (event) => {
     if (str(event.mode).toLowerCase() === 'online') {
-        return `Online${str(event.onlinePlatform) ? ` (${str(event.onlinePlatform)})` : ''}`;
+        return 'Online';
     }
     return oneLine(event.venue || event.location);
 };

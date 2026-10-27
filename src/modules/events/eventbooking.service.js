@@ -142,11 +142,11 @@ const describeSchedule = (startAt, endAt) => {
  */
 const ONLINE_WORDS = /\b(zoom|webinar|online|virtual|google\s*meet|g-?meet|teams|webex|youtube|live\s*stream)\b/i;
 const PLATFORMS = [
-    [/zoom/i, 'Zoom'],
-    [/google\s*meet|g-?meet|meet\.google/i, 'Google Meet'],
-    [/teams/i, 'Microsoft Teams'],
-    [/webex/i, 'Webex'],
-    [/youtu/i, 'YouTube Live']
+    [/^zoom$/i, 'Zoom'],
+    [/^(google\s*meet|g-?meet)$/i, 'Google Meet'],
+    [/^(microsoft\s+)?teams$/i, 'Microsoft Teams'],
+    [/^(cisco\s+)?webex$/i, 'Webex'],
+    [/^youtube(?:\s+live)?$/i, 'YouTube Live']
 ];
 const attendanceOf = (event = {}, b = {}) => {
     const venue = str(event.venue || b.eventVenue);
@@ -157,9 +157,12 @@ const attendanceOf = (event = {}, b = {}) => {
 
     const isOnline = event.mode === 'online'
         || (!address && (!venue || ONLINE_WORDS.test(venue)) && (!!url || ONLINE_WORDS.test(hints)));
-    const found = PLATFORMS.find(([re]) => re.test(hints));
-    // The canonical spelling when the platform is recognised ("zoom" -> "Zoom").
-    const platform = isOnline ? ((found ? found[1] : '') || str(event.onlinePlatform)) : '';
+    // Only the platform the organiser explicitly saved may appear in messages.
+    // Links/categories still help identify an online event, but must not invent
+    // a platform label when the optional platform field was left blank.
+    const explicitPlatform = str(event.onlinePlatform);
+    const found = PLATFORMS.find(([re]) => re.test(explicitPlatform));
+    const platform = isOnline ? ((found ? found[1] : '') || explicitPlatform) : '';
     // A category that is nothing but a format word ("ZOOM", "Online webinar").
     const formatWordCategory = isOnline && !!category
         && category.split(/\s+/).every((w) => ONLINE_WORDS.test(w) || /^(event|session|meeting|webinar)s?$/i.test(w));
@@ -1845,7 +1848,7 @@ class EventBookingService {
              * ("Conference", "Workshop") and rides beside it.
              */
             formatLabel: isOnline
-                ? `Online webinar${platform ? ` on ${platform}` : ''}`
+                ? (platform ? `Online on ${platform}` : 'Online')
                 : 'In-person event',
             // "ZOOM" filed as the category is the format, already said above.
             category: formatWordCategory ? '' : (event.category || ''),
