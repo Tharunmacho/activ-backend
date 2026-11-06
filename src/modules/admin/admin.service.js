@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const User = require('../auth/auth.model');
 const Member = require('../members/memberdetails.model');
 const Application = require('../applications/application.model');
+const applicationIdentity = require('../applications/applicationIdentity');
 const ApiError = require('../../core/utils/ApiError');
 const logger = require('../../config/logger');
 const { normalizeStatus, PENDING_STORED_STATUSES } = require('../common/applicationStatus');
@@ -646,14 +647,28 @@ const buildGeoFilter = (field, value) => {
  * per application would mean one admin-collection scan per applicant; asking
  * once and reusing the resolver keeps a 300-row dashboard at a single scan.
  */
+// Read lightweight candidates first. The identity helper looks up every sibling
+// for their confirmed owners, including siblings outside this region/search.
+// Only canonical IDs are capped and hydrated, so a hidden pending duplicate
+// cannot return through a narrower filter or consume a page slot.
+const readCurrentApplications = async(filter = {}, { select = '', limit = 0 } = {}) => {
+    const identityFields = 'userId user status createdAt';
+    const candidates = await Application.find(filter)
+        .select(`${select} ${identityFields}`.trim())
+        .sort({ createdAt: -1, _id: -1 })
+        .lean();
+    const current = await applicationIdentity.filterCurrentApplications(candidates);
+    const rows = limit > 0 ? current.slice(0, limit) : current;
+    if (select || !rows.length) return rows;
+    return Application.find({ _id: { $in: rows.map(row => row._id) } })
+        .sort({ createdAt: -1, _id: -1 })
+        .lean();
+};
+
 const loadApplicants = async(geoFilter, memberFilter, level, scope) => {
     const [totalMembers, applications] = await Promise.all([
         Member.countDocuments(memberFilter).catch(() => 0),
-        Application.find(geoFilter)
-            .sort({ createdAt: -1 })
-            .limit(APPLICANT_FETCH_LIMIT)
-            .lean()
-            .catch(() => [])
+        readCurrentApplications(geoFilter, { limit: APPLICANT_FETCH_LIMIT }).catch(() => [])
     ]);
 
     const emails = [...new Set(
@@ -712,10 +727,9 @@ const CLASSIFY_FIELDS = 'status reviews approvedBy rejectedBy reviewedBy blockAp
  * instead of printing a confident zero.
  */
 const countApplicationBuckets = async(filter = {}, coverageFor = null) => {
-    const rows = await Application.find(filter)
-        .select(`${CLASSIFY_FIELDS}${coverageFor ? ' state district block' : ''}`)
-        .lean()
-        .catch(() => null);
+    const rows = await readCurrentApplications(filter, {
+        select: `${CLASSIFY_FIELDS}${coverageFor ? ' state district block' : ''}`
+    }).catch(() => null);
     if (!Array.isArray(rows)) return null;
 
     const empty = () => ({ total: 0, pending: 0, approved: 0, rejected: 0 });
@@ -768,7 +782,8 @@ class AdminService {
             Member.countDocuments(),
             // The stored spellings, not a case-sensitive /^pending/ that
             // missed 'Pending-Block' and every other canonical one.
-            Application.countDocuments({ status: { $in: PENDING_STORED_STATUSES } }).catch(() => 0),
+            readCurrentApplications({ status: { $in: PENDING_STORED_STATUSES } }, { select: 'status' })
+                .then(rows => rows.length).catch(() => 0),
             // A PAID member. There is no `isApproved` on MemberDetails, so
             // that filter matched nothing and this was always 0.
             Member.countDocuments({ membershipStatus: { $in: PAID_MEMBERSHIP_STATUSES } }).catch(() => 0)
@@ -1197,7 +1212,8 @@ class AdminService {
             // legacy tier-named spellings too, but `PENDING_STORED_STATUSES` is
             // the list that is maintained alongside the enum and is what every
             // other query uses.
-            Application.countDocuments({ status: { $in: PENDING_STORED_STATUSES } }).catch(() => 0),
+            readCurrentApplications({ status: { $in: PENDING_STORED_STATUSES } }, { select: 'status' })
+                .then(rows => rows.length).catch(() => 0),
             // Paid members only — this was every member record, approved or not.
             Member.countDocuments({ membershipStatus: { $in: PAID_MEMBERSHIP_STATUSES } }).catch(() => 0)
         ]);
@@ -1846,3 +1862,4 @@ module.exports.buildApplicant = buildApplicant;
 module.exports.classifyForLevel = classifyForLevel;
 module.exports.escapeRegex = escapeRegex;
 module.exports.countApplicationBuckets = countApplicationBuckets;
+module.exports.readCurrentApplications = readCurrentApplications;

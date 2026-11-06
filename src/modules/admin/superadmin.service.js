@@ -400,11 +400,7 @@ class SuperAdminService {
             // MEMBER RECORDS, as the "Total members" tiles say. This was
             // computed and then discarded for the application count.
             Member.countDocuments(memberFilter || {}).catch(() => 0),
-            Application.find(appFilter)
-            .sort({ createdAt: -1 })
-            .limit(GLOBAL_FETCH_LIMIT)
-            .lean()
-            .catch(() => []),
+            adminService.readCurrentApplications(appFilter, { limit: GLOBAL_FETCH_LIMIT }).catch(() => []),
             this.allAdminRows(),
             // Exact over the whole filter — `applications` is capped for the
             // bottleneck list and must not decide the totals.
@@ -604,12 +600,9 @@ class SuperAdminService {
             .limit(SEARCH_LIMIT)
             .lean()
             .catch(() => []),
-            Application.find(anyOf(['fullName', 'email', 'phone', 'block', 'district', 'state']))
-            .select('fullName email phone block district state status createdAt')
-            .sort({ createdAt: -1 })
-            .limit(SEARCH_LIMIT)
-            .lean()
-            .catch(() => []),
+            adminService.readCurrentApplications(anyOf(['fullName', 'email', 'phone', 'block', 'district', 'state']), {
+                select: 'fullName email phone block district state status createdAt', limit: SEARCH_LIMIT
+            }).catch(() => []),
             /*
              * Every tier collection. This searched only the old unified
              * `admins` collection, which no account lives in — so the global
@@ -744,11 +737,9 @@ class SuperAdminService {
         // Status is filtered in memory, not in Mongo: the collection holds three
         // different spellings of every status, so only normalizeStatus can bucket
         // a row correctly.
-        const documents = await Application.find(mongoFilter)
-            .sort({ createdAt: -1 })
-            .limit(GLOBAL_FETCH_LIMIT)
-            .lean()
-            .catch(() => []);
+        const documents = await adminService.readCurrentApplications(mongoFilter, {
+            limit: GLOBAL_FETCH_LIMIT
+        }).catch(() => []);
 
         const validLevels = { block: LEVELS.BLOCK, district: LEVELS.DISTRICT, state: LEVELS.STATE };
         const requestedLevel = validLevels[String(level || '').toLowerCase()];
@@ -974,17 +965,15 @@ class SuperAdminService {
         const mongoFilter = conditions.length > 0 ? { $and: conditions } : {};
 
         const [documents, admins, stateNames, districtNames, blockNames] = await Promise.all([
-            Application.find(mongoFilter)
+            adminService.readCurrentApplications(mongoFilter, {
             /*
              * Everything `tierReviews.tierVerdict` reads. This used to omit
              * `reviews`, `approvedBy`, `reviewedBy` and `stateApprovedAt`, so a
              * file the District or State had approved looked undecided here —
              * the Hub printed "2 pending" beside a Dashboard printing 0.
              */
-            .select('state district block status reviews approvedBy reviewedBy rejectedBy rejectionReason blockApprovedAt districtApprovedAt stateApprovedAt createdAt')
-            .limit(GLOBAL_FETCH_LIMIT)
-            .lean()
-            .catch(() => []),
+                select: 'state district block status reviews approvedBy reviewedBy rejectedBy rejectionReason blockApprovedAt districtApprovedAt stateApprovedAt createdAt'
+            }).catch(() => []),
             this.allAdminRows(),
             Application.distinct('state').catch(() => []),
             Application.distinct('district').catch(() => []),

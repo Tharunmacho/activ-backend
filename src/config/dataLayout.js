@@ -59,6 +59,7 @@ const MODELS = {
     PersonalInfo1: ['members', 'member_personal_details', A, 'additional form for personal information 1'],
     MemberDeclaration: ['members', 'member_declarations', A, 'additional form for declaration 4'],
     Application: ['members', 'applications', A, 'applications'],
+    ApplicationSubmissionClaim: ['members', 'application_submission_claims', A, 'application_submission_claims'],
     PlatinumRequest: ['members', 'platinum_requests', A, 'platinum_requests'],
     MembershipPlan: ['members', 'membership_plans', A, 'membershipPlans'],
     MembershipSettings: ['members', 'membership_settings', A, 'membershipSettings'],

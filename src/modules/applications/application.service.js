@@ -13,7 +13,7 @@ const ApiError = require('../../core/utils/ApiError');
 const cacheClient = require('../../core/cache/cacheClient');
 const { CACHE_KEYS, CACHE_TTL } = require('../../core/cache/cacheKeys');
 const logger = require('../../config/logger');
-const { normalizeStatus, isPending, PENDING_STORED_STATUSES } = require('../common/applicationStatus');
+const { normalizeStatus, isPending } = require('../common/applicationStatus');
 /* The member's own row, from the shared fifteen-second cache — see the note
    at the top of `memberContext.js` for why one exists at all. */
 const { memberSnapshot } = require('../common/memberContext');
@@ -21,6 +21,8 @@ const regionService = require('../regions/region.service');
 const auditService = require('../audit/audit.service');
 const notificationService = require('../notifications/notification.service');
 const membershipContext = require('../notifications/membershipContext');
+const applicationIdentity = require('./applicationIdentity');
+const submissionClaims = require('./applicationSubmissionClaim');
 
 /**
  * The approval state machine, keyed by *normalized* status.
@@ -74,6 +76,23 @@ const requiredSnapshot = data => JSON.stringify([
 ]);
 
 class ApplicationService {
+    async syncSubmittedMemberType(userDetails, kind) {
+        if (!userDetails?.save || !kind) return;
+        try {
+            userDetails.memberType = kind;
+            userDetails.registrationType = kind;
+            await userDetails.save();
+        } catch (error) {
+            logger.warn('Could not stamp member type on the profile', { userId: String(userDetails._id), error: error.message });
+        }
+    }
+
+    async assertCurrentApplication(application) {
+        if (!(await applicationIdentity.filterCurrentApplications([application])).length) {
+            throw ApiError.conflict('A newer or approved application is already on file for this member. Refresh the application list.');
+        }
+    }
+
     guardReviewRevision(application) {
         application.$where = { status: application.status, updatedAt: application.updatedAt };
     }
@@ -131,18 +150,24 @@ class ApplicationService {
     }
 
     async createApplication(userId, applicationData) {
-        // Check for existing pending application
-        const existingApplication = await Application.findOne({
-            userId: userId,
-            // Every spelling that means "not decided" — matched against what is
-            // ON DISK, so a legacy row still blocks a duplicate submission.
-            status: { $in: PENDING_STORED_STATUSES }
-        });
-
         // Fetch user profile details to ensure required schema fields exist
-        let userDetails = await MemberDetails.findOne({ $or: [{ userId }, { _id: userId }, { memberId: userId }] });
+        let userDetails = await MemberDetails.findById(userId);
+        if (!userDetails) {
+            const matches = await MemberDetails.find({ $or: [{ userId }, { memberId: { $in: applicationIdentity.legacyIds([userId]) } }] }).limit(2);
+            if (matches.length > 1) throw ApiError.conflict('This legacy account identifier is ambiguous. Contact support.');
+            userDetails = matches[0];
+        }
         if (!userDetails) {
             userDetails = await MemberAuth.findById(userId);
+        }
+        if (!userDetails) throw ApiError.notFound('Member account not found');
+        const identity = await applicationIdentity.confirmedOwnerIds([userDetails._id, userId]);
+        const ownerIds = identity.ids.filter(id => (identity.ownerMap.get(id) || id) === String(userDetails._id));
+        // New submissions use the authenticated profile's stable ID. Only its
+        // recorded aliases may select legacy applications.
+        userId = userDetails._id;
+        if (['active', 'completed'].includes(String(userDetails.membershipStatus || '').toLowerCase())) {
+            throw ApiError.conflict('Your membership is already active. Update your profile from your dashboard.');
         }
 
         const appData = applicationData.data || applicationData;
@@ -153,7 +178,7 @@ class ApplicationService {
         if (!submittedPersonal || typeof submittedPersonal !== 'object' || Array.isArray(submittedPersonal)) {
             throw ApiError.badRequest('Personal details must be an object.');
         }
-        const savedPersonal = await PersonalInfo1.findOne({ userId }).lean();
+        const savedPersonal = await PersonalInfo1.findOne({ userId: { $in: ownerIds } }).sort({ updatedAt: -1 }).lean();
         // Omitted fields can come from the applicant's own saved form. Explicit
         // blanks are rejected; they must not silently fall back to an old answer.
         const personalInput = personalFrom(userDetails, savedPersonal);
@@ -166,15 +191,12 @@ class ApplicationService {
             || internationalFromPhone(userDetails?.phoneNumber || userDetails?.phone).international;
         const personal = assertCompletePersonal(personalInput, { international: storedAbroad });
         const [storedBusiness, storedDeclaration] = await Promise.all([
-            BusinessInfo.findOne({ userId }).lean(),
-            MemberDeclaration.findOne({ $or: [{ userId }, { memberId: userId }] }).lean(),
+            BusinessInfo.findOne({ userId: { $in: ownerIds } }).sort({ updatedAt: -1 }).lean(),
+            MemberDeclaration.findOne({ $or: [{ userId: { $in: ownerIds } }, { memberId: { $in: ownerIds } }] }).sort({ updatedAt: -1 }).lean(),
         ]);
         const sections = completeSections(appData, storedBusiness, storedDeclaration, applicationData);
         const kind = sections.businessInfo.registrationType;
         const derivedRole = kind;
-        if (!existingApplication && await Application.exists({ userId, status: 'Approved' })) {
-            throw ApiError.conflict('Your application is already approved. Update your profile from your dashboard.');
-        }
 
         const payload = {
             fullName: applicationData.fullName || (userDetails && (userDetails.fullName || userDetails.name)) || 'Applicant',
@@ -274,6 +296,12 @@ class ApplicationService {
             isInternational: payload.isInternational, place: payload.place || '',
         });
 
+        const applicationId = await submissionClaims.reserveApplicationId(userId, ownerIds);
+        const existingApplication = await Application.findById(applicationId);
+        if (existingApplication && !isPending(existingApplication.status)) {
+            throw ApiError.conflict('Your application changed during submission. Refresh its status before trying again.');
+        }
+
         if (existingApplication) {
             // A retry is a fresh, complete submission by the same owner. Keep
             // optional saved sections, but never carry a stale required answer
@@ -282,7 +310,7 @@ class ApplicationService {
             const changed = requiredSnapshot(existingApplication.data) !== requiredSnapshot(nextData);
             // An admin may decide while the applicant is editing. Do not replace
             // a newly decided file, or a more recent retry, with stale answers.
-            existingApplication.$where = { status: { $in: PENDING_STORED_STATUSES }, updatedAt: existingApplication.updatedAt };
+            existingApplication.$where = { status: existingApplication.status, updatedAt: existingApplication.updatedAt };
             existingApplication.set({ fullName: payload.fullName, email: payload.email, phone: payload.phone,
                 state: payload.state, district: payload.district, block: payload.block, place: payload.place,
                 isInternational: payload.isInternational, country: payload.country,
@@ -305,20 +333,32 @@ class ApplicationService {
             }
             if (changed) await this.logActivity(userId, 'application_resubmitted', 'Application', existingApplication._id, 'Membership application answers resubmitted for review');
             await this.clearRegistrationDraft(userId, personal, payload);
+            await this.syncSubmittedMemberType(userDetails, kind);
             await this.invalidateReviewCaches(existingApplication);
             return existingApplication;
         }
 
-        const application = new Application({
+        const candidate = new Application({
             ...payload,
+            _id: applicationId,
             userId: userId,
             // One pending state. Every admin in the applicant's own region —
             // block, district and state — sees it from this moment.
             status: 'Pending'
         });
 
-        await application.save();
-        await this.clearRegistrationDraft(userId, personal, payload);
+        const { application, inserted } = await submissionClaims.insertReservedApplication(candidate);
+        if (!application || !isPending(application.status)) {
+            throw ApiError.conflict('Your application changed during submission. Refresh its status before trying again.');
+        }
+        // A concurrent worker may have inserted different valid answers. Use
+        // the stored winner for metadata, and announce only the actual insert.
+        await this.clearRegistrationDraft(userId, application.data.personalDetails, application);
+        if (!inserted) {
+            await this.syncSubmittedMemberType(userDetails, application.registrationType || application.memberType);
+            await this.invalidateReviewCaches(application);
+            return application;
+        }
 
         await this.logActivity(userId, 'application_submitted', 'Application', application._id,
             'Membership application submitted');
@@ -591,19 +631,25 @@ class ApplicationService {
         */
         const userDetails = await memberSnapshot(String(userId || ''));
         const userEmail = userDetails ? userDetails.email : null;
+        const identity = await applicationIdentity.confirmedOwnerIds([userId]);
+        const canonicalOwner = identity.ownerMap.get(String(userId)) || String(userId);
+        const ownerIds = identity.ids.filter(id => (identity.ownerMap.get(id) || id) === canonicalOwner);
 
         const queryConditions = [
-            { userId: userId },
-            { user: userId }
+            { userId: { $in: ownerIds } },
+            { userId: null, user: { $in: applicationIdentity.legacyIds(ownerIds) } }
         ];
 
         if (userEmail) {
-            queryConditions.push({ email: userEmail });
+            // Email is a legacy fallback only for files with no owner ID. An
+            // application belonging to another owner is never adopted just
+            // because its submitted contact snapshot uses the same email.
+            queryConditions.push({ email: userEmail, userId: null, user: null });
         }
 
-        const applications = await Application.find({ $or: queryConditions })
+        const applications = await applicationIdentity.filterCurrentApplications(await Application.find({ $or: queryConditions })
             .sort({ createdAt: -1 })
-            .lean();
+            .lean(), { includeRejectedHistory: true });
 
         /*
          * THE THREE TIER VERDICTS, RESOLVED HERE AND NOT IN THE BROWSER.
@@ -633,13 +679,10 @@ class ApplicationService {
     async getApplications(filter = {}, page = 1, limit = 20) {
         const skip = (page - 1) * limit;
 
-        const applications = await Application.find(filter)
-            .populate('userId', 'fullName email')
-            .skip(skip)
-            .limit(limit)
-            .sort({ createdAt: -1 });
-
-        const total = await Application.countDocuments(filter);
+        const current = await applicationIdentity.filterCurrentApplications(await Application.find(filter)
+            .sort({ createdAt: -1 }));
+        const total = current.length;
+        const applications = await Application.populate(current.slice(skip, skip + limit), { path: 'userId', select: 'fullName email' });
 
         return {
             applications,
@@ -667,6 +710,7 @@ class ApplicationService {
         if (!application) {
             throw ApiError.notFound('Application not found');
         }
+        await this.assertCurrentApplication(application);
         this.guardReviewRevision(application);
 
         const current = normalizeStatus(application.status);
@@ -846,6 +890,7 @@ class ApplicationService {
         if (!application) {
             throw ApiError.notFound('Application not found');
         }
+        await this.assertCurrentApplication(application);
         this.guardReviewRevision(application);
 
         if (user) await this.assertWithinScope(application, tier, user);
