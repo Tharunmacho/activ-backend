@@ -1562,13 +1562,15 @@ class ApplicationService {
             if (String(process.env.ADMIN_NEW_APPLICATION_ALERTS || 'true').toLowerCase() === 'false') return;
 
             const regionalContacts = require('../notifications/regionalContacts.service');
-            const byTier = await regionalContacts.adminsForRegion(base.region);
+            // Delivery must see recent edits/new accounts even on another API
+            // worker whose dashboard roster cache has not expired yet.
+            const byTier = await regionalContacts.adminsForRegion(base.region, { fresh: true });
             const regional = tierReviews.TIER_ORDER
                 .flatMap((tier) => (byTier[tier] || []).map((admin) => ({ tier, admin })));
             // Without a state reviewer, the head office decides membership.
             // Include its actual accounts so new national regions are noticed.
             const office = (byTier.state || []).length ? []
-                : (await require('../admin/admin.repository').findActive())
+                : (await require('../admin/admin.repository').findActive({ fresh: true }))
                     .filter(admin => admin.role === 'super_admin')
                     .map(admin => ({ tier: 'super', admin }));
             const admins = [...office, ...regional].slice(0, 10);
@@ -1577,9 +1579,9 @@ class ApplicationService {
                 const adminRegion = [admin.block, admin.district, admin.state].filter(Boolean).join(', ');
                 await notificationService.dispatchInBackground('ADMIN_NEW_APPLICATION', {
                     name: admin.fullName || `${tier === 'super' ? 'Super' : regionalContacts.TIER_LABEL[tier]} Admin`,
-                    // Block admin addresses are sign-in ids, not mailboxes: they get
-                    // WhatsApp and the bell, never email. District/State are real inboxes.
-                    email: admin.notificationEmail || (tier === 'block' ? '' : admin.email),
+                    // Imported login aliases may not have mailboxes. Honour the
+                    // configured inbox; block logins alone never enable email.
+                    email: require('../admin/adminNotificationEmail').destinationFor(admin, { allowAccountEmail: tier !== 'block' }),
                     phone: admin.phoneNumber
                 }, {
                     ...base,

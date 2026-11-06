@@ -148,7 +148,7 @@ const ROW_PROJECTION = {
     _id: 1, role: 1, adminType: 1, fullName: 1, name: 1, email: 1,
     phoneNumber: 1, phone: 1, profilePhoto: 1, state: 1, district: 1, block: 1, meta: 1,
     isActive: 1, active: 1, createdVia: 1, mustResetPassword: 1,
-    parentAdminId: 1, notificationEmail: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
+    parentAdminId: 1, notificationEmail: 1, notificationEmailSource: 1, createdAt: 1, updatedAt: 1, lastLoginAt: 1
 };
 
 const escapeRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -284,8 +284,11 @@ const toAdminRow = (doc = {}, source = PRIMARY_COLLECTION) => {
         id: doc._id ? doc._id.toString() : '',
         source,
         fullName: doc.fullName || doc.name || '',
-        email: String(doc.email || '').toLowerCase(),
+        email: String(doc.email || '').toLowerCase().trim(),
         notificationEmail: String(doc.notificationEmail || '').toLowerCase().trim(),
+        notificationEmailSource: require('./adminNotificationEmail').sourceFor({
+            ...doc, role, state: doc.state || meta.state, district: doc.district || meta.district, block: doc.block || meta.block
+        }),
         phoneNumber: doc.phoneNumber || doc.phone || '',
         role,
         roleLabel: ROLE_LABELS[role] || 'Admin',
@@ -712,6 +715,7 @@ const toTierDocument = (doc = {}, adminId = '') => {
         adminId,
         email: String(doc.email || '').toLowerCase().trim(),
         notificationEmail: String(doc.notificationEmail || '').toLowerCase().trim(),
+        notificationEmailSource: require('./adminNotificationEmail').sourceFor(doc),
         passwordHash: doc.passwordHash || doc.password || '',
         fullName: String(doc.fullName || '').trim(),
         phoneNumber: String(doc.phoneNumber || doc.phone || '').trim(),

@@ -7,6 +7,12 @@ const { accountFor } = require('./emailAccounts');
 const { normalizeStatus } = require('../common/applicationStatus');
 const chatIntent = require('./chatIntent');
 const conversation = require('./conversationReply');
+const { ANDROID_APP_URL } = require('../../config/appLinks');
+
+const APP_JOURNEY_COMMANDS = new Set([
+    'LOGIN', 'RESET', 'STATUS', 'REGISTER', 'FORMS', 'PROFILE', 'CARD',
+    'PAYMENT', 'PAYMENT_ISSUE', 'PAID', 'RENEW', 'UPI', 'FEES', 'BENEFITS'
+]);
 
 /**
  * The inbound half of the WhatsApp bot.
@@ -224,10 +230,11 @@ const ambiguousReply = () => (
 
 const notRegisteredReply = () => (
     'We could not find an ACTIV account registered to this WhatsApp number.\n\n'
-    + `If you have an account under a different number, please sign in at ${config.frontendUrl} `
+    + `If you have an account under a different number, please sign in using the ACTIV app or at ${config.frontendUrl} `
     + 'and update your phone number.\n\n'
-    + `To join ACTIV, register at ${config.frontendUrl}/register\n\n`
-    + 'Then complete your personal details, business/student/aspirant details and declaration and submit the application. '
+    + `To join ACTIV, register in the app or at ${config.frontendUrl}/register\n\n`
+    + `Download the ACTIV Android app:\n${ANDROID_APP_URL}\n\n`
+    + 'In the app or on the website, complete your personal details, business/student/aspirant details and declaration and submit the application. '
     + 'After approval, you can pay for your eligible membership plan. Reply MEMBERSHIP to check your next step.'
 );
 
@@ -503,7 +510,7 @@ const composeReply = async(incoming, identity, context = {}) => {
                 : command ? notRegisteredReply()
                     : `Hello! I can help with ACTIV accounts, membership applications, payments and events. Tell me what you need to check.\n\nTo create an account:\n${config.frontendUrl}/register`;
     } else if (command === 'PAID') {
-        reply = 'If you paid through the website, check your payment status on your dashboard. '
+        reply = 'If you paid through the ACTIV app or website, check your payment status on your dashboard. '
             + 'For a direct UPI transfer, email the UTR/reference, amount, payment date and your registered phone number to member@activ.org.in. '
             + `The office will verify it before activation. Please do not pay twice.\n\n${config.frontendUrl}/member/application-status`;
     } else if (['STATUS', 'REGISTER', 'PAYMENT', 'RENEW', 'UPI'].includes(command)) {
@@ -520,6 +527,11 @@ const composeReply = async(incoming, identity, context = {}) => {
         reply = `Hello ${firstNameOf(identity.member.fullName)}! Welcome to ACTIV. You can ask me in normal sentences about membership, your application, payments or events. How can I help you?`;
     } else {
         reply = 'I’m here to help. Is this about your membership application, an event booking, a payment or signing in? Tell me a little more so I can guide you.';
+    }
+    const websiteUrl = String(config.frontendUrl || '').replace(/\/+$/, '');
+    if (reply && APP_JOURNEY_COMMANDS.has(command) && websiteUrl
+        && reply.includes(websiteUrl) && !reply.includes(ANDROID_APP_URL)) {
+        reply += `\n\nYou can also register, sign in and manage your membership in the ACTIV Android app:\n${ANDROID_APP_URL}`;
     }
     return { command: command || 'CLARIFY', reply };
 };

@@ -1,7 +1,6 @@
 const Policy = require('./appUpdate.model');
 const ApiError = require('../../core/utils/ApiError');
-const PACKAGE_NAME = 'in.activ.membership';
-const PLAY_URL = `https://play.google.com/store/apps/details?id=${PACKAGE_NAME}`;
+const { ANDROID_PACKAGE_NAME: PACKAGE_NAME, ANDROID_APP_URL: PLAY_URL } = require('../../config/appLinks');
 const DEFAULT_MESSAGE = 'Please update ACTIV to continue.';
 
 function project(row = {}) {

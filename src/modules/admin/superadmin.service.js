@@ -14,6 +14,7 @@ const regionService = require('../regions/region.service');
 const tierRouting = require('../common/tierRouting');
 const tierReviews = require('../common/tierReviews');
 const adminRosterPage = require('./adminRosterPage');
+const adminNotificationEmail = require('./adminNotificationEmail');
 
 const { buildApplicant, escapeRegex, LEVELS, classifyForLevel } = adminService;
 
@@ -1131,6 +1132,7 @@ class SuperAdminService {
         if (!fullName) throw ApiError.badRequest('Full name is required');
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw ApiError.badRequest('A valid email is required');
         if (password.length < 8) throw ApiError.badRequest('Password must be at least 8 characters');
+        const notificationRouting = adminNotificationEmail.forWrite({}, payload);
 
         if (await adminRepository.emailExists(email)) {
             throw ApiError.badRequest('An admin with this email already exists');
@@ -1146,6 +1148,7 @@ class SuperAdminService {
 
         const created = await adminRepository.insert({
             email,
+            ...notificationRouting,
             passwordHash,
             fullName,
             phoneNumber: String(payload.phoneNumber || '').trim(),
@@ -1355,6 +1358,7 @@ class SuperAdminService {
         const fullName = pick('fullName', existing.fullName);
         const email = pick('email', existing.email).toLowerCase();
         const phoneNumber = pick('phoneNumber', existing.phoneNumber);
+        const notificationRouting = adminNotificationEmail.forWrite(existing, { ...payload, email });
 
         if (!fullName) throw ApiError.badRequest('Full name is required');
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw ApiError.badRequest('A valid email is required');
@@ -1395,6 +1399,7 @@ class SuperAdminService {
         const update = {
             fullName,
             email,
+            ...notificationRouting,
             phoneNumber,
             role,
             state: region.state,
@@ -1433,6 +1438,8 @@ class SuperAdminService {
         const changed = [];
         if (fullName !== existing.fullName) changed.push('name');
         if (email !== existing.email) changed.push('email');
+        if (notificationRouting.notificationEmail !== existing.notificationEmail ||
+            notificationRouting.notificationEmailSource !== existing.notificationEmailSource) changed.push('notification email');
         if (role !== existing.role) changed.push('role');
         if (movingRegion) changed.push('region');
         if (nowActive !== existing.active) changed.push(nowActive ? 'reactivated' : 'deactivated');

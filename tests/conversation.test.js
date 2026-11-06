@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 mongoose.set('bufferCommands', false);
 const bot = require('../src/modules/notifications/botbeeWebhook.service');
 const plans = require('../src/modules/members/membershipplan.service');
+const { ANDROID_APP_URL } = require('../src/config/appLinks');
 const incomplete = { member: { fullName: 'Test Member', membershipStatus: 'pending' }, application: null };
 const pending = { ...incomplete, application: { status: 'Pending' } };
 const incoming = text => ({ from: '919999999999', text });
@@ -25,9 +26,20 @@ async function main() {
     assert.equal(check.command, 'STATUS');
     assert.match(check.reply, /not been submitted/);
     assert.doesNotMatch(check.reply, /could not match|Reply with one of/);
+    assert.ok(check.reply.includes(ANDROID_APP_URL), 'registered applicants can continue in the Android app');
+    for (const text of ['membership', 'register', 'How do I fill the form?', 'Can I login using Google?']) {
+        const onboarding = await bot.composeReply(incoming(text), null);
+        assert.ok(onboarding.reply.includes('/register'), `${text} keeps the website registration option`);
+        assert.equal(onboarding.reply.split(ANDROID_APP_URL).length - 1, 1, `${text} includes one app download link`);
+        assert.doesNotMatch(onboarding.reply, /Test Member/, 'unknown numbers receive no account details');
+    }
+    assert.match(bot.notRegisteredReply(), /app or on the website/);
+    assert.match(bot.notRegisteredReply(), /After approval/);
+    assert.match(bot.notRegisteredReply(), /Reply MEMBERSHIP/);
     const hello = await bot.composeReply(incoming('Hello sir'), incomplete);
     assert.match(hello.reply, /normal sentences/);
     assert.doesNotMatch(hello.reply, /not been submitted|payment page|approved/i);
+    assert.ok(!hello.reply.includes(ANDROID_APP_URL), 'ordinary greetings are not turned into app promotions');
     for (const identity of [null, incomplete, { ambiguous: true }, { unavailable: true }]) {
         assert.equal((await bot.composeReply(incoming('thank you sir'), identity, { previousCommand: null })).reply, null);
         assert.match((await bot.composeReply(incoming('thank you sir'), identity, { previousCommand: 'STATUS' })).reply, /welcome/);
@@ -53,6 +65,7 @@ async function main() {
     assert.match(forms.reply, /forms\/personal/); assert.match(forms.reply, /forms\/declaration/);
     const noPayment = await bot.composeReply(incoming('Please send direct UPI payment'), pending);
     assert.match(noPayment.reply, /No payment is due yet/); assert.doesNotMatch(noPayment.reply, /upi:\/\//);
+    assert.ok(noPayment.reply.includes(ANDROID_APP_URL), 'the app option does not bypass application approval');
     const followup = await bot.composeReply(incoming('send link'), pending, { previousCommand: 'UPI' });
     assert.equal(followup.command, 'UPI'); assert.match(followup.reply, /No payment is due yet/);
     const reset = await bot.composeReply(incoming('where to go'), incomplete, { previousCommand: 'RESET' });

@@ -9,6 +9,7 @@ const tierRouting = require('../common/tierRouting');
 const tierReviews = require('../common/tierReviews');
 const regionService = require('../regions/region.service');
 const adminRepository = require('./admin.repository');
+const adminNotificationEmail = require('./adminNotificationEmail');
 const cacheClient = require('../../core/cache/cacheClient');
 const { CACHE_KEYS } = require('../../core/cache/cacheKeys');
 
@@ -1785,9 +1786,13 @@ class AdminService {
             try {
                 const hit = await adminRepository.findRawByEmail(identifyingEmail);
                 if (hit) {
+                    const notificationRouting = email
+                        ? adminNotificationEmail.forWrite(adminRepository.toAdminRow(hit.doc, hit.source), { email })
+                        : {};
                     await adminRepository.updateById(hit, {
+                        ...notificationRouting,
                         ...(fullName ? { fullName } : {}),
-                        ...(email ? { email: email.toLowerCase() } : {}),
+                        ...(email ? { email: email.trim().toLowerCase() } : {}),
                         ...(typeof phoneNumber === 'string' ? { phoneNumber } : {}),
                         ...(block ? { block } : {}),
                         ...(district ? { district } : {}),

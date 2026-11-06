@@ -8,6 +8,7 @@ assert.equal(JSON.stringify(existing), before, 'existing credentials remain unto
 assert(!missing.some(a => key(a) === key(existing[0])));
 assert.equal(new Set(missing.map(a => a.email)).size, missing.length, 'every login address is unique across duplicate region names');
 assert(missing.every(a => a.notificationEmail === 'member@activ.org.in'));
+assert(missing.every(a => a.notificationEmailSource === 'provisioning_fallback'));
 const covered = new Set([...existing, ...missing].map(key));
 for (const s of source.states) {
     assert(covered.has(key({ role: 'state_admin', state: s.state })));

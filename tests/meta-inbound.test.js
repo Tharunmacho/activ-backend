@@ -13,6 +13,7 @@ const NotificationLog = require('../src/modules/notifications/notificationLog.mo
 const delivery = require('../src/modules/notifications/deliveryStatus.service');
 const Member = require('../src/modules/members/memberdetails.model');
 const Application = require('../src/modules/applications/application.model');
+const { ANDROID_APP_URL } = require('../src/config/appLinks');
 
 const sent = [];
 const logs = [];
@@ -95,6 +96,7 @@ async function main() {
     assert.equal([a, b].find(response => response.status === 200).headers['x-activ-bot-version'], 'conversational-v6');
     assert.equal(sent.length, 2, 'concurrent duplicate deliveries send one reply per actual message');
     assert.match(sent[0].text.body, /\/register/);
+    assert.ok(sent[0].text.body.includes(ANDROID_APP_URL), 'signed Meta replies include the Android registration option');
     assert.match(sent[1].text.body, /Welcome to ACTIV/);
     assert.doesNotMatch(sent[1].text.body, /did not recognise|Wrong format|10,000/);
     assert.equal(sent[0].context.message_id, 'first');
@@ -139,6 +141,20 @@ async function main() {
     assert.equal(rows.get('our-number-id:normal-human-chat').status, 'ignored');
     assert.equal((await post(normal)).status, 200);
     assert.equal(sent.length, beforeChat, 'ignored chats also stay quiet on webhook retries');
+    const botbee = require('../src/modules/notifications/botbee.service');
+    const originalBotbeeSend = botbee.sendTextMessage;
+    const legacyReplies = [];
+    botbee.sendTextMessage = async (to, text) => {
+        legacyReplies.push(text);
+        return { success: true, to, messageId: 'legacy-app-link', mock: true };
+    };
+    try {
+        const legacy = await bot.handleInbound({ from: '919999999999', text: 'membership', messageId: 'legacy-registration-app-link' });
+        assert.equal(legacy.sent.success, true);
+        assert.deepEqual(legacyReplies, [sent[0].text.body], 'BotBee and Meta use the same app and website guidance');
+    } finally {
+        botbee.sendTextMessage = originalBotbeeSend;
+    }
     await recoveryCases();
     console.log('Signed inbound routing, batched messages, duplicate protection, bounded preparation recovery, stale-worker fencing, accepted/partial-send protection, session window and account journeys passed.');
 }

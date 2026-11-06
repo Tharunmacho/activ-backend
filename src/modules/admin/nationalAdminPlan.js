@@ -74,7 +74,7 @@ function plan(existing = []) {
         if (covered.has(id)) return;
         const email = allocateEmail(row, emailOwners);
         covered.add(id); emailOwners.add(email);
-        missing.push({ ...row, email, fullName: `${row.block || row.district || row.state} ${row.role.replace('_admin', '')[0].toUpperCase()}${row.role.replace('_admin', '').slice(1)} Admin`, notificationEmail: 'member@activ.org.in' });
+        missing.push({ ...row, email, fullName: `${row.block || row.district || row.state} ${row.role.replace('_admin', '')[0].toUpperCase()}${row.role.replace('_admin', '').slice(1)} Admin`, notificationEmail: 'member@activ.org.in', notificationEmailSource: 'provisioning_fallback' });
     };
     for (const s of directory.states) {
         add({ role: 'state_admin', state: s.state, district: '', block: '' });

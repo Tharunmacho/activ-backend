@@ -1,6 +1,7 @@
 const config = require('../../config');
 const logger = require('../../config/logger');
 const adminRepository = require('../admin/admin.repository');
+const { destinationFor } = require('../admin/adminNotificationEmail');
 const { regionPattern } = require('../common/regionMatch');
 
 /**
@@ -62,8 +63,8 @@ const TIER_LABEL = {
 
 /**
  * A region name as an email local-part: `Thiruvallur` -> `thiruvallur`.
- *
- * Only used for the derived fallback address. Returns '' for a name that has no
+ * Kept for callers that display legacy address patterns, never for delivery.
+ * Returns '' for a name that has no
  * alphanumerics left after stripping, so a region called `—` cannot produce
  * `block.@activ.org.in`, which is not a deliverable address and which some
  * SMTP servers reject outright rather than bouncing.
@@ -107,7 +108,9 @@ const governs = (admin = {}, region = {}) => {
 /**
  * Every active, real admin who governs this region, keyed by tier.
  *
- * `findActive` reads the roster cache the admin dashboards already keep warm, so
+ * `findActive` normally reads the roster cache the admin dashboards keep warm;
+ * notification delivery passes { fresh: true } to see edited/new destinations.
+ * Without that flag,
  * this costs nothing on the request path in the normal case. It is also the
  * filtered roster — the ~7,700-row legacy scaffold is excluded unless a
  * deployment opts in — which matters here as much as it does for coverage: a
@@ -119,12 +122,12 @@ const governs = (admin = {}, region = {}) => {
  * an unreachable admin database must degrade to "no named contact" rather than
  * turn a completed action into a 500.
  */
-const adminsForRegion = async(region = {}) => {
+const adminsForRegion = async(region = {}, options = {}) => {
     const found = { block: [], district: [], state: [] };
 
     let roster = [];
     try {
-        roster = await adminRepository.findActive();
+        roster = await adminRepository.findActive(options);
     } catch (error) {
         logger.warn('Regional contact lookup could not read the admin roster', {
             error: error && error.message
@@ -136,6 +139,7 @@ const adminsForRegion = async(region = {}) => {
         const tier = TIER_ORDER.find((t) => ROLE_FOR_TIER[t] === admin.role);
         if (!tier) continue;              // super admins are not a regional contact
         if (!admin.email) continue;       // an address is the whole product here
+        if (!String(admin.state || '').trim()) continue;
         if (!governs(admin, region)) continue;
 
         found[tier].push(admin);
@@ -187,8 +191,8 @@ const resolveForRegion = async(region = {}) => {
             tier,
             tierLabel: TIER_LABEL[tier],
             regionName,
-            /** The account's own address when staffed; the derived one otherwise. */
-            email: (first && first.email) || derivedAddress(tier, regionName),
+            /** Configured inbox when staffed; no guessed mailbox otherwise. */
+            email: first ? destinationFor(first) : '',
             /** True only when a real account backs that address. */
             staffed: !!first,
             name: (first && first.fullName) || '',
