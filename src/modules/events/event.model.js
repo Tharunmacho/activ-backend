@@ -523,7 +523,7 @@ const eventSchema = new mongoose.Schema({
     },
     /**
      * After this instant the event stops accepting registrations. Null means
-     * "up until the event starts", which the service applies — not the schema,
+     * "three hours after the start, capped at event end", applied by the service,
      * because the cutoff has to move when the event's own date does.
      */
     registrationDeadline: { type: Date, default: null },

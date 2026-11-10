@@ -8,7 +8,7 @@ const {
     multiTargetViewerClause, multiTargetsViewer, targetsLabel, regionPattern
 } = require('../common/regionMatch');
 
-const { isPastEvent, eventPeriodClause } = require('./eventLifecycle');
+const { isPastEvent, eventPeriodClause, eventRegistrationClosesAt, isRegistrationClosed } = require('./eventLifecycle');
 const LIST_LIMIT = 100;
 
 /**
@@ -165,14 +165,15 @@ const sanitizeReminders = (value) => {
 /**
  * When registration closes.
  *
- * The stored deadline when there is one, otherwise the moment the event starts.
+ * The stored deadline when there is one, otherwise three hours after the start,
+ * capped at the event end.
  * Derived rather than stored so that moving the event moves the cutoff with it
  * — a stored default would keep pointing at the original date and quietly close
  * registration weeks early for a postponed event.
  */
 const registrationClosesAt = (doc = {}) => {
-    if (doc.registrationDeadline) return new Date(doc.registrationDeadline);
-    return doc.startAt ? new Date(doc.startAt) : null;
+    const cutoff = eventRegistrationClosesAt(doc);
+    return cutoff === null ? null : new Date(cutoff);
 };
 
 const toEvent = (doc = {}, extras = {}) => ({
@@ -1275,8 +1276,7 @@ class EventService {
             throw ApiError.badRequest('This event is not taking registrations');
         }
 
-        const closesAt = event.registrationClosesAt ? new Date(event.registrationClosesAt) : null;
-        if (closesAt && closesAt.getTime() < Date.now()) {
+        if (isRegistrationClosed(event)) {
             throw ApiError.badRequest('Registration for this event has closed');
         }
 

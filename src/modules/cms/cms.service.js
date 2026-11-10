@@ -279,7 +279,8 @@ const eventDetailUpdates = (payload = {}) => {
             update.registrationDeadline = null;
         } else {
             const parsed = new Date(raw);
-            if (!Number.isNaN(parsed.getTime())) update.registrationDeadline = parsed;
+            if (Number.isNaN(parsed.getTime())) throw ApiError.badRequest('Registration closing date and time is not valid');
+            update.registrationDeadline = parsed;
         }
     }
 

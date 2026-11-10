@@ -1,4 +1,4 @@
-const { isPastEvent, bookingHistoryCategory } = require('./eventLifecycle');
+const { isPastEvent, bookingHistoryCategory, eventRegistrationClosesAt, isRegistrationClosed } = require('./eventLifecycle');
 const { reminderOffsets, reminderReason, windowClosed } = require('./eventReminder');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -779,7 +779,7 @@ class EventBookingService {
             registrationNote: event.registrationNote || '',
             registrationFields: event.registrationFields || [],
             days: (event.days || []).map((day) => ({ date: day.date, startTime: day.startTime, endTime: day.endTime })),
-            registrationClosesAt: event.registrationClosesAt || event.registrationDeadline || null,
+            registrationClosesAt: eventRegistrationClosesAt(event) === null ? null : new Date(eventRegistrationClosesAt(event)),
 
             /*
              * Both rates, and which one applies to whoever is asking.
@@ -802,11 +802,7 @@ class EventBookingService {
 
     /** Booking closes at the deadline, event end, or archival, whichever comes first. */
     isClosed(event = {}) {
-        if (event.archivedAt || isPastEvent(event)) return true;
-        const closesAt = event.registrationClosesAt || event.registrationDeadline;
-        if (!closesAt) return false;
-        const at = new Date(closesAt);
-        return !Number.isNaN(at.getTime()) && at.getTime() <= Date.now();
+        return isRegistrationClosed(event);
     }
 
     // ==================================================================

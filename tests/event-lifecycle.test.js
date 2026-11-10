@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 mongoose.set('bufferCommands', false);
 require('../src/modules/admin/admin.repository').findActive = async () => [];
-const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause, bookingHistoryCategory } = require('../src/modules/events/eventLifecycle');
+const { eventEndsAt, isPastEvent, isUpcomingEvent, eventPeriodClause, bookingHistoryCategory, eventRegistrationClosesAt, isRegistrationClosed } = require('../src/modules/events/eventLifecycle');
 const at = Date.parse('2026-10-12T10:00:00+05:30');
 const event = { _id: new mongoose.Types.ObjectId(), title: 'Retained conference', status: 'published', channel: 'public', audience: 'all', startAt: new Date('2026-10-10T09:00:00+05:30'), endAt: new Date('2026-10-10T17:00:00+05:30'), registrationEnabled: true };
 const untouched = { bookings: [{ amount: 1000, paid: true }], registrations: [{ paid: true }], attendance: [{ checkedIn: true }] };
@@ -24,6 +24,23 @@ Event.findByIdAndDelete = Event.deleteOne = Registration.deleteMany = Booking.de
 require('../src/modules/audit/audit.service').record = async () => {};
 
 async function main() {
+    for (const mode of ['online', 'offline']) {
+        const live = { mode, registrationEnabled: true, startAt: '2026-11-10T15:00:00+05:30', endAt: '2026-11-10T20:00:00+05:30' };
+        const start = Date.parse(live.startAt), cutoff = Date.parse('2026-11-10T18:00:00+05:30');
+        assert.equal(eventRegistrationClosesAt(live), cutoff);
+        assert.equal(isRegistrationClosed(live, start), false, mode + ' registration stays open at start');
+        assert.equal(isRegistrationClosed(live, cutoff - 1), false);
+        assert.equal(isRegistrationClosed(live, cutoff), true, 'exact default deadline closes');
+        assert.equal(eventRegistrationClosesAt({ ...live, endAt: '2026-11-10T16:00:00+05:30' }), Date.parse('2026-11-10T16:00:00+05:30'));
+        const extended = { ...live, registrationDeadline: '2026-11-10T19:30:00+05:30' };
+        assert.equal(isRegistrationClosed(extended, cutoff), false, 'admin may extend during event');
+        assert.equal(isRegistrationClosed({ ...extended, registrationEnabled: false }, start), true, 'manual close wins');
+        assert.equal(eventRegistrationClosesAt({ ...live, registrationDeadline: '2026-11-11T19:00:00+05:30' }), Date.parse(live.endAt));
+        assert.equal(isRegistrationClosed({ ...live, registrationDeadline: live.startAt }, start), true, 'explicit early close preserved');
+        assert.equal(eventRegistrationClosesAt({ ...live, startAt: '2026-11-10T16:00:00+05:30' }), cutoff + 3600000, 'default moves with start');
+    }
+    assert.equal(eventRegistrationClosesAt({ startAt: '2026-11-10T23:00:00+05:30' }), Date.parse('2026-11-11T00:00:00+05:30'), 'missing end respects final IST day');
+    assert.equal(eventRegistrationClosesAt({ startAt: 'invalid' }), null);
     assert.equal(isPastEvent(event, Date.parse(event.endAt) - 1), false);
     assert.equal(isPastEvent(event, Date.parse(event.endAt)), true);
     assert.equal(bookingHistoryCategory(event, Date.parse(event.endAt) - 1), 'current');
@@ -43,6 +60,10 @@ async function main() {
     service.myRegistrationsFor = async () => ({});
     const cms = require('../src/modules/cms/cms.service');
     const bookingService = require('../src/modules/events/eventbooking.service');
+    const live = { startAt: new Date(Date.now() - 3600000), endAt: new Date(Date.now() + 5 * 3600000), registrationEnabled: true };
+    assert.equal(bookingService.isClosed(live), false);
+    assert.equal(service.registrationClosesAt(live).getTime(), live.startAt.getTime() + 3 * 3600000);
+    assert.equal(service.toEvent(live).registrationClosesAt.getTime(), live.startAt.getTime() + 3 * 3600000, 'member and CMS mapper expose the effective deadline');
     assert.equal(bookingService.isClosed(event), true, 'completed event cannot take new bookings');
     const result = await service.deleteEvent(String(event._id), { role: 'super_admin' });
     assert(result.archived && result.historyRetained);

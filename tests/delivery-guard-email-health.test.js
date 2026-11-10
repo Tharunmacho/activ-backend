@@ -7,6 +7,13 @@ const stub = (file, exports) => {
 };
 const logs = [], verified = [], claimed = [], retried = [];
 let outcomes;
+let sendingHealth = {};
+stub('modules/notifications/emailSendingHealth', {
+    emailSendingHealth: async category => {
+        if (sendingHealth[category] instanceof Error) throw sendingHealth[category];
+        return sendingHealth[category] || { sendingBlocked: false };
+    },
+});
 stub('config/logger', {
     error: (...args) => logs.push(args), info: (...args) => logs.push(args), warn() {},
 });
@@ -97,6 +104,20 @@ async function main() {
     assert.ok(logs.some(args => args[0].includes('Events email recovered')));
     assert.ok(logs.some(args => args[0].includes('Membership email recovered')));
     assert.ok(!retried.includes('already-accepted'));
+    sendingHealth = { events: { sendingBlocked: true, error: 'Sending paused for this account', lastRejectedAt: now } };
+    const paused = await guard.checkEmail();
+    assert.equal(paused.ok, false, 'successful SMTP login cannot hide a provider sending restriction');
+    assert.equal(paused.accounts[0].authenticated, true);
+    assert.equal(paused.accounts[0].sendingBlocked, true);
+    assert.equal(paused.accounts[1].ok, true);
+    assert.match(paused.error, /Sending paused/);
+    sendingHealth = { events: new Error('private database details') };
+    const unknown = await guard.checkEmail();
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.error, /sending status could not be checked/);
+    assert.ok(!JSON.stringify(unknown).includes('private database details'));
+    sendingHealth = {};
+    assert.equal((await guard.checkEmail()).ok, true, 'later confirmed sending recovery clears the restriction');
     console.log('PASS: independent event/member SMTP health, isolated retry eligibility, safe legacy-compatible health, verification exceptions and recovery; no provider or database calls.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

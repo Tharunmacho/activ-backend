@@ -36,6 +36,8 @@ check('spam restriction in lastError overrides a generic failureReason', !isHeal
 check('transient wording cannot override a webhook spam restriction', !isHealable({ failureReason: '(#131048) Spam rate limit hit', lastError: 'Try again later' }));
 check('throughput code still heals', isHealable({ failureCode: 130429, lastError: 'Rate limit hit' }));
 check('pair rate code still heals', isHealable({ failureCode: 131056, lastError: 'Rate limit hit' }));
+check('SES account pause requires review even with temporary wording', !isHealable(row('554 Sending paused for this account. Try again later.')));
+check('SES suspension requires review', !isHealable(row('Account suspended. Temporarily unable to send.')));
 
 console.log('\nnever retried');
 check('not on WhatsApp 131026', !isHealable(row('(#131026) Message undeliverable')));

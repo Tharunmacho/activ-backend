@@ -224,7 +224,34 @@ async function main() {
     for (let i = HEADER_ROW + 1; i <= people.rowCount; i++) {
         for (const column of [4, 5, 6]) assert(people.getRow(i).getCell(column).value, 'name, phone and email must be present');
     }
-    console.log('PASS: ' + checks + ' real API requests; paid/unpaid eligibility and prices, free/paid checkout, member history, date transitions, both delete routes, unchanged retained records, exports and missing-event payment protection.');
+    require('../src/modules/events/eventChanges.service').announceRegistration = async () => {};
+    for (const [index, mode] of ['online', 'offline'].entries()) {
+        const started = await event('Live registration ' + mode, { mode,
+            startAt: new Date(Date.now() - 3600000), endAt: new Date(Date.now() + 5 * 3600000) });
+        const route = '/event-bookings/event/' + started._id;
+        const page = await request(route, { token: '' });
+        assert.equal(page.closed, false, 'ongoing ' + mode + ' event accepts registrations');
+        assert.equal(Date.parse(page.registrationClosesAt), started.startAt.getTime() + 3 * 3600000);
+        await request(route, { token: '', method: 'POST', status: 201, body: person(700 + index) });
+        await request('/events/' + started._id + '/register', { token: members.unpaid.token, method: 'POST', status: 201, body: { memberName: 'Live member', phone: '9000000800', email: 'live@example.test' } });
+        await request('/cms/events/' + started._id, { method: 'PUT', body: { registrationEnabled: false } });
+        await request(route, { token: '', method: 'POST', status: 400, body: person(710 + index) });
+        await request('/events/' + started._id + '/register', { token: members.paid.token, method: 'POST', status: 400, body: {} });
+        const earlier = new Date(Date.now() - 1000).toISOString();
+        await request('/cms/events/' + started._id, { method: 'PUT', body: { registrationEnabled: true, registrationDeadline: earlier } });
+        assert.equal((await request(route, { token: '' })).closed, true);
+        await request(route, { token: '', method: 'POST', status: 400, body: person(720 + index) });
+        const later = new Date(Date.now() + 4 * 3600000).toISOString();
+        await request('/cms/events/' + started._id, { method: 'PUT', body: { registrationDeadline: later } });
+        const reopened = await request(route, { token: '' });
+        assert.equal(Date.parse(reopened.registrationClosesAt), Date.parse(later));
+        await request(route, { token: '', method: 'POST', status: 201, body: person(730 + index) });
+        await request('/cms/events/' + started._id, { method: 'PUT', body: { registrationDeadline: '' } });
+        const reset = await request(route, { token: '' });
+        assert.equal(Date.parse(reset.registrationClosesAt), started.startAt.getTime() + 3 * 3600000, 'blank restores three-hour default');
+        await request('/cms/events/' + started._id, { method: 'PUT', status: 400, body: { registrationDeadline: 'invalid' } });
+    }
+    console.log('PASS: ' + checks + ' real API requests; paid/unpaid eligibility and prices, free/paid checkout, member history, date transitions, both delete routes, unchanged retained records, exports, ongoing online/offline registration, manual closure/reopening and three-hour defaults.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

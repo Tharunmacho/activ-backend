@@ -31,6 +31,21 @@ const eventPhase = (event = {}, now = Date.now()) => {
     return start !== null && start <= Number(now) ? 'live' : 'upcoming';
 };
 
+// A blank deadline follows the event when it is rescheduled. An explicit
+// deadline can extend registration during the event, but never beyond its end.
+const eventRegistrationClosesAt = (event = {}) => {
+    const start = instant(event.startAt);
+    const cutoff = instant(event.registrationDeadline) ?? instant(event.registrationClosesAt)
+        ?? (start === null ? null : start + 3 * 60 * 60 * 1000);
+    const end = eventEndsAt(event);
+    return cutoff === null ? end : end === null ? cutoff : Math.min(cutoff, end);
+};
+const isRegistrationClosed = (event = {}, now = Date.now()) => {
+    const cutoff = eventRegistrationClosesAt(event);
+    return !!event.archivedAt || event.registrationEnabled === false
+        || (cutoff !== null && cutoff <= Number(now));
+};
+
 // Mongo equivalent of eventEndsAt, applied before limit so historical records
 // cannot crowd a forthcoming event out of a public response.
 const endingExpression = {
@@ -51,4 +66,4 @@ const eventPeriodClause = (period, now = new Date()) => ({
         : { $or: [{ $eq: [endingExpression, null] }, { $gt: [endingExpression, now] }] },
 });
 
-module.exports = { eventEndsAt, isPastEvent, isUpcomingEvent, eventPhase, eventPeriodClause, bookingHistoryCategory };
+module.exports = { eventEndsAt, isPastEvent, isUpcomingEvent, eventPhase, eventPeriodClause, bookingHistoryCategory, eventRegistrationClosesAt, isRegistrationClosed };

@@ -55,7 +55,7 @@ const HEALABLE = new RegExp([
 // send. This wins over generic "rate" / "temporarily" wording, including when
 // the webhook supplies a numeric code separately from its human-readable text.
 // Explicit individual resends remain available after provider remediation.
-const PROVIDER_RESTRICTED = /\b131048\b|\bspam[\s-]+rate(?:[\s-]+limit)?\b/i;
+const PROVIDER_RESTRICTED = /\b131048\b|\bspam[\s-]+rate(?:[\s-]+limit)?\b|sending(?:\s+is)?\s+(?:paused|disabled)|account.{0,40}(?:paused|suspended)/i;
 const isProviderRestricted = (row = {}) => PROVIDER_RESTRICTED.test(
     [row.failureCode, row.failureReason, row.lastError].filter(value => value !== undefined && value !== null).join(' ')
 );
@@ -92,16 +92,29 @@ const checkEmail = async() => {
         let result;
         try {
             result = await emailService.verifyConnection(category);
+            if (result.ok) {
+                try {
+                    const sending = await require('./emailSendingHealth').emailSendingHealth(category);
+                    result = { ...result, authenticated: true, ...sending,
+                        ok: !sending.sendingBlocked };
+                } catch {
+                    result = { ...result, ok: false, authenticated: true,
+                        error: 'SMTP login succeeded, but recent sending status could not be checked. Refresh delivery health before retrying failed messages.' };
+                }
+            }
         } catch (err) {
             result = { ok: false, configured: true, error: err && err.message };
         }
         const account = {
             category, ok: !!result.ok, configured: result.configured !== false,
             checkedAt: new Date(), error: result.ok ? '' : String(result.error || 'Unknown error'),
+            authenticated: result.authenticated === true || result.ok === true,
+            sendingBlocked: result.sendingBlocked === true,
+            ...(result.lastRejectedAt ? { lastRejectedAt: result.lastRejectedAt } : {}),
         };
         const wasOk = previous.find(item => item.category === category)?.ok;
         if (!account.ok && wasOk !== false) {
-            logger.error(`${category === 'events' ? 'Events' : 'Membership'} email is unavailable. Check this sender's SMTP settings.`,
+            logger.error(`${category === 'events' ? 'Events' : 'Membership'} email is unavailable. Check this sender's delivery health.`,
                 { category, error: account.error });
         } else if (account.ok && wasOk === false) {
             logger.info(`${category === 'events' ? 'Events' : 'Membership'} email recovered; eligible failed messages can be retried.`);
